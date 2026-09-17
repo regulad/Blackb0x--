@@ -79,6 +79,10 @@ extern "C" {
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+#include <sys/wait.h>
+#include <cerrno>
+
 namespace fs = std::filesystem;
 
 // Same derivation as bake-all-ramdisks' knownFirmwareTargets(): read the
@@ -163,8 +167,8 @@ static bool publish(const std::string& from, const std::string& toDir, const std
     return true;
 }
 
-static TargetResult bakeOne(const std::string& device, const std::string& buildID,
-                             const std::string& outRoot, bool force) {
+static TargetResult bakeOneInProcess(const std::string& device, const std::string& buildID,
+                                      const std::string& outRoot, bool force) {
     TargetResult result;
     result.device = device;
     result.buildID = buildID;
@@ -277,6 +281,100 @@ static TargetResult bakeOne(const std::string& device, const std::string& buildI
     printf("iBSS %s, iBEC %s, kernel %s, devicetree %s%s%s\n", mark(result.iBSS), mark(result.iBEC),
            mark(result.kernel), mark(result.deviceTree), result.note.empty() ? "" : " -- ",
            result.note.c_str());
+    return result;
+}
+
+
+// Runs one target in a forked child.
+//
+// Not defensive programming for its own sake -- this is load-bearing. A full
+// sweep drives the vendored decrypt()/patch_kernel() code 4x per target over
+// dozens of targets in one process, and it does not survive that: a
+// 29-target AppleTV2,1 run died partway through with no summary at all,
+// while every target it died on patches fine when run by itself in a fresh
+// process. Something in that code (which has already produced one confirmed
+// NULL-deref crash and carries a documented history of heap corruption) does
+// not tolerate being reused across many inputs.
+//
+// Rather than chase that through third_party, each target gets its own
+// process. A crash then costs exactly one row instead of the whole run and
+// everything after it, which is the difference between this tool being
+// usable for a full sweep and not. It also means a crash is REPORTED -- the
+// parent sees the signal and says so -- instead of manifesting as a log that
+// just stops.
+//
+// The child writes its result back as one line: six flags, a tab, then the
+// note. Deliberately trivial to parse; there is no reason for a richer
+// channel when the parent only needs what the summary table prints.
+static TargetResult bakeOneForked(const std::string& device, const std::string& buildID,
+                                   const std::string& outRoot, bool force) {
+    TargetResult result;
+    result.device = device;
+    result.buildID = buildID;
+
+    int fds[2];
+    if (pipe(fds) != 0) {
+        result.note = std::string("pipe() failed: ") + strerror(errno);
+        printf("%s\n", result.note.c_str());
+        return result;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        result.note = std::string("fork() failed: ") + strerror(errno);
+        printf("%s\n", result.note.c_str());
+        return result;
+    }
+
+    if (pid == 0) {
+        close(fds[0]);
+        TargetResult child = bakeOneInProcess(device, buildID, outRoot, force);
+        std::string line = std::string(child.downloaded ? "1" : "0") + (child.iBSS ? "1" : "0") +
+                           (child.iBEC ? "1" : "0") + (child.kernel ? "1" : "0") +
+                           (child.deviceTree ? "1" : "0") + (child.skipped ? "1" : "0") + "\t" + child.note +
+                           "\n";
+        ssize_t ignored = write(fds[1], line.c_str(), line.size());
+        (void)ignored;
+        close(fds[1]);
+        // _exit, not exit: the child must not run atexit handlers or flush
+        // the stdio buffers it inherited from the parent, or every line the
+        // parent had buffered gets duplicated into the output.
+        _exit(0);
+    }
+
+    close(fds[1]);
+    std::string payload;
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fds[0], buf, sizeof(buf))) > 0) payload.append(buf, (size_t)n);
+    close(fds[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (WIFSIGNALED(status)) {
+        result.note = "child killed by signal " + std::to_string(WTERMSIG(status)) +
+                      " -- this target crashes the patch code; run it alone to investigate";
+        printf("CRASHED (signal %d)\n", WTERMSIG(status));
+        return result;
+    }
+
+    size_t tab = payload.find('\t');
+    if (payload.size() < 6 || tab == std::string::npos) {
+        result.note = "child produced no usable result (exit " + std::to_string(WEXITSTATUS(status)) + ")";
+        printf("no result from child\n");
+        return result;
+    }
+    result.downloaded = payload[0] == '1';
+    result.iBSS = payload[1] == '1';
+    result.iBEC = payload[2] == '1';
+    result.kernel = payload[3] == '1';
+    result.deviceTree = payload[4] == '1';
+    result.skipped = payload[5] == '1';
+    result.note = payload.substr(tab + 1);
+    if (!result.note.empty() && result.note.back() == '\n') result.note.pop_back();
     return result;
 }
 
@@ -408,7 +506,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < targets.size(); i++) {
         printf("[%zu/%zu] %s %s: ", i + 1, targets.size(), targets[i].first.c_str(), targets[i].second.c_str());
         fflush(stdout);
-        results.push_back(bakeOne(targets[i].first, targets[i].second, outRoot, force));
+        results.push_back(bakeOneForked(targets[i].first, targets[i].second, outRoot, force));
         if (stopEarly && !results.back().complete()) {
             printf("\n--stop-early: stopping at the first incomplete target.\n");
             break;

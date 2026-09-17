@@ -3238,3 +3238,72 @@ without `asr` -- but that default has **no** `amfi=0xff` or
 the boot would fail with nothing in the log to explain why. There is now an
 `extraCommandMustSucceed` flag, set only by `sendKernelCache()`; the
 `getenv ramdisk-delay` callers keep their fire-and-forget semantics.
+
+## Answering "did you gate `-k` for everything <6?": no, and the better fix
+
+The answer was **no** -- `-k` was passed unconditionally, and pre-iOS-6 iBEC
+patching therefore hard-failed. That is fixed now, but in the fork rather
+than with a caller-side version gate.
+
+`patch_kaslr()` (regulad/iBoot32Patcher@`blackb0x`, commit `22a114a`) now
+distinguishes two cases it previously collapsed into one failure:
+
+- `os_vers < 6`: **success, nothing to do.** KASLR did not exist before iOS
+  6, so there is no slide-applying branch to NOP out. Reporting failure made
+  any caller that asks for the patch unconditionally -- the only sane way to
+  ask for it -- unable to patch an iOS 4/5-era iBEC at all, over a patch
+  that was never meaningful there.
+- unrecognized / newer: still a failure, kept deliberately distinct so
+  "this tool has no KASLR patch for this iBoot" cannot become a silent
+  no-op.
+
+Fixing it here rather than in `Patcher.cpp` keeps the caller honest: it
+still asks for KASLR unconditionally and the patcher answers truthfully for
+the build in front of it, instead of the caller second-guessing iBoot
+versions it cannot see.
+
+### Full AppleTV2,1 sweep after the fix
+
+29/29 targets, no crashes. iBEC now patches on all eight iOS 5-era builds
+that previously failed (`9A334v`, `9A335a`, `9A336a`, `9A405l`, `9A406a`,
+`9B179b`, `9B206f`, `9B830`).
+
+**Exactly one genuine iBEC patch failure remains: `8M89`** (iBoot-931, the
+only 4.x-era build in the set), and it is `patch_ticket_check`, not KASLR:
+
+```
+patch_ticket_check: Unable to find 3 iboot_str_3_xref!
+main: Error doing patch_ticket_check()!
+```
+
+That is precisely what the old `path.find("4.")` heuristic -- the one
+removed when `-t` became unconditional -- was working around. The comment
+written at the time predicted this outcome and argued it was the better one:
+failing loudly beats silently shipping an iBEC that still enforces a ticket
+check. It now has a measured scope: one build, on a device/firmware this
+project does not target.
+
+The other six `FAIL` rows on that sweep are all iOS 4.x-era `8C*`/`8F*`
+builds Apple no longer hosts at all, which the note column distinguishes as
+download failures.
+
+### The sweep had to be made crash-proof first
+
+Two consecutive full AppleTV2,1 runs died partway through -- both at target
+23 of 29 -- producing no summary at all, while every target they died on
+patches fine when run by itself in a fresh process. A sweep drives the
+vendored `decrypt()`/`patch_kernel()` code four times per target across
+dozens of targets in one process, and that code does not tolerate it: it has
+already produced one confirmed NULL-deref crash and carries a documented
+history of heap corruption.
+
+Rather than chase that through `third_party`, each target now runs in a
+**forked child** (`bakeOneForked()`), reporting its result back over a pipe
+as one line. A crash costs exactly one row instead of the run and everything
+after it, and -- more usefully -- the parent sees the signal and prints
+`CRASHED (signal N)` instead of the run just silently stopping. The child
+exits via `_exit()` specifically so it does not flush inherited stdio
+buffers and duplicate the parent's output.
+
+This is what made a complete 29/29 table possible at all, so it is
+load-bearing rather than defensive.

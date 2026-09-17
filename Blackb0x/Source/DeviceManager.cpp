@@ -1405,7 +1405,8 @@ int DeviceManager::sendiBEC(const std::string& iBECpath, uint64_t ecid) {
 // (nullptr, no extra command sent).
 static int sendFileThenCommand(irecv_client_t client, const char* what, const std::string& path,
                                 const char* command, bool keepOpen = false, uint8_t commandBreq = 0,
-                                bool dnloadFinish = false, const char* extraCommandBeforeMain = nullptr) {
+                                bool dnloadFinish = false, const char* extraCommandBeforeMain = nullptr,
+                                bool extraCommandMustSucceed = false) {
     if (!client) {
         fprintf(stderr, "%s: device did not reconnect for %s\n", what, path.c_str());
         return -1;
@@ -1420,7 +1421,24 @@ static int sendFileThenCommand(irecv_client_t client, const char* what, const st
         irecv_usb_control_transfer(client, 0x21, 1, 0, 0, nullptr, 0, 5000);
     }
     if (extraCommandBeforeMain) {
-        irecv_send_command(client, extraCommandBeforeMain);
+        // "getenv ramdisk-delay" is genuinely fire-and-forget -- real
+        // idevicerestore ignores its result too, and nothing depends on it.
+        // "setenv boot-args ..." is not: it is the ONLY thing that puts
+        // rd=md0 and the AMFI/code-signing args in front of the kernel now
+        // that patch_boot_args() is no longer used. If it silently fails,
+        // iBoot falls back to its own compiled-in default
+        // ("rd=md0 nand-enable-reformat=1 -progress"), which has no
+        // amfi=0xff/cs_enforcement_disable=1 at all -- so entrypoint.c, an
+        // unsigned binary, could not exec as PID 1 and the boot would fail
+        // for a reason nothing in the log would explain.
+        irecv_error_t extraErr = irecv_send_command(client, extraCommandBeforeMain);
+        if (extraErr != IRECV_E_SUCCESS) {
+            fprintf(stderr, "%s: '%s' failed: %s\n", what, extraCommandBeforeMain, irecv_strerror(extraErr));
+            if (extraCommandMustSucceed) {
+                if (!keepOpen) irecv_close(client);
+                return -1;
+            }
+        }
     }
     err = irecv_send_command_breq(client, command, commandBreq);
     if (err != IRECV_E_SUCCESS) {
@@ -1650,11 +1668,36 @@ static bool checkDeviceLeftRecoveryModeAfterBoot(uint64_t ecid) {
 //                              checkDeviceLeftRecoveryModeAfterBoot() above),
 //                              and free.
 //   pio-error=0                carried over from the original app's args.
-// Notably absent: nand-enable-reformat=1, which the stock RESTORE path sets
-// and which must never appear here -- this boot plants files on the existing
-// filesystem, it does not reformat it. Also absent: anything about a
-// jailbroken userspace; the ramdisk boot is only a vehicle for the file
-// writes, so there is nothing further to ask the kernel for.
+// Notably absent: nand-enable-reformat=1, and the reason is NOT that it
+// would reformat anything here. Researched rather than assumed: that arg
+// only AUTHORIZES a reformat; the format itself is performed by asr under
+// restored during a real restore. This ramdisk runs entrypoint.c as PID 1
+// and never starts restored or asr, so nothing would invoke a format and
+// the arg would simply be inert.
+//
+// It is left out because the closest real-world reference for this exact
+// job says to leave it out. Legacy-iOS-Kit uses two different boot-arg sets
+// on 32-bit devices: its SSH-ramdisk flow (boot a ramdisk, poke at the
+// existing filesystem -- the same shape as what this does) uses
+// "rd=md0 -v amfi=0xff amfi_get_out_of_my_way=1 cs_enforcement_disable=1
+// pio-error=0", with no reformat arg, while its restore/downgrade flow adds
+// nand-enable-reformat=1. The set above is that SSH-ramdisk string, modulo
+// ordering.
+//
+// Worth knowing if flash access ever turns out to be the problem: the arg
+// IS load-bearing on some chips, where the restore ramdisk otherwise fails
+// to bring the flash stack up at all. SSHRD_Script appends
+// "nand-enable-reformat=1 -restore" for exactly three CPIDs -- 0x8960 (A7),
+// 0x7000 and 0x7001 (A8). This project's chip is 0x8947, which is not among
+// them, and no A5-specific requirement is documented anywhere. So if
+// entrypoint.c ever boots but cannot see or mount the data partition, this
+// is a cheap thing to try before anything expensive -- it cannot format
+// without asr, and the only evidence against it is that the 32-bit
+// reference tooling does not use it here.
+//
+// Also absent: anything about a jailbroken userspace; the ramdisk boot is
+// only a vehicle for the file writes, so there is nothing further to ask
+// the kernel for.
 static const char* const kRamdiskBootArgs =
     "setenv boot-args rd=md0 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
 int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid) {
@@ -1670,7 +1713,7 @@ int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t
     // and the same order sendStockRestoreTail() below already follows.
     fprintf(stderr, "sendKernelCache: %s\n", kRamdiskBootArgs);
     int result = sendFileThenCommand(client, "sendKernelCache", KernelCache_Path, "bootx", false, 1, true,
-                                      kRamdiskBootArgs);
+                                      kRamdiskBootArgs, /*extraCommandMustSucceed=*/true);
     if (result == 0 && !checkDeviceLeftRecoveryModeAfterBoot(ecid)) {
         result = -1;
     }

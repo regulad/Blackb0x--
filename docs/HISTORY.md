@@ -3172,3 +3172,69 @@ since a gate is exactly the kind of conditional that hid the `-t` problem.
 If pre-6 AppleTV2,1 builds ever need to patch cleanly, the honest fix is a
 `patch_kaslr()` that reports "nothing to do" for pre-6 iBoot instead of
 failure — a change to the fork, not a caller-side heuristic.
+
+## What `nand-enable-reformat=1` actually does, and a correction
+
+An earlier note in this file justified omitting `nand-enable-reformat=1`
+from the ramdisk boot-args on the grounds that it "must never appear here"
+because the boot "plants files on the existing filesystem, it does not
+reformat it". **That reasoning was wrong** and is corrected here rather than
+edited away, since it was stated as fact without being checked.
+
+What the arg actually does, researched properly:
+
+- **It only AUTHORIZES a reformat. It does not perform one.** The format and
+  filesystem imaging are done by `asr` running under `restored` during a
+  real restore; the boot-arg merely permits that step. idevicerestore's
+  `recovery_enter_restore()` sets it for every iOS restore
+  (`rd=md0 nand-enable-reformat=1 -progress`, plus `-restore` on iOS 10+ and
+  for macOS variants), and Apple's own PurpleRestore exposes it as a
+  default in its "Restore Boot-Args" field.
+- This project's ramdisk runs `entrypoint.c` as PID 1 and never starts
+  `restored` or `asr`, so nothing would invoke a format and the arg would
+  be **inert** here, not destructive.
+- **It is genuinely load-bearing on some chips**, which is the opposite of
+  the original claim: without it the restore ramdisk can fail to bring the
+  flash stack up at all. SSHRD_Script appends
+  `nand-enable-reformat=1 -restore` for exactly three CPIDs -- `0x8960`
+  (A7), `0x7000` and `0x7001` (A8). This project's chip is `0x8947`, which
+  is not among them, and no A5-specific requirement is documented anywhere.
+
+So why leave it out? Because the closest real-world reference for this exact
+job leaves it out. **Legacy-iOS-Kit uses two different boot-arg sets on
+32-bit devices**, and the split maps precisely onto the distinction that
+matters here:
+
+- SSH-ramdisk flow (boot a ramdisk, work on the existing filesystem -- the
+  same shape as what blackb0x does):
+  `rd=md0 -v amfi=0xff amfi_get_out_of_my_way=1 cs_enforcement_disable=1 pio-error=0`
+- Restore/downgrade flow: adds `nand-enable-reformat=1`.
+
+`kRamdiskBootArgs` is that SSH-ramdisk string modulo argument ordering,
+which is a useful independent check on a value that had been arrived at from
+first principles.
+
+**If `entrypoint.c` ever boots but cannot see or mount the data partition,
+adding `nand-enable-reformat=1` is a cheap first thing to try** -- it cannot
+format anything without `asr`, and the only evidence against it is that the
+32-bit reference tooling does not use it for this case. Also worth knowing
+from the same source: 32-bit devices on iOS 9+ are documented as sometimes
+having trouble mounting `/dev/disk0s1s2` at all, with `fsck_hfs -f` as the
+workaround.
+
+### The real defect this turned up
+
+`sendFileThenCommand()` **ignored `irecv_send_command()`'s return value** for
+its `extraCommandBeforeMain`. That was fine when the only user was
+`getenv ramdisk-delay` (fire-and-forget, as in real idevicerestore), but
+`setenv boot-args ...` now goes through the same hook, and it is the only
+thing putting `rd=md0` and the AMFI/code-signing args in front of the
+kernel now that `patch_boot_args()` is gone.
+
+A silent failure there is not destructive -- iBoot would fall back to its own
+compiled-in `rd=md0 nand-enable-reformat=1 -progress`, which formats nothing
+without `asr` -- but that default has **no** `amfi=0xff` or
+`cs_enforcement_disable=1`, so `entrypoint.c` could not exec as PID 1 and
+the boot would fail with nothing in the log to explain why. There is now an
+`extraCommandMustSucceed` flag, set only by `sendKernelCache()`; the
+`getenv ramdisk-delay` callers keep their fire-and-forget semantics.

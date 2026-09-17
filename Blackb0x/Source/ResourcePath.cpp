@@ -97,6 +97,15 @@ std::string resolveBakeAllRamdisksPath() {
     return "bake-all-ramdisks";
 }
 
+std::string resolveIBoot32PatcherPath() {
+    if (const char* override_ = getenv("BLACKB0X_IBOOT32PATCHER")) {
+        return std::string(override_);
+    }
+    std::string dir = resolveOwnExecutableDir();
+    if (!dir.empty()) return dir + "/iBoot32Patcher";
+    return "iBoot32Patcher";
+}
+
 std::string resolveDebsPath() {
     if (const char* override_ = getenv("BLACKB0X_DEBS_DIR")) {
         return std::string(override_);

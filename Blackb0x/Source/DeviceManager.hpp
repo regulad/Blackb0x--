@@ -140,7 +140,13 @@ public:
                  const std::string& buildID = "");
     int sendiBEC(const std::string& path, uint64_t ecid);
     int sendRamdisk(const std::string& path, uint64_t ecid);
-    int sendKernelCache(const std::string& path, uint64_t ecid);
+    // ramdiskBoot: true when a Ramdisk was actually sent before this and the
+    // kernel is meant to boot from it (the jailbreak path), false when the
+    // kernel should boot the installed OS off NAND instead (--tether-boot,
+    // which sends no Ramdisk at all). It selects the boot-args, which are now
+    // set at runtime with `setenv boot-args` rather than compiled into iBEC
+    // -- see sendKernelCache()'s own comment and Patcher.cpp's patchiBEC().
+    int sendKernelCache(const std::string& path, uint64_t ecid, bool ramdiskBoot);
     int sendDeviceTree(const std::string& path, uint64_t ecid);
 
     // stockRecovery only (see sendComponentsToDevice()'s own comment for

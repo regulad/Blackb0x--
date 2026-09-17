@@ -2812,3 +2812,128 @@ macOS-confirmed behaviour, so an unset environment is the original path byte for
 `DEBUG_CANCEL_DELAY_US` (100), `DEBUG_OVERWRITE_TIMEOUT_MS` (100), `DEBUG_RECONNECT_ATTEMPTS`
 (30), `DEBUG_KEEP_CONNECTION` (unset), `DEBUG_IGNORE_GROOM_ERRORS` (unset); gaster adds
 `DEBUG_CANCEL_DELAY_US` and `DEBUG_SETUP_FULL_PAD`.
+
+## iBoot32Patcher: vendored as a submodule, run as a separate binary, and stripped back to the patches actually wanted
+
+Three changes, one investigation. Prompted by a real-hardware result: with
+blackb0x's own patched iBSS/iBEC, the device would not boot even a
+**fully stock** firmware suite (`--stock-firmware` alone, keeping the
+patched bootchain), and iBoot's own banner showed **Boot Failure Count
+incrementing with Panic Fail Count unchanged** — i.e. iBoot rejected the
+suite before ever executing the kernel. Per `Cli.cpp`'s own description of
+that flag, that implicates the iBSS/iBEC patches themselves rather than
+the kernel patch or the baked ramdisk.
+
+### The patcher was a copy, and it had inherited bugs
+
+`Blackb0x/Libraries/libiboot32patcher*` was a near-verbatim copy of
+`zzanehip/iBoot32Patcher` (itself a fork of `iH8sn0w/iBoot32Patcher`,
+GPL-3.0-or-later, 2013-2016). Measured rather than assumed: `finders.c` and
+`functions.c` were **byte-identical** after the include-path rewrite,
+`patchers.c` differed by 19 lines (all one local fix), and the
+`libiboot32patcher.c` wrapper differed by a dead commented-out include block
+and trailing whitespace. Two genuine bugs, one of them inherited verbatim:
+
+- **`patch_kaslr()` fell off the end of a non-void function on every branch
+  that actually applied its patch.** Undefined behavior whose garbage return
+  read back non-zero on x86_64 (masking it) but 0 on arm64, so a real macOS
+  run treated a *successful* KASLR patch as a hard failure. Already fixed
+  locally before this work; now a commit on the fork.
+- **`iBootPatcher()` tested its `RSA` argument twice**, so its `debug`
+  argument was dead and `patch_debug_enabled()` ran whenever the RSA patch
+  was requested. Confirmed present in zzanehip's source verbatim, so
+  inherited, not a porting mistake. It survived a decade because zzanehip's
+  own `main()` parses `--debug` correctly — the bug exists only in the
+  library entry point, which essentially only blackb0x ever called.
+  `patch_debug_enabled()` rewrites `BL get_value_for_dtre_var("debug-enabled")`
+  into `MOVS R0,#1; MOVS R0,#1`, forcing that DeviceTree variable to answer 1
+  forever. It lands on iBEC but not iBSS (it sits behind `has_kernel_load()`,
+  and iBSS has no kernel-load routine). `Patcher.mm:248` passed
+  `debug="FALSE"` too, so the original app never wanted it either — though
+  the original linked prebuilt `.a` files, so whether *its* binary carried
+  the bug is unknown and this is not proof the original was affected.
+
+**No mainstream fork was a viable base.** Checked `iH8sn0w`, `dora2ios`,
+`LukeZGD` and `NyanSatan`: none has `patch_kaslr` at all, and none exposes a
+library entry point. `dora2ios`/`NyanSatan` do handle `--debug` correctly,
+but adopting either would mean porting `patch_kaslr` back in. zzanehip is the
+only fork with both pieces, so the fork is
+**regulad/iBoot32Patcher@`blackb0x`**. Note this buys *provenance*, not
+maintenance: upstream's last commit was 2016 and no fixes are coming. The
+win is that the two fixes are visible commits instead of silent edits to a
+file that looked like a pristine vendored copy.
+
+### It is now a separate program, for licensing reasons
+
+iBoot32Patcher is GPL-3.0-or-later; blackb0x has **no LICENSE file at all**.
+Statically linking it made the whole binary a GPLv3 derivative. It is now
+built as its own executable (`add_executable(iBoot32Patcher ...)`) and
+fork/exec'd via `Patcher.cpp`'s `runIBoot32Patcher()` + `ResourcePath`'s
+`resolveIBoot32PatcherPath()`, matching how `gaster`/`blackb0x-pwn` are
+already invoked. Verified: `nm build/blackb0x` contains **zero** patcher
+symbols. The submodule also brings upstream's own `LICENSE` file along,
+which the in-tree copy never had. **Do not collapse this back into
+`add_library()`** — it is a licensing constraint, not a packaging taste.
+
+`runIBoot32Patcher()` deliberately does not reuse
+`DeviceManager.cpp`'s `runLineBufferedSubprocess()`: that machinery exists
+for long-running exploit tools that must stream progress out of a pipe, and
+this is a short-lived file-in/file-out program whose stdio its own `exit()`
+flushes.
+
+### Boot-args moved out of the binary, and one of them was inverted
+
+The patcher is now asked for `-r` (+ `-k`, + `-t` when a ticket is in play)
+and **nothing else** — no `-b`, no `-d`. Boot-args are set at runtime with
+`setenv boot-args`, which is how `sendStockRestoreTail()` and real
+idevicerestore have always done it, delivered through
+`sendFileThenCommand()`'s `extraCommandBeforeMain` so the order is
+upload → zero-length `DFU_DNLOAD` → `setenv boot-args` → `bootx`, matching
+idevicerestore exactly. Pointedly **not** followed by `saveenv`: persisting
+`rd=md0` into NVRAM would leave the device root-mounting a ramdisk that is
+no longer there on every subsequent normal boot. (The stock path saves
+`auto-boot false` because that *is* meant to persist, and likewise does not
+save boot-args.)
+
+Dropping `patch_boot_args()` removes the most invasive patch in the tool and
+the only one that can mis-patch silently. Both of blackb0x's boot-args
+strings were longer than iBoot's own `rd=md0 nand-enable-reformat=1
+-progress` (53 and ~95 chars vs 39), which **always** triggered its
+relocation path: repoint the xref into the "Reliance on this certificate"
+string, `strcpy()` there unbounded, scan byte-by-byte for an `IT` instruction
+with no end-of-buffer guard (the author's own comment calls it "kinda
+hacky"), then write an 8-bit PC-relative immediate with **no range check** —
+`ldr_rd_null_str->imm8 = (diff / 0x4)` silently truncates past 255 and
+repoints a load somewhere arbitrary. None of that reports failure.
+
+Moving the args also surfaced a **real inversion** that the compiled-in
+version had hidden. `patchiBEC()` built two iBECs differing *only* in
+boot-args: `args1` **with** `rd=md0` became `iBECDowngrade`, `args2`
+**without** it became `iBECBoot`. But `Cli.cpp` sends `iBECDowngrade` for
+`--tether-boot` (which sends **no** Ramdisk) and `iBECBoot` for the
+jailbreak path (which **does** send Ramdisk + DeviceTree). Exactly backwards:
+the jailbreak path uploaded a ramdisk and then told the kernel to root off
+NAND, so `entrypoint.c` could never have run as PID 1. `sendKernelCache()`
+now takes an explicit `ramdiskBoot` flag (`!tetherBoot` at the call site)
+and picks the args accordingly.
+
+With boot-args out of the binary the two iBEC builds became byte-identical,
+so `patchiBEC()` now produces **one** output and points both
+`PatchedComponents` fields at it, the way `useStockIBEC()` already did.
+
+The runtime args are matched to what the ramdisk actually does —
+`entrypoint.c` execs as PID 1, writes its files, and reboots, nothing more:
+`rd=md0 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1
+pio-error=0`. `rd=md0` is what makes the ramdisk the root device at all;
+the AMFI/code-signing args are what let an unsigned PID 1 exec; `-v` is
+free console output on a path whose only other diagnostic is
+`checkDeviceLeftRecoveryModeAfterBoot()`. `nand-enable-reformat=1` is
+deliberately absent — this boot plants files on the existing filesystem and
+must not reformat it.
+
+**Not yet tested on hardware.** The build is clean and `blackb0x_tests`
+passes, but whether removing the unintended `debug-enabled` patch (or fixing
+the `rd=md0` inversion) changes the stock-suite boot failure is an open
+question that needs the Mac. The `debug`/`RSA` fix is the first thing to
+bisect, since it is the one patch that was being applied against the
+project's own stated intent.

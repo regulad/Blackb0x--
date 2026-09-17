@@ -1621,13 +1621,63 @@ static bool checkDeviceLeftRecoveryModeAfterBoot(uint64_t ecid) {
     return false;
 }
 
-int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid) {
+// Boot-args for the two kinds of boot this function triggers. These used to
+// be compiled into iBEC by iBoot32Patcher's patch_boot_args() (Patcher.cpp's
+// old args1/args2); they are set at runtime now, which is how the stock path
+// (sendStockRestoreTail() below) and real idevicerestore have always done it.
+// See patchiBEC() for why the compiled-in version was worth getting rid of.
+//
+// Deliberately NOT followed by `saveenv`: boot-args must apply to this one
+// boot only. The stock path saves `auto-boot false` because that is meant to
+// persist, and pointedly does not save boot-args -- persisting `rd=md0` into
+// NVRAM would leave the device trying to root-mount a ramdisk that is no
+// longer there on every subsequent normal boot.
+//
+// kRamdiskBootArgs matches what the ramdisk actually does. entrypoint.c is
+// the ramdisk's /sbin/launchd: it execs as PID 1, writes its files, and
+// reboots -- nothing else. So:
+//   rd=md0                     root device IS the ramdisk. Without this the
+//                              kernel mounts the real NAND root and runs
+//                              Apple's own launchd, and entrypoint.c never
+//                              runs at all.
+//   amfi=0xff,
+//   cs_enforcement_disable=1,
+//   amfi_get_out_of_my_way=1   entrypoint.c is our own unsigned binary, so
+//                              code-signing enforcement has to be off for it
+//                              to exec as PID 1.
+//   -v                         verbose console. The only channel this project
+//                              has for seeing a boot fail (see
+//                              checkDeviceLeftRecoveryModeAfterBoot() above),
+//                              and free.
+//   pio-error=0                carried over from the original app's args.
+// Notably absent: nand-enable-reformat=1, which the stock RESTORE path sets
+// and which must never appear here -- this boot plants files on the existing
+// filesystem, it does not reformat it. Also absent: anything about a
+// jailbroken userspace; the ramdisk boot is only a vehicle for the file
+// writes, so there is nothing further to ask the kernel for.
+static const char* const kRamdiskBootArgs =
+    "setenv boot-args rd=md0 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
+// No rd=md0: --tether-boot sends iBEC and a kernelcache only, no Ramdisk, so
+// this boots the installed OS off NAND. The AMFI/code-signing args stay,
+// since that path exists to run an already-jailbroken system tethered.
+static const char* const kTetherBootArgs =
+    "setenv boot-args -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
+
+int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid, bool ramdiskBoot) {
     // get_tv_patient(): same reasoning as sendiBEC() above -- this reconnect
     // follows Ramdisk's own NOTIFY_FINISH-triggered reset.
     irecv_client_t client = get_tv_patient(ecid);
     // bReq=1: see sendFileThenCommand()'s own comment -- "bootx" is one of
     // idevicerestore's two bRequest=1 boot-triggering commands.
-    int result = sendFileThenCommand(client, "sendKernelCache", KernelCache_Path, "bootx", false, 1, true);
+    //
+    // The boot-args go in via extraCommandBeforeMain, which puts them after
+    // the kernelcache upload and its zero-length DFU_DNLOAD (dnloadFinish)
+    // and before 'bootx' -- byte-for-byte the order real idevicerestore uses,
+    // and the same order sendStockRestoreTail() below already follows.
+    const char* bootArgsCommand = ramdiskBoot ? kRamdiskBootArgs : kTetherBootArgs;
+    fprintf(stderr, "sendKernelCache: %s\n", bootArgsCommand);
+    int result = sendFileThenCommand(client, "sendKernelCache", KernelCache_Path, "bootx", false, 1, true,
+                                      bootArgsCommand);
     if (result == 0 && !checkDeviceLeftRecoveryModeAfterBoot(ecid)) {
         result = -1;
     }

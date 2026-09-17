@@ -873,8 +873,24 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
 
     // Only reached when stockRecovery is unset -- sendStockTail() above
     // already includes KernelCache and returns directly otherwise.
+    //
+    // ramdiskBoot = !tetherBoot, and that is not a restatement of the flag:
+    // the branch above sends Ramdisk + DeviceTree only in the non-tether
+    // (jailbreak) case, so that is exactly the case where a ramdisk exists
+    // for the kernel to root-mount. --tether-boot reaches here having sent
+    // iBEC and nothing else, and needs to boot the installed OS off NAND.
+    //
+    // This corrects a real inversion in the compiled-in boot-args that used
+    // to decide this: patchiBEC()'s args1 (WITH rd=md0) went into the iBEC
+    // that --tether-boot sends, and args2 (WITHOUT it) into the iBEC the
+    // jailbreak path sends -- i.e. exactly backwards. The jailbreak path was
+    // uploading a ramdisk and then telling the kernel to root off NAND
+    // anyway, so entrypoint.c could never have run as PID 1.
     console::out("Sending KernelCache...\n");
-    int kernelResult = components.kernel ? deviceManager.sendKernelCache(*components.kernel, device.ecid) : -1;
+    int kernelResult = components.kernel
+                           ? deviceManager.sendKernelCache(*components.kernel, device.ecid,
+                                                           /*ramdiskBoot=*/!tetherBoot)
+                           : -1;
     if (kernelResult != 0) {
         console::err("Failed to send KernelCache.\n");
         return false;

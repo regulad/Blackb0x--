@@ -89,7 +89,7 @@ Cflags: -I\${includedir} -include ${DEPS_INCLUDE}/wolfssl/options.h
 # ---------------------------------------------------------------------------
 
 # CBPatch.c/CBPUtils.c (cbpatcher) and finders.c/functions.c/patchers.c
-# (iboot32patcher) were missing entirely from the repo — only their headers
+# (iBoot32Patcher) were missing entirely from the repo — only their headers
 # were vendored, matching the old prebuilt .a archives' headers-only pattern
 # seen elsewhere in this port. Recovered from zzanehip/CBPatcher and
 # zzanehip/iBoot32Patcher (the exact forks the README credits for "updated
@@ -97,18 +97,43 @@ Cflags: -I\${includedir} -include ${DEPS_INCLUDE}/wolfssl/options.h
 # match. This only surfaced once Patcher.cpp (Phase 5) became the first code
 # to actually call patch_kernel()/iBootPatcher(), forcing the linker to pull
 # in and resolve these object files.
+#
+# iBoot32Patcher has since moved OUT of Blackb0x/Libraries entirely: it is a
+# submodule built as its own executable and fork/exec'd, for licensing
+# reasons — see its own block further down. Only cbpatcher is still an
+# in-tree recovered source.
 add_library(cbpatcher STATIC
     Blackb0x/Libraries/CBPatcher.c
     Blackb0x/Libraries/libcbpatcher/CBPatch.c
     Blackb0x/Libraries/libcbpatcher/CBPUtils.c)
 target_include_directories(cbpatcher PUBLIC Blackb0x/Libraries)
 
-add_library(iboot32patcher STATIC
-    Blackb0x/Libraries/libiboot32patcher.c
-    Blackb0x/Libraries/libiboot32patcher/finders.c
-    Blackb0x/Libraries/libiboot32patcher/functions.c
-    Blackb0x/Libraries/libiboot32patcher/patchers.c)
-target_include_directories(iboot32patcher PUBLIC Blackb0x/Libraries)
+# iBoot32Patcher is a SEPARATE EXECUTABLE that blackb0x fork/execs -- not a
+# static library linked into it. That is deliberate and is a licensing
+# decision, not a packaging preference: iBoot32Patcher is GPL-3.0-or-later
+# (iH8sn0w, 2013-2016) and blackb0x declares no license of its own, so
+# statically linking it would make the whole binary a GPLv3 derivative.
+# Invoking it as an independent program at arm's length keeps the two
+# separate works. Do not "simplify" this back into add_library() -- see
+# docs/HISTORY.md and Patcher.cpp's runIBoot32Patcher().
+#
+# Source is the submodule regulad/iBoot32Patcher@blackb0x, off
+# zzanehip/iBoot32Patcher (the same fork the recovery note above pulled the
+# in-tree copy from). The in-tree copy was a verbatim lift apart from one
+# fix, so it carried no history and, critically, no LICENSE file; as a
+# submodule the fixes are commits and upstream's own GPLv3 LICENSE travels
+# with the code, which is what makes the arm's-length arrangement honest.
+#
+# The include directory is the submodule root, so upstream's own
+# `#include <include/finders.h>` spelling resolves untouched -- the in-tree
+# copy needed a sed to rewrite those to <libiboot32patcher/...>, and dropping
+# that rewrite is what keeps this fork a clean diff against upstream.
+add_executable(iBoot32Patcher
+    third_party/iBoot32Patcher/iBoot32Patcher.c
+    third_party/iBoot32Patcher/finders.c
+    third_party/iBoot32Patcher/functions.c
+    third_party/iBoot32Patcher/patchers.c)
+target_include_directories(iBoot32Patcher PRIVATE third_party/iBoot32Patcher)
 
 # Same vintage of C as xpwn (2013-2018), same GCC >= 14 tightened-diagnostics
 # issue (see the blanket xpwn relaxation below) — this 32-bit-pointer-vs-
@@ -121,7 +146,7 @@ target_compile_options(cbpatcher PRIVATE
     -Wno-error=int-conversion
     -Wno-error=return-mismatch
     -fcommon)
-target_compile_options(iboot32patcher PRIVATE
+target_compile_options(iBoot32Patcher PRIVATE
     -Wno-error=implicit-int
     -Wno-error=implicit-function-declaration
     -Wno-error=incompatible-pointer-types
@@ -1275,9 +1300,11 @@ add_executable(blackb0x
 
 target_include_directories(blackb0x PRIVATE third_party/xpwn/includes)
 
+# NOTE: iBoot32Patcher is deliberately absent here -- it is GPLv3 and is
+# fork/exec'd as a separate binary instead of linked. See its add_executable()
+# block above.
 target_link_libraries(blackb0x PRIVATE
     cbpatcher
-    iboot32patcher
     blackb0x_xpwntool
     idevicerestore_img3
     xpwn

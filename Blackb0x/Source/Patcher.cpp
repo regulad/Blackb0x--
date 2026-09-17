@@ -8,7 +8,6 @@
 
 extern "C" {
 #include <xpwntool.h>
-#include <libiboot32patcher.h>
 #include <CBPatcher.h>
 #include <xpwn/libxpwn.h>
 }
@@ -21,7 +20,64 @@ extern "C" {
 #include <sstream>
 #include <vector>
 
+#include <spawn.h>
+#include <sys/wait.h>
+
+extern char** environ;
+
 namespace fs = std::filesystem;
+
+// ---------------------------------------------------------------------------
+// iBoot32Patcher: invoked as a separate program, never linked
+// ---------------------------------------------------------------------------
+
+// iBoot32Patcher is GPL-3.0-or-later (iH8sn0w, 2013-2016) and blackb0x
+// declares no license of its own, so linking it in would make the whole
+// binary a GPLv3 derivative. It is built as its own executable from the
+// third_party/iBoot32Patcher submodule (see CMakeLists.txt) and run here as
+// an independent program. That is a licensing requirement, not a style
+// choice -- do not replace this with a direct iBootPatcher() call.
+//
+// Deliberately NOT reusing DeviceManager.cpp's runLineBufferedSubprocess():
+// that exists for long-running exploit tools that must stream progress out
+// of a pipe while they work, and its whole stdbuf/timeout/D-state apparatus
+// is dead weight here. This is a short-lived, file-in/file-out program whose
+// output goes straight to blackb0x's own stdout/stderr (inherited, so its
+// stdio is flushed by its own exit()), and whose only result that matters is
+// the exit status.
+//
+// Returns the child's exit status, or -1 if it could not be run at all (both
+// of which callers already treat as failure -- iBoot32Patcher itself returns
+// 0 only on a fully-applied patch set).
+static int runIBoot32Patcher(const std::vector<std::string>& args) {
+    std::string binary = resolveIBoot32PatcherPath();
+
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(binary.c_str()));
+    for (const std::string& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+
+    pid_t pid = 0;
+    int spawnErr = posix_spawn(&pid, binary.c_str(), nullptr, nullptr, argv.data(), environ);
+    if (spawnErr != 0) {
+        fprintf(stderr,
+                "runIBoot32Patcher: could not run %s: %s. It is built alongside blackb0x -- set "
+                "$BLACKB0X_IBOOT32PATCHER to override its location.\n",
+                binary.c_str(), strerror(spawnErr));
+        return -1;
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        fprintf(stderr, "runIBoot32Patcher: waitpid() failed: %s\n", strerror(errno));
+        return -1;
+    }
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr, "runIBoot32Patcher: %s was killed by signal %d\n", binary.c_str(), WTERMSIG(status));
+        return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
 
 // ---------------------------------------------------------------------------
 // Small path-string helpers (replace Patcher.mm's input:/decrypted:/patched:/
@@ -41,8 +97,6 @@ static std::string withoutExtension(const std::string& path) {
 
 static std::string decryptedPathFor(const std::string& path) { return replaceExtension(path, "dec"); }
 static std::string patchedPathFor(const std::string& path) { return replaceExtension(path, "patched"); }
-static std::string prebootPathFor(const std::string& path) { return replaceExtension(path, "preboot"); }
-static std::string downgradePathFor(const std::string& path) { return replaceExtension(path, "downgrade"); }
 static std::string outputPathFor(const std::string& path) { return withoutExtension(path); }
 
 // See Patcher.hpp's own comment on why this is a free function, not a
@@ -127,17 +181,19 @@ bool Patcher::patchiBSS(const std::string& path) {
 
     decrypt(const_cast<char*>(path.c_str()), const_cast<char*>(decPath.c_str()),
             const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE", nullptr);
-    int patchResult = iBootPatcher(const_cast<char*>(decPath.c_str()), const_cast<char*>(patchedPath.c_str()),
-                                    nullptr, (char*)"TRUE", (char*)"FALSE", (char*)"FALSE", (char*)"FALSE");
+    // -r only: iBSS has no kernel-load routine, so boot-args/debug/KASLR
+    // would be no-ops here even if asked for. Matches what the original
+    // Patcher.mm asked for (RSA only).
+    int patchResult = runIBoot32Patcher({decPath, patchedPath, "-r"});
     if (patchResult != 0) {
-        // iBootPatcher() never writes patchedPath on failure (e.g.
+        // iBoot32Patcher never writes patchedPath on failure (e.g.
         // patch_rsa_check() couldn't find its target instruction pattern
         // in this specific iBSS build) -- same "decrypt() a nonexistent
         // file" heap corruption patchKernel() was already fixed for (see
         // its own comment), just never fixed here. Stop here instead of
         // silently shipping garbage/stale output that would still fail
         // signature verification once actually sent.
-        fprintf(stderr, "patchiBSS: iBootPatcher() failed for %s\n", path.c_str());
+        fprintf(stderr, "patchiBSS: iBoot32Patcher failed for %s (exit %d)\n", path.c_str(), patchResult);
         std::error_code ec;
         fs::remove(decPath, ec);
         return false;
@@ -228,8 +284,8 @@ bool Patcher::patchiBEC(const std::string& path, const std::string& flags, bool 
 
     std::string decPath = decryptedPathFor(path);
     std::string patchedPath = patchedPathFor(path);
-    std::string prebootPath = prebootPathFor(path);
-    std::string downgradePath = downgradePathFor(path);
+    // prebootPathFor()/downgradePathFor() are no longer used: patchiBEC()
+    // produces one output, not a downgrade/boot pair (see below).
     std::string outPath = outputPathFor(path);
 
     printf("Patching iBEC...\n");
@@ -237,55 +293,78 @@ bool Patcher::patchiBEC(const std::string& path, const std::string& flags, bool 
     decrypt(const_cast<char*>(path.c_str()), const_cast<char*>(decPath.c_str()),
             const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE", nullptr);
 
-    char* args1 = (char*)"rd=md0 amfi=0xff cs_enforcement_disable=1 pio-error=0";
-    char* args2 = (char*)"amfi=0xff cs_enforcement_disable=1 pio-error=0 amfi_get_out_of_my_way=1 "
-                         "cs_enforcement_disable=1";
-    char* t = ticket ? (char*)"TRUE" : (char*)"FALSE";
+    // No -b: boot-args are NOT compiled into iBEC any more. They are set at
+    // runtime with `setenv boot-args ...` + `saveenv` over the recovery
+    // console, which is how the stock restore path (DeviceManager.cpp's
+    // sendStockRestoreTail()) and real idevicerestore have always done it.
+    //
+    // Two reasons that is strictly better than patch_boot_args():
+    //  1. The patch is the most invasive one in iBoot32Patcher and the only
+    //     one that can mis-patch silently. Both boot-args strings blackb0x
+    //     used were longer than iBoot's own "rd=md0 nand-enable-reformat=1
+    //     -progress", which triggers its relocation path: it repoints the
+    //     xref into the "Reliance on this certificate" string, strcpy()s
+    //     there unbounded, scans byte-by-byte for an IT instruction with no
+    //     end-of-buffer guard, and finally writes an 8-bit PC-relative
+    //     immediate with no range check. Nothing about that reports failure
+    //     if it lands wrong.
+    //  2. `setenv` needs no iBEC rebuild to change, so the args can be
+    //     matched to what the ramdisk actually does.
+    //
+    // No -d either: that patch forces `debug-enabled` to answer 1 forever,
+    // and blackb0x never wanted it -- Patcher.mm passed debug="FALSE" too.
+    // It was being applied anyway because zzanehip's iBootPatcher() entry
+    // point tested its RSA argument twice (fixed on our fork's branch, but
+    // the CLI never had the bug at all).
+    std::vector<std::string> iBECArgs = {"-r", "-k"};
+    if (ticket) iBECArgs.push_back("-t");
 
-    int patchedResult = iBootPatcher(const_cast<char*>(decPath.c_str()), const_cast<char*>(patchedPath.c_str()),
-                                      args1, (char*)"TRUE", (char*)"FALSE", t, (char*)"TRUE");
-    int prebootResult = iBootPatcher(const_cast<char*>(decPath.c_str()), const_cast<char*>(prebootPath.c_str()),
-                                      args2, (char*)"TRUE", (char*)"FALSE", t, (char*)"TRUE");
-    if (patchedResult != 0 || prebootResult != 0) {
-        // Same reasoning as patchiBSS()'s own comment -- iBootPatcher()
+    // ONE patched iBEC now, not two. The downgrade/boot pair only ever
+    // differed by the boot-args compiled into each (args1 carried rd=md0,
+    // args2 did not); every other patch flag was identical. With boot-args
+    // moved to runtime `setenv`, the two builds are byte-for-byte the same
+    // file, so producing both was pure duplication -- and worse, it made the
+    // downgrade-vs-boot distinction look like a property of the binary when
+    // it is really a property of which boot-args the sender sets.
+    //
+    // Both PatchedComponents fields therefore point at the same output, in
+    // exactly the way useStockIBEC() below already does.
+    std::vector<std::string> patchedArgs = {decPath, patchedPath};
+    patchedArgs.insert(patchedArgs.end(), iBECArgs.begin(), iBECArgs.end());
+
+    int patchedResult = runIBoot32Patcher(patchedArgs);
+    if (patchedResult != 0) {
+        // Same reasoning as patchiBSS()'s own comment -- iBoot32Patcher
         // never writes its output file on failure (e.g. patch_ticket_check()/
         // patch_rsa_check() couldn't find their target instruction pattern
         // in this specific iBEC build), and decrypt()ing a missing/stale
         // file next would silently ship garbage that still fails
         // verification once sent, rather than failing cleanly here.
-        fprintf(stderr, "patchiBEC: iBootPatcher() failed for %s (patchedPath=%d, prebootPath=%d)\n", path.c_str(),
-                patchedResult, prebootResult);
+        fprintf(stderr, "patchiBEC: iBoot32Patcher failed for %s (exit %d)\n", path.c_str(), patchedResult);
         std::error_code ec;
         fs::remove(decPath, ec);
         return false;
     }
 
-    decrypt(const_cast<char*>(patchedPath.c_str()), const_cast<char*>(downgradePath.c_str()),
-            const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE",
-            const_cast<char*>(path.c_str()));
-    decrypt(const_cast<char*>(prebootPath.c_str()), const_cast<char*>(outPath.c_str()),
+    decrypt(const_cast<char*>(patchedPath.c_str()), const_cast<char*>(outPath.c_str()),
             const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE",
             const_cast<char*>(path.c_str()));
 
     std::error_code ec;
     fs::remove(decPath, ec);
     fs::remove(patchedPath, ec);
-    fs::remove(prebootPath, ec);
 
-    outputs_.iBECDowngrade = downgradePath;
+    outputs_.iBECDowngrade = outPath;
     outputs_.iBECBoot = outPath;
 
     checkPatching();
     return true;
 }
 
-// See Patcher.hpp's own comment. Unlike patchiBEC(), there's no
-// downgrade-vs-boot distinction to make here at all -- both boot-args
-// variants above exist purely to steer iBootPatcher()'s own patch
-// selection for two different call sites (tethered downgrade vs full
-// jailbreak boot); with no patching happening, both outputs are the exact
-// same plain decrypted file, so both PatchedComponents fields just point
-// at it.
+// See Patcher.hpp's own comment. Same shape as patchiBEC() above: there is
+// no downgrade-vs-boot distinction in the binary at all any more, so both
+// PatchedComponents fields point at one file. Here that file is the plain
+// decrypted iBEC, since no patching happens on this path.
 bool Patcher::useStockIBEC(const std::string& path) {
     // See this method's own comment in Patcher.hpp -- always sent
     // untouched, unconditionally: whichever iBSS is now running

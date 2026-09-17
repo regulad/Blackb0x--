@@ -56,6 +56,17 @@ std::string resolvePwnPath();
 // first -- see canSelfBakeRamdisk() there for when that's actually attempted.
 std::string resolveBakeAllRamdisksPath();
 
+// Resolves the path to the `iBoot32Patcher` binary (see CMakeLists.txt --
+// built from the third_party/iBoot32Patcher submodule as its own executable,
+// landing alongside blackb0x itself): $BLACKB0X_IBOOT32PATCHER if set,
+// otherwise "iBoot32Patcher" alongside blackb0x's own executable, same
+// resolution strategy as resolveGasterPath()/resolvePwnPath() above.
+//
+// It is a separate binary rather than a linked library ON PURPOSE: it is
+// GPL-3.0-or-later and blackb0x declares no license, so linking it would
+// make blackb0x a GPLv3 derivative. Patcher.cpp fork/execs it.
+std::string resolveIBoot32PatcherPath();
+
 // Resolves the loose .deb root: $BLACKB0X_DEBS_DIR if set, otherwise
 // "Blackb0x/Debs" relative to the current working directory. bakeRamdisk()'s
 // stageDebcache() (BakeRamdisk.cpp) copies exactly the subset

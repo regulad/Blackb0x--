@@ -116,9 +116,12 @@ statically linked. **Forked** means: patched on our own branch, pushed, pointed 
 | `xpwn` | **regulad/xpwn**@`legacy` | Yes — a wolfSSL AES-CBC buffer over-read fix in `img3.c`, plus disabling the legacy-libusb-0.1-only `pwnmetheus2` subdirectory |
 | `wolfssl`, `curl`, `libusb`, `libzip`, `libpng`, `bzip2`, `zlib` | upstream | No — current HEAD or latest stable tag; none of these existed in the original app |
 | `gaster` | **regulad/gaster** (fork), `linux-reset-race` branch, off verygenericname/gaster | Yes — claims interface 0 (with `libusb_set_auto_detach_kernel_driver()`) instead of sending every DFU class request unclaimed, which is what the kernel's own "did not claim interface 0 before use" warning was about. A second change (skipping the post-`SETUP`/`SPRAY` reset) was tried and reverted after real hardware proved it load-bearing, not precautionary — see `docs/HISTORY.md`. Also carries `checkm8_stage_setup()` instrumentation: it logs the cancelled transfer's reported size (the only value the cancel delay actually feeds, and the reason sweeping `CANCEL_DELAY_US` changes nothing), and `GASTER_SETUP_FULL_PAD=1` pads as `blackb0x-pwn` does instead of trusting that size |
+| `iBoot32Patcher` | **regulad/iBoot32Patcher**@`blackb0x`, off zzanehip/iBoot32Patcher | Yes — two real bug fixes: `patch_kaslr()` fell off the end of a non-void function on every *successful* branch (garbage return read non-zero on x86_64, 0 on arm64, so a real macOS run treated a successful KASLR patch as a hard failure), and `iBootPatcher()` tested its `RSA` argument twice so the `debug` argument was dead and `patch_debug_enabled()` ran whenever the RSA patch was asked for. **Built as a separate EXECUTABLE and fork/exec'd, never linked** — it is GPL-3.0-or-later and blackb0x declares no license, so linking would make blackb0x a GPLv3 derivative. Do not "simplify" it back into a static library |
 
 `Blackb0x/Libraries/xpwntool.c` (in-tree, not a submodule) is confirmed sourced from
-`zzanehip/xpwntool-swift`, unchanged.
+`zzanehip/xpwntool-swift`, unchanged. `Blackb0x/Libraries/libcbpatcher/` is likewise
+in-tree, recovered from `zzanehip/CBPatcher` but with real local portability work on
+top (see `portable_macho.h`).
 
 ## Build & run
 

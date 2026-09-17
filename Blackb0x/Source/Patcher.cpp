@@ -316,7 +316,24 @@ bool Patcher::patchiBEC(const std::string& path, const std::string& flags, bool 
     // It was being applied anyway because zzanehip's iBootPatcher() entry
     // point tested its RSA argument twice (fixed on our fork's branch, but
     // the CLI never had the bug at all).
-    std::vector<std::string> iBECArgs = {"-r", "-k"};
+    // No -k either. patch_kaslr() NOPs out the branch that applies iBoot's
+    // KASLR slide, so the kernel lands at a predictable address. Nothing
+    // left in this flow needs that: patch_kernel()'s patches are applied to
+    // the kernelcache FILE before upload (position-independent within it,
+    // not dependent on any runtime slide), and entrypoint.c is an ordinary
+    // userland PID 1 that writes files and reboots -- there is no in-kernel
+    // payload here that needs to know where anything landed. It is also a
+    // hardcoded-offset patch (os_vers 8 -> kaslr_search - 0x29), so it is
+    // the kind of thing that only earns its place if something actually
+    // depends on it. Guarded (it verifies the byte is 0xD0 first), so
+    // removing it is not fixing a silent mis-patch -- just dropping a patch
+    // with no remaining purpose.
+    //
+    // -t (patch_ticket_check) stays, and stays conditional: it is what makes
+    // a real APTicket unnecessary for everything iBEC goes on to load, which
+    // the whole non-stock flow depends on (see DeviceManager.hpp's
+    // sendStockRestoreTail() comment).
+    std::vector<std::string> iBECArgs = {"-r"};
     if (ticket) iBECArgs.push_back("-t");
 
     // ONE patched iBEC now, not two. The downgrade/boot pair only ever
@@ -432,6 +449,31 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
 
     decrypt(const_cast<char*>(path.c_str()), const_cast<char*>(decPath.c_str()),
             const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE", nullptr);
+
+    // decrypt() reports failure only by printing (e.g. "error: cannot open
+    // infile") -- it returns void, and it still leaves a zero-byte output
+    // file behind. patch_kernel() then SEGVs on that empty input.
+    //
+    // Found by bake-all-bootloaders' first full AppleTV3,2 sweep: 10B329a
+    // patches fine, 10B144b dies here with exit 139 after iBSS and iBEC have
+    // both already succeeded. The kernelcache downloads correctly (6006020
+    // bytes) and the .keys file does have a Kernelcache entry, so this is a
+    // decrypt-stage failure on that specific build, not a missing key or a
+    // failed download -- and without this check it is an unexplained crash
+    // rather than one skipped firmware.
+    //
+    // Same class of hazard the second decrypt() below was already fixed for
+    // (see patchResult's comment); the fix was never applied to this one.
+    std::error_code decEc;
+    if (!fs::exists(decPath, decEc) || fs::file_size(decPath, decEc) == 0) {
+        fprintf(stderr,
+                "patchKernel: decrypt() produced no usable output for %s (wrote %s). Refusing to hand an "
+                "empty file to patch_kernel(), which crashes on one. Check this build's Kernelcache key/iv.\n",
+                path.c_str(), decPath.c_str());
+        fs::remove(decPath, decEc);
+        return false;
+    }
+
     int patchResult = patch_kernel(const_cast<char*>(decPath.c_str()), const_cast<char*>(patchedPath.c_str()),
                                     const_cast<char*>(internalFirmware.c_str()));
     if (patchResult != 0) {

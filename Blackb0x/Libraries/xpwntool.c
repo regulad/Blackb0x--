@@ -74,13 +74,40 @@ void decrypt(char *input_path, char *ouput_path, char *ip_key, char *ip_iv, char
             inFile = openAbstractFile(createAbstractFileFromFile(fopen(input_path, "rb")));
         }
     }
+    /* Each of the three error paths below used to print and then fall
+     * through to dereference the NULL it had just diagnosed, so any one of
+     * them was a SIGSEGV rather than a failure. That is the actual root
+     * cause behind the "decrypt() a nonexistent/unreadable file corrupts the
+     * heap" hazard documented all over Patcher.cpp -- callers could not
+     * detect it because this function returns void, and it did not survive
+     * long enough for them to check its output either.
+     *
+     * Found by bake-all-bootloaders sweeping every AppleTV3,2 firmware:
+     * 10B144b's kernelcache is 6MB and downloads fine, but openAbstractFile*()
+     * refuses it, and the run died with exit 139 instead of skipping one
+     * build. Bailing out leaves a zero-byte output file, which is exactly
+     * what Patcher.cpp's own post-decrypt() emptiness checks look for.
+     *
+     * Kept as early returns rather than a new return value: decrypt() is
+     * void in every caller across this project, and changing that is a
+     * separate, wider change. This makes the failure survivable and
+     * detectable; it does not make it reportable. */
     if(!inFile) {
         fprintf(stderr, "error: cannot open infile\n");
+        if(template) template->close(template);
+        if(key) free(key);
+        if(iv) free(iv);
+        return;
     }
 
     AbstractFile* outFile = createAbstractFileFromFile(fopen(ouput_path, "wb"));
     if(!outFile) {
         fprintf(stderr, "error: cannot open outfile\n");
+        inFile->close(inFile);
+        if(template) template->close(template);
+        if(key) free(key);
+        if(iv) free(iv);
+        return;
     }
 
 
@@ -94,6 +121,11 @@ void decrypt(char *input_path, char *ouput_path, char *ip_key, char *ip_iv, char
         }
         if(!newFile) {
             fprintf(stderr, "error: cannot duplicate file from provided template\n");
+            inFile->close(inFile);
+            outFile->close(outFile);
+            if(key) free(key);
+            if(iv) free(iv);
+            return;
         }
     } else {
         newFile = outFile;

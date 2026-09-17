@@ -234,6 +234,17 @@ public:
     // See PatchedComponents::buildID's own comment.
     void setBuildID(const std::string& buildID) { outputs_.buildID = buildID; }
 
+    // Read-only view of whatever has been patched so far.
+    //
+    // Only meaningful for callers that deliberately produce an INCOMPLETE
+    // suite: checkPatching() hands a complete set to onComponentsReady and
+    // then clears outputs_, so a caller producing everything should use that
+    // callback instead. bake-all-bootloaders (BakeAllBootloaders.cpp) is the
+    // one that needs this -- it patches the bootchain + kernel + devicetree
+    // and never touches the ramdisk, so onComponentsReady can never fire for
+    // it, and it still needs to know which individual outputs landed.
+    const PatchedComponents& components() const { return outputs_; }
+
     // --dont-check-firmware-sums (Cli.hpp's CliOptions): skip
     // patchRamdisk()'s own .sum sidecar staleness check (see that
     // function's comment) and use dist/<device>_<buildID>-Ramdisk.dmg as-

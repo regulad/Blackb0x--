@@ -2989,3 +2989,109 @@ outright. None of those constraints apply to the install flow.
 
 Build is clean and `blackb0x_tests` passes. Nothing here has been run against
 hardware.
+
+## `bake-all-bootloaders`: pre-patching the non-ramdisk suite, and the two crashes that found
+
+`.claude/TODO.md` item 5 ("Pre-patch firmware components ahead of time")
+for everything that isn't the ramdisk. `bake-all-bootloaders`
+(`Blackb0x/Source/BakeAllBootloaders.cpp`) downloads and patches iBSS, iBEC,
+KernelCache and DeviceTree for every `(device, buildID)` under
+`Blackb0x/ImageKeys/`, writing `dist/bootchain/<device>_<buildID>/`.
+
+It is a separate binary from `bake-all-ramdisks` for one specific reason:
+**nothing it does needs root.** Every step is download, decrypt and
+byte-level file patching — no loop mount, no `hdiutil`. So unlike the
+ramdisk baker it can be run and re-run freely, which makes it the only way
+to exercise `patchiBSS()`/`patchiBEC()`/`patchKernel()` — and therefore the
+`iBoot32Patcher` binary they now fork/exec — across every known firmware
+with no hardware attached. It shares `Patcher.cpp` with `blackb0x` itself
+rather than reimplementing the patch calls, so the two cannot drift.
+
+Design notes worth keeping:
+
+- **Per-component pass/fail, not one verdict per target.** Which component
+  failed is the diagnostic: "every iBEC fails" and "one build fails
+  everything" mean entirely different things.
+- **Download failure and patch failure are reported separately, and only
+  the latter sets the exit status.** Apple no longer hosts many of these
+  builds; that is not this project's bug.
+- **Published filenames carry no extension.** The container format really
+  does differ per component and per model — verified on the wire:
+  `devicetree`, `iBEC` and `kernelcache` all start `33676d49` (`Img3`),
+  but `iBSS` starts `0e0000ea`, a raw ARM reset vector, because
+  `patchiBSS()` deliberately keeps the raw patched iBoot for Apple TV 3
+  and deletes the re-wrapped img3 (its own `j33i` branch). Naming them
+  `*.img3` would have been a lie.
+- **`--out <dir>`, and an up-front writability check.** `dist/` is
+  typically root-owned from a previous `sudo ./bake-all-ramdisks`, which
+  makes the default output location unwritable for a deliberately-rootless
+  tool. It says exactly that instead of emitting four identical per-file
+  `ENOENT`s after paying for every download and patch.
+
+### Two real crashes, found on the first sweep
+
+**1. `xpwntool.c`'s `decrypt()` dereferenced NULLs it had just diagnosed.**
+All three of its error paths — `cannot open infile`, `cannot open outfile`,
+`cannot duplicate file from provided template` — printed the message and
+then fell through into the NULL pointer, so each was a SIGSEGV rather than
+a failure. This is the actual root cause behind the "`decrypt()` a
+nonexistent file corrupts the heap" hazard `Patcher.cpp` documents in
+several places: callers could not detect it (`decrypt()` returns `void`) and
+the process did not survive long enough for them to inspect its output
+either. All three now bail out, leaving the zero-byte output file that
+`Patcher.cpp`'s own emptiness checks look for. `decrypt()` is still `void`
+— this makes the failure survivable and detectable, not reportable; giving
+it a return value is a wider change across every call site.
+
+Caught because `AppleTV3,2` `10B144b`'s kernelcache downloads perfectly
+(6006020 bytes) and has a real `Kernelcache` entry in its `.keys` file, but
+`openAbstractFile*()` refuses it — so the sweep died with exit 139 on target
+1 of 34 instead of skipping one firmware. `Blackb0x/Libraries/xpwntool.c` is
+no longer "unchanged from `zzanehip/xpwntool-swift`"; AGENTS.md records the
+divergence.
+
+**2. `patchKernel()` never checked its first `decrypt()`.** It guarded
+`patch_kernel()`'s failure (that fix is documented in its own comment) but
+handed `patch_kernel()` whatever the preceding `decrypt()` left behind,
+which on failure is a zero-byte file that `patch_kernel()` crashes on. Now
+checked explicitly. With fix 1 in place this guard is reachable and turns
+the crash into one clean, attributed line.
+
+### What the sweep actually measured
+
+Full `--device AppleTV3,2` run, 34 known builds. Of those that are still
+downloadable from Apple:
+
+- **iBSS: patched successfully on every single one.**
+- **iBEC: patched successfully on every single one** — so RSA + ticket
+  patching, with `-b`/`-d`/`-k` all now dropped, works across the whole
+  known build range, not just the pinned target.
+- **DeviceTree: fine everywhere** (it is a pass-through, no patch step).
+- **KernelCache: fails on 20 of the 26 downloadable builds.** The six that
+  work are `10B329a`, `11B511d`, `12B466`, `12H903`, `12H911` and `12H914`.
+  8 of the 34 could not be downloaded at all (Apple no longer hosts them),
+  which the tool reports separately and does not count as a patch failure.
+
+Final tally: 6/34 complete, 8 undownloadable, and per-component patch
+failures of iBSS 0, iBEC 0, kernel 20, devicetree 0.
+
+The kernel result is measured, not a regression: `kJailbreakTargetBuild` is
+`10B329a`, which is one of the six that work, so the real flow is
+unaffected — the kernelcache always comes from that pinned build, never from
+whatever the device happens to be running. But "the kernel patch works on
+roughly a quarter of the fetchable AppleTV3,2 builds" was previously an
+unexamined assumption, and it is exactly the coverage gap
+`.claude/TODO.md` item 6 exists for.
+
+Two things in that table are worth a second look by whoever picks this up.
+The three newest builds (`12H903`/`12H911`/`12H914`) all patch cleanly while
+most of the middle of the range does not, which is not the shape you would
+expect from simple signature drift over time. And `12H606` — the build most
+of this project's real-hardware testing has been done against — is among the
+kernel failures. That does not affect the jailbreak flow (which never
+patches the device's own kernel), but it does mean any future diagnostic
+that wants to patch `12H606`'s kernelcache specifically will not work today.
+
+Still to do for item 5: `blackb0x` does not yet *consume*
+`dist/bootchain/`. The live path still downloads and patches inside the
+window the device is sitting in pwned DFU.

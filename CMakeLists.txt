@@ -1445,3 +1445,62 @@ add_dependencies(bake-all-ramdisks
     libplist_ext libfragmentzip_ext libgeneral_ext
     wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
 
+# ---------------------------------------------------------------------------
+# bake-all-bootloaders
+#
+# The counterpart to bake-all-ramdisks for everything that ISN'T the ramdisk:
+# iBSS, iBEC, KernelCache and DeviceTree, downloaded and patched ahead of
+# time for every (device, firmware) combination under Blackb0x/ImageKeys/.
+# That is .claude/TODO.md item 5 for the non-ramdisk half of the suite.
+#
+# Unlike bake-all-ramdisks this needs NO root at all — every step is
+# download, decrypt and byte-level file patching, with no loop mount and no
+# hdiutil. That is the whole reason it is a separate binary rather than a
+# flag on the other one: it can be run and re-run freely while iterating on
+# the patch logic itself, and it is the only way to exercise
+# Patcher::patchiBSS()/patchiBEC()/patchKernel() (and therefore the
+# iBoot32Patcher binary they fork/exec) across every known firmware with no
+# hardware attached.
+#
+# Shares Patcher.cpp with blackb0x itself rather than reimplementing the
+# patch calls, so the two cannot drift: if this tool patches a build
+# successfully, blackb0x's live path runs the identical code on it.
+# Deliberately does NOT link BakeRamdisk.cpp — Patcher::patchRamdisk()
+# shells out to the bake-all-ramdisks binary rather than linking it (see
+# resolveBakeAllRamdisksPath()), so the root-requiring code stays out of
+# this binary entirely.
+# ---------------------------------------------------------------------------
+
+# No Personalize.cpp: that is TSS/SHSH personalization for the
+# --stock-securerom diagnostic route only, and Patcher itself never calls it
+# (it only mentions it in comments). Leaving it out keeps libtatsu and the
+# img3-stitching code out of this binary.
+add_executable(bake-all-bootloaders
+    Blackb0x/Source/BakeAllBootloaders.cpp
+    Blackb0x/Source/IPSW.cpp
+    Blackb0x/Source/IPSWDownloader.cpp
+    Blackb0x/Source/Patcher.cpp
+    Blackb0x/Source/ResourcePath.cpp)
+
+target_include_directories(bake-all-bootloaders PRIVATE third_party/xpwn/includes)
+
+target_link_libraries(bake-all-bootloaders PRIVATE
+    cbpatcher
+    blackb0x_xpwntool
+    xpwn
+    deps::plist
+    deps::fragmentzip
+    deps::general
+    deps::curl
+    deps::wolfssl
+    ZLIB::ZLIB)
+
+# iBoot32Patcher: not linked (it is GPLv3 — see its own block above), but it
+# IS fork/exec'd by Patcher.cpp at runtime, so it has to exist next to this
+# binary for the tool to do anything. A build dependency rather than a link
+# one.
+add_dependencies(bake-all-bootloaders
+    iBoot32Patcher
+    libplist_ext libfragmentzip_ext libgeneral_ext
+    wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
+

@@ -382,6 +382,25 @@ that's now happened.
 
 ## 5. Pre-patch firmware components ahead of time, instead of after device enumeration
 
+**Partly done** — the non-ramdisk half now has a tool:
+`bake-all-bootloaders` (`Blackb0x/Source/BakeAllBootloaders.cpp`) downloads
+and patches iBSS/iBEC/KernelCache/DeviceTree ahead of time for every
+`(device, buildID)` under `Blackb0x/ImageKeys/`, writing
+`dist/bootchain/<device>_<buildID>/`. It shares `Patcher.cpp` with
+`blackb0x` itself, so the two cannot drift, and it needs **no root** (every
+step is download/decrypt/file-patch, no loop mount, no `hdiutil`) — which
+also makes it the only way to exercise `patchiBSS()`/`patchiBEC()`/
+`patchKernel()`, and therefore the `iBoot32Patcher` binary they fork/exec,
+across every known firmware with no hardware attached.
+
+Still to do for this item: `blackb0x` itself does not yet *consume*
+`dist/bootchain/`. The live path still downloads and patches inside the
+window the device is sitting in pwned DFU. Wiring the consumption side up
+is the remaining work, and it is the part that needs the real-hardware
+timing question below answered first.
+
+Original note follows.
+
 Not started. Today's flow (`Cli.cpp`, ported from `MainView.m`'s
 `jailbreakClick`/`checkExploit`/`downloadComponentsForBuildID`/
 `componentsReady` chain) only starts downloading and patching iBSS/iBEC/

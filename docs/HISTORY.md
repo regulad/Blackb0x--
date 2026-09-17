@@ -3095,3 +3095,62 @@ that wants to patch `12H606`'s kernelcache specifically will not work today.
 Still to do for item 5: `blackb0x` does not yet *consume*
 `dist/bootchain/`. The live path still downloads and patches inside the
 window the device is sitting in pwned DFU.
+
+## Correction: `-k` restored, `-t` made unconditional
+
+Two corrections to the entry above, both on direction from the project
+owner, and the first of them straightforwardly my error.
+
+**`-k` (KASLR) is back, unconditionally.** It had been dropped on the
+reasoning that nothing downstream reads the kernel slide — `patch_kernel()`
+patches the kernelcache file before upload and `entrypoint.c` is an ordinary
+userland PID 1. That argument was not good enough to justify the change:
+`Patcher.mm:248-249` passes `kaslr="TRUE"` on both of the original app's
+iBEC patches with no condition on it, and the original is the only
+configuration this project has ever seen boot. Dropping a patch the
+known-working reference applied unconditionally, on a first-principles
+argument and with no hardware to check it against, was the wrong call.
+
+**`-t` (ticket check) is now unconditional too**, and `patchiBEC()` has lost
+both of its parameters. `flags` was already dead (an explicit `(void)flags;`).
+`ticket` existed for one call site — a version heuristic carried over from
+the original `setIBECPath:` that passed `false` for paths containing "4.".
+There is no configuration in which a patched iBEC wants the ticket check
+left in: the only real question is whether a ticket gets *sent*, and that is
+decided at send time, not bake time. `sendStockTail()` (Cli.cpp:820) is
+already gated on `--stock-recovery`, so `--stock-firmware` on its own sends
+no ticket regardless. A patched iBEC that still enforced the check could
+never load blackb0x's own patched kernel or ramdisk anyway, since no real
+ticket can authorize those.
+
+iBEC is therefore `-r -k -t`, all three unconditional. iBSS stays `-r` alone
+(it has no kernel-load routine, so the others are no-ops there).
+
+### What unconditional `-k` costs on pre-iOS-6 builds
+
+Measured with `bake-all-bootloaders --device AppleTV2,1`, which is the only
+model with pre-6 firmware in `ImageKeys/`: iBEC patching now **fails** on
+those builds, e.g. `9A335a`:
+
+```
+main: Error doing patch_kaslr()!
+patchiBEC: iBoot32Patcher failed for .../iBEC.k66ap.RELEASE.dfu (exit 255)
+```
+
+This is not a mis-patch and not a regression in the patch itself —
+`patch_kaslr()` only implements `os_vers` 6, 7, 8 and 9, and returns failure
+for anything else. The underlying reason is that **KASLR did not exist
+before iOS 6**, so there is genuinely nothing to disable on those builds and
+asking for `-k` is asking for a patch that has no meaning there.
+
+It does not affect the real flow: `kJailbreakTargetBuild` is `10B329a`
+(6.1.3-era), where `patch_kaslr()` applies cleanly, and every component the
+jailbreak sends comes from that pinned build rather than from whatever the
+device is running. So this is a sweep-coverage consequence, not a
+functional one.
+
+Left unconditional deliberately rather than re-introducing a version gate,
+since a gate is exactly the kind of conditional that hid the `-t` problem.
+If pre-6 AppleTV2,1 builds ever need to patch cleanly, the honest fix is a
+`patch_kaslr()` that reports "nothing to do" for pre-6 iBoot instead of
+failure — a change to the fork, not a caller-side heuristic.

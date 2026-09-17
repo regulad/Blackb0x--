@@ -620,13 +620,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
             patcher.useStockIBEC(path);
             return;
         }
-        // Verbatim version heuristic from the original setIBECPath: — iBEC
-        // files for 4.x-era firmware need empty flags and no ticket.
-        if (path.find("4.") != std::string::npos) {
-            patcher.patchiBEC(path, "", false);
-        } else {
-            patcher.patchiBEC(path);
-        }
+        patcher.patchiBEC(path);
     });
 
     downloadAndPatch("KernelCache", manifest->kernelCachePath, [&](const std::string& path) {

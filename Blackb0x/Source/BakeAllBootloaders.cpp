@@ -252,15 +252,11 @@ static TargetResult bakeOne(const std::string& device, const std::string& buildI
 
     // Matches the non-stock branches of Cli.cpp's downloadAndPatchComponents()
     // exactly -- this tool only ever produces the real jailbreak suite, so
-    // none of the --stock-* diagnostic routes apply. The "4." version
-    // heuristic for iBEC is the same one carried over from the original
-    // setIBECPath: (4.x-era iBEC needs empty flags and no ticket patch).
+    // none of the --stock-* diagnostic routes apply.
     result.iBSS = fetchAndPatch("iBSS", manifest->iBSSPath,
                                  [&](const std::string& p) { return patcher.patchiBSS(p); });
-    result.iBEC = fetchAndPatch("iBEC", manifest->iBECPath, [&](const std::string& p) {
-        if (p.find("4.") != std::string::npos) return patcher.patchiBEC(p, "", false);
-        return patcher.patchiBEC(p);
-    });
+    result.iBEC = fetchAndPatch("iBEC", manifest->iBECPath,
+                                 [&](const std::string& p) { return patcher.patchiBEC(p); });
     result.kernel = fetchAndPatch("KernelCache", manifest->kernelCachePath, [&](const std::string& p) {
         return patcher.patchKernel(p, manifest->productVersion);
     });

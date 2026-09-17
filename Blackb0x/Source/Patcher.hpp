@@ -105,7 +105,7 @@ public:
     void loadKeysForDevice(const std::string& deviceID, const std::string& buildID);
 
     bool patchiBSS(const std::string& path);
-    bool patchiBEC(const std::string& path, const std::string& flags = "", bool ticket = true);
+    bool patchiBEC(const std::string& path);
     bool patchKernel(const std::string& path, const std::string& productVersion);
     // No path parameter (unlike patchiBSS()/patchiBEC()/patchKernel() above)
     // -- this never had one that actually did anything: it only ever looks

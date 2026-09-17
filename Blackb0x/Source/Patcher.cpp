@@ -274,8 +274,7 @@ bool Patcher::useStockIBSS(const std::string& path, bool stockSecurerom) {
     return true;
 }
 
-bool Patcher::patchiBEC(const std::string& path, const std::string& flags, bool ticket) {
-    (void)flags;
+bool Patcher::patchiBEC(const std::string& path) {
     const FirmwareKeyPair* k = keyFor("iBEC");
     if (!k) {
         fprintf(stderr, "patchiBEC: no iBEC keys loaded\n");
@@ -316,25 +315,37 @@ bool Patcher::patchiBEC(const std::string& path, const std::string& flags, bool 
     // It was being applied anyway because zzanehip's iBootPatcher() entry
     // point tested its RSA argument twice (fixed on our fork's branch, but
     // the CLI never had the bug at all).
-    // No -k either. patch_kaslr() NOPs out the branch that applies iBoot's
-    // KASLR slide, so the kernel lands at a predictable address. Nothing
-    // left in this flow needs that: patch_kernel()'s patches are applied to
-    // the kernelcache FILE before upload (position-independent within it,
-    // not dependent on any runtime slide), and entrypoint.c is an ordinary
-    // userland PID 1 that writes files and reboots -- there is no in-kernel
-    // payload here that needs to know where anything landed. It is also a
-    // hardcoded-offset patch (os_vers 8 -> kaslr_search - 0x29), so it is
-    // the kind of thing that only earns its place if something actually
-    // depends on it. Guarded (it verifies the byte is 0xD0 first), so
-    // removing it is not fixing a silent mis-patch -- just dropping a patch
-    // with no remaining purpose.
+    // -r, -k and -t, all three unconditional.
     //
-    // -t (patch_ticket_check) stays, and stays conditional: it is what makes
-    // a real APTicket unnecessary for everything iBEC goes on to load, which
-    // the whole non-stock flow depends on (see DeviceManager.hpp's
-    // sendStockRestoreTail() comment).
-    std::vector<std::string> iBECArgs = {"-r"};
-    if (ticket) iBECArgs.push_back("-t");
+    // -k (patch_kaslr) disables iBoot's kernel-slide randomization. This is
+    // what the original app did on every single iBEC patch
+    // (Patcher.mm:248-249 passes kaslr="TRUE" both times, with no condition
+    // on it), and the original is the only configuration this project has
+    // ever seen boot. It was briefly dropped here on the reasoning that
+    // nothing downstream reads the slide; that was wrong, and removing a
+    // patch the known-working reference applied unconditionally is not a
+    // change to make on an argument-from-first-principles basis.
+    //
+    // -t (patch_ticket_check) removes the APTicket requirement from
+    // everything iBEC goes on to load, which the whole non-stock flow
+    // depends on (see DeviceManager.hpp's sendStockRestoreTail() comment).
+    // It is unconditional because there is no configuration in which a
+    // patched iBEC wants the check left in: the question is only ever
+    // whether a ticket gets SENT, and that is decided at send time, not
+    // bake time -- sendStockTail() (Cli.cpp) is gated on --stock-recovery,
+    // so --stock-firmware on its own already sends no ticket. A patched
+    // iBEC that still enforced the check could never load blackb0x's own
+    // patched kernel/ramdisk, ticket or not, since no real ticket can
+    // authorize those.
+    //
+    // patchiBEC() therefore takes no flags/ticket parameters any more. The
+    // old `flags` argument was already dead (an explicit (void)flags), and
+    // the old `ticket=false` call site was a version heuristic carried over
+    // from the original setIBECPath: -- if patch_ticket_check genuinely
+    // cannot find its pattern on some early build, iBoot32Patcher exits
+    // nonzero and this function fails loudly, which is a far better outcome
+    // than silently shipping an iBEC that still wants a ticket.
+    std::vector<std::string> iBECArgs = {"-r", "-k", "-t"};
 
     // ONE patched iBEC now, not two. The downgrade/boot pair only ever
     // differed by the boot-args compiled into each (args1 carried rd=md0,

@@ -35,7 +35,7 @@ struct ManifestInfo {
     std::string iBECPath;
     std::string kernelCachePath;
     std::string deviceTreePath;
-    std::string restoreRamdiskPath;  // empty if onlyBootComponents
+    std::string restoreRamdiskPath;
     // Empty if this build's manifest doesn't list one (matches
     // idevicerestore's own recovery_send_applelogo(), which checks
     // build_identity_has_component() first and simply skips the whole
@@ -70,7 +70,7 @@ struct ManifestInfo {
 // string — matching the original's `[dict[@"BuildIdentities"] lastObject]`
 // exactly (the LAST identity, not the first — BuildManifest.plist commonly
 // lists multiple personalization variants).
-std::optional<ManifestInfo> parseManifest(const std::string& manifestPath, bool onlyBootComponents);
+std::optional<ManifestInfo> parseManifest(const std::string& manifestPath);
 
 // Plain HTTP GET via libcurl; returns the response body, or "" on failure.
 std::string httpGet(const std::string& url);

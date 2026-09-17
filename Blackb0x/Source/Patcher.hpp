@@ -66,8 +66,12 @@ bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildI
 
 struct PatchedComponents {
     std::optional<std::string> iBSS;
-    std::optional<std::string> iBECDowngrade;
-    std::optional<std::string> iBECBoot;
+    // One iBEC, not a downgrade/boot pair: the two only ever differed by
+    // the boot-args compiled into them, and those are set at runtime now
+    // (DeviceManager.cpp's sendKernelCache()). The tether-boot path that
+    // was the only consumer of the second variant is gone -- see
+    // docs/HISTORY.md.
+    std::optional<std::string> iBEC;
     std::optional<std::string> kernel;
     std::optional<std::string> ramdisk;
     std::optional<std::string> deviceTree;
@@ -230,8 +234,6 @@ public:
     // See PatchedComponents::buildID's own comment.
     void setBuildID(const std::string& buildID) { outputs_.buildID = buildID; }
 
-    bool onlyBootComponents = false;
-
     // --dont-check-firmware-sums (Cli.hpp's CliOptions): skip
     // patchRamdisk()'s own .sum sidecar staleness check (see that
     // function's comment) and use dist/<device>_<buildID>-Ramdisk.dmg as-
@@ -248,8 +250,8 @@ public:
 
     // Human-readable names of whichever components checkPatching() is
     // still waiting on -- empty once everything required is present.
-    // Mirrors checkPatching()'s own exact requirements (including the
-    // onlyBootComponents branch), so downloadAndPatchComponents()
+    // Mirrors checkPatching()'s own exact requirements, so
+    // downloadAndPatchComponents()
     // (Cli.cpp) can report specifically what's missing on failure instead
     // of a blanket "not all components patched successfully" with no
     // detail at all -- a silently-failed download or patch step

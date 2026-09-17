@@ -2937,3 +2937,55 @@ the `rd=md0` inversion) changes the stock-suite boot failure is an open
 question that needs the Mac. The `debug`/`RSA` fix is the first thing to
 bisect, since it is the one patch that was being applied against the
 project's own stated intent.
+
+## Tether-boot removed: one send flow, one iBEC, no `onlyBootComponents`
+
+With boot-args moved to runtime (previous entry) the tether-boot path had no
+remaining reason to exist, and keeping it was actively costing clarity: it
+was the reason there were two iBEC builds, two boot-args sets, and an
+`onlyBootComponents` flag threaded through four files. All of it is gone.
+There is now exactly one flow: iBSS → iBEC → RestoreLogo → Ramdisk →
+DeviceTree → KernelCache(`bootx`).
+
+Removed, and what each was for:
+
+- **`--tether-boot` / `CliOptions::tetherBoot`** — re-booted an
+  already-installed *tethered* jailbreak (one with no untether) by sending
+  iBEC and a kernelcache only, no Ramdisk, so the kernel rooted off NAND.
+- **`AppleTVDevice::didTetheredBoot`** — set by that path, read by nothing.
+- **`kTetherBootArgs`** and `sendKernelCache()`'s `ramdiskBoot` parameter —
+  the non-`rd=md0` boot-args existed only for that path. `sendKernelCache()`
+  now sets `kRamdiskBootArgs` unconditionally, which is correct because a
+  Ramdisk is always sent before it now.
+- **`onlyBootComponents`** — existed *solely* to express "tether-boot, so
+  skip RestoreLogo/Ramdisk/DeviceTree". It was always false once tether-boot
+  was gone, so it is dropped from `parseManifest()`, `Patcher`,
+  `sendStockRestoreTail()`, and `downloadAndPatchComponents()`; the two
+  `if (!onlyBootComponents)` blocks are now unconditional.
+- **`PatchedComponents::iBECDowngrade`/`iBECBoot`** → one `iBEC` field.
+  These had already become byte-identical files once boot-args left the
+  binary; tether-boot was the only consumer of the second variant.
+- **`prebootPathFor()`/`downgradePathFor()`** — no longer any second output
+  to name.
+- **`buildToRequest`** is now unconditionally `kJailbreakTargetBuild`.
+  Tether-boot was the only caller that requested `device.buildID` instead,
+  which is what let it target a firmware other than the one pinned build.
+
+**This is a real capability reduction, stated plainly rather than buried:**
+tether-boot was the only way to use the firmwares that have no untether —
+tvOS 7.x on Apple TV 3 and tvOS 7.1.2 on Apple TV 2,1 (`.claude/LEGACY_FLOW.md`
+logs that install as `"Installing iOS 7 tether"`, "genuinely tethered, no
+untether exists"). Installing on those builds was already unreachable from
+this port, since `buildToRequest` only ever resolved to the single pinned
+`kJailbreakTargetBuild`; removing tether-boot drops the ability to *re-boot*
+such an install afterwards. `README.md`'s device table no longer claims
+tethered support.
+
+Also dropped with it: the tether-boot preflight in `runCli()`, which
+asserted `device.jailbroken = 1`, defaulted an unknown AppleTV2,1 to
+7.1.2/11D258, required every other model to have connected in Normal mode
+first so its real version/build were known, and refused AppleTV2,1 on 6.1.4
+outright. None of those constraints apply to the install flow.
+
+Build is clean and `blackb0x_tests` passes. Nothing here has been run against
+hardware.

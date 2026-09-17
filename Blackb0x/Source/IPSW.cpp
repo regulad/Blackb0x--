@@ -130,7 +130,7 @@ static std::string plistDictString(plist_t dict, const char* key) {
     return result;
 }
 
-std::optional<ManifestInfo> parseManifest(const std::string& manifestPath, bool onlyBootComponents) {
+std::optional<ManifestInfo> parseManifest(const std::string& manifestPath) {
     std::ifstream f(manifestPath, std::ios::binary);
     if (!f) return std::nullopt;
     std::ostringstream ss;
@@ -188,7 +188,7 @@ std::optional<ManifestInfo> parseManifest(const std::string& manifestPath, bool 
     info.iBECPath = componentPath("iBEC");
     info.kernelCachePath = componentPath("KernelCache");
     info.deviceTreePath = componentPath("DeviceTree");
-    if (!onlyBootComponents) info.restoreRamdiskPath = componentPath("RestoreRamDisk");
+    info.restoreRamdiskPath = componentPath("RestoreRamDisk");
     info.restoreLogoPath = componentPath("RestoreLogo");
 
     // Matches idevicerestore's own recovery_send_loaded_by_iboot(): walk

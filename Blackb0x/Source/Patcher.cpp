@@ -354,8 +354,7 @@ bool Patcher::patchiBEC(const std::string& path, const std::string& flags, bool 
     fs::remove(decPath, ec);
     fs::remove(patchedPath, ec);
 
-    outputs_.iBECDowngrade = outPath;
-    outputs_.iBECBoot = outPath;
+    outputs_.iBEC = outPath;
 
     checkPatching();
     return true;
@@ -376,8 +375,7 @@ bool Patcher::useStockIBEC(const std::string& path) {
     fprintf(stderr,
             "--stock-recovery: sending the original downloaded iBEC untouched (still encrypted, still "
             "img3-wrapped) -- the stock iBSS that's now running still verifies its signature.\n");
-    outputs_.iBECDowngrade = path;
-    outputs_.iBECBoot = path;
+    outputs_.iBEC = path;
     checkPatching();
     return true;
 }
@@ -642,12 +640,8 @@ void Patcher::addLoadedByIBootComponent(const std::string& name, const std::stri
 void Patcher::checkPatching() {
     if (!outputs_.iBSS) return;
 
-    if (!onlyBootComponents) {
-        if (!outputs_.iBECDowngrade) return;
-        if (!outputs_.ramdisk) return;
-    } else {
-        if (!outputs_.iBECBoot) return;
-    }
+    if (!outputs_.iBEC) return;
+    if (!outputs_.ramdisk) return;
 
     if (!outputs_.kernel) return;
     if (!outputs_.deviceTree) return;
@@ -663,12 +657,8 @@ void Patcher::clearComponents() {
 std::vector<std::string> Patcher::missingRequiredComponents() const {
     std::vector<std::string> missing;
     if (!outputs_.iBSS) missing.push_back("iBSS");
-    if (!onlyBootComponents) {
-        if (!outputs_.iBECDowngrade) missing.push_back("iBEC (downgrade)");
-        if (!outputs_.ramdisk) missing.push_back("RestoreRamdisk");
-    } else {
-        if (!outputs_.iBECBoot) missing.push_back("iBEC (boot)");
-    }
+    if (!outputs_.iBEC) missing.push_back("iBEC");
+    if (!outputs_.ramdisk) missing.push_back("RestoreRamdisk");
     if (!outputs_.kernel) missing.push_back("KernelCache");
     if (!outputs_.deviceTree) missing.push_back("DeviceTree");
     return missing;

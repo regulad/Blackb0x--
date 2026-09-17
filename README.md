@@ -5,11 +5,17 @@ boot exploit — side-loads Cydia + Kodi. This is a portable CLI port of the ori
 app; it runs entirely from the command line, no GUI.
 
 Devices supported:
-- Apple TV 3,2 (A1469) (tvOS 8.4.x untethered, tvOS 7.x tethered)
-- Apple TV 3,1 (A1427) (tvOS 8.4.x untethered, tvOS 7.x tethered) — needs external
+- Apple TV 3,2 (A1469) (tvOS 8.4.x untethered)
+- Apple TV 3,1 (A1427) (tvOS 8.4.x untethered) — needs external
   hardware (an Arduino running [synackuk's fork of checkm8-A5](https://github.com/synackuk/checkm8-a5))
   to pwn DFU mode first; `blackb0x` picks up from there
-- Apple TV 2,1 (A1378) (tvOS 7.1.2 tethered, tvOS 6.1.4 untethered)
+- Apple TV 2,1 (A1378) (tvOS 6.1.4 untethered)
+
+The original app also had a tethered-boot mode (`--tether-boot`) for re-booting an
+already-installed tethered jailbreak on firmwares that have no untether — tvOS 7.x on
+Apple TV 3, tvOS 7.1.2 on Apple TV 2,1. That path has been removed: this port installs
+the untethered jailbreak only, and there is now exactly one send flow. See
+`docs/HISTORY.md`.
 
 **Tested hardware:** this portable port — **blackb0x--** — has only ever been
 verified against a real AppleTV3,2 running tvOS 7.9. Every other device/

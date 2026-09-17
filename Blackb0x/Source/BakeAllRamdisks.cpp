@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        auto manifest = parseManifest(manifestPath, /*onlyBootComponents=*/false);
+        auto manifest = parseManifest(manifestPath);
         if (!manifest || manifest->restoreRamdiskPath.empty()) {
             printf("WARNING: could not download ramdisk from apple.\n");
             fprintf(stderr, "bake-all-ramdisks: %s: no RestoreRamDisk component in BuildManifest.plist\n",
@@ -317,11 +317,12 @@ int main(int argc, char** argv) {
         // payloads and firmware-gated Depends: lines need to match what's
         // actually installed on the device's own NAND, which this baked
         // ramdisk never touches or reflects — so assume the newest known
-        // OS for this device MODEL (real per-device precision isn't
-        // available at bake time; tether-boot is the one path that already
-        // knows a specific real device's exact version, and doesn't use
-        // this baked persistence content at all — see Cli.cpp's tetherBoot
-        // handling). manifest->productVersion (this tuple's own version) is
+        // OS for this device MODEL. Real per-device precision isn't
+        // available at bake time at all now: the tether-boot path was the
+        // only one that ever knew a specific connected device's exact
+        // version (and did not use this baked persistence content anyway),
+        // and it has been removed — see docs/HISTORY.md.
+        // manifest->productVersion (this tuple's own version) is
         // only the last-resort fallback now, if even the newest-known-
         // version lookup fails.
         std::string productVersion;

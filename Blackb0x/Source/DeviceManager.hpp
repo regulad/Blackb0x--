@@ -59,7 +59,6 @@ struct AppleTVDevice {
     int pwnedDFU = -1;
     int jailbroken = 0;
     int jailbreakRunning = -1;
-    int didTetheredBoot = 0;
     int needsPostInstall = 1;
     int waitForRecovery = 0;
 };
@@ -140,13 +139,11 @@ public:
                  const std::string& buildID = "");
     int sendiBEC(const std::string& path, uint64_t ecid);
     int sendRamdisk(const std::string& path, uint64_t ecid);
-    // ramdiskBoot: true when a Ramdisk was actually sent before this and the
-    // kernel is meant to boot from it (the jailbreak path), false when the
-    // kernel should boot the installed OS off NAND instead (--tether-boot,
-    // which sends no Ramdisk at all). It selects the boot-args, which are now
-    // set at runtime with `setenv boot-args` rather than compiled into iBEC
-    // -- see sendKernelCache()'s own comment and Patcher.cpp's patchiBEC().
-    int sendKernelCache(const std::string& path, uint64_t ecid, bool ramdiskBoot);
+    // Boot-args (including rd=md0, since a Ramdisk is always sent before
+    // this now) are set at runtime with `setenv boot-args` rather than
+    // compiled into iBEC -- see sendKernelCache()'s own comment and
+    // Patcher.cpp's patchiBEC().
+    int sendKernelCache(const std::string& path, uint64_t ecid);
     int sendDeviceTree(const std::string& path, uint64_t ecid);
 
     // stockRecovery only (see sendComponentsToDevice()'s own comment for
@@ -159,7 +156,7 @@ public:
     // Sends the combined APTicket that authorizes every component after
     // iBSS together (see Personalize.hpp's own fetchAPTicket() comment
     // for why it's separate from personalizing iBSS itself), then
-    // (unless onlyBootComponents) RestoreLogo (if
+    // RestoreLogo (if
     // PatchedComponents::restoreLogo is set -- not every build's
     // manifest has one) / loaded-by-iBoot components (almost always
     // empty) / Ramdisk / DeviceTree, then KernelCache ('bootx') --
@@ -181,8 +178,7 @@ public:
     //
     // deviceModel is AppleTVDevice::deviceModel (the signed-build warning
     // before the TSS request).
-    int sendStockRestoreTail(uint64_t ecid, const PatchedComponents& components, const std::string& deviceModel,
-                              bool onlyBootComponents);
+    int sendStockRestoreTail(uint64_t ecid, const PatchedComponents& components, const std::string& deviceModel);
 
     // --- Jailbreak status polling (was checkJailbreak/checkJailbreakRunning) ---
     // Blocks for up to a few seconds while it handshakes with the device

@@ -132,7 +132,7 @@ cmake -S . -B build && cmake --build build -j$(nproc)
 # Writes dist/<device>_<buildID>-Ramdisk.dmg per firmware (gitignored):
 sudo ./build/bake-all-ramdisks [--signed-only]
 
-./build/blackb0x [--ecid <id> | --udid <id>] [--tether-boot] [--dry-run]
+./build/blackb0x [--ecid <id> | --udid <id>] [--dry-run]
 # (needs sudo instead, unless a udev rule already grants your own user raw
 # USB access to the device in DFU/Recovery/WTF mode — see README)
 ```

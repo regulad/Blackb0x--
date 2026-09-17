@@ -54,8 +54,6 @@ void printCliUsage(const char* argv0) {
     printf("Usage: %s [options]\n", argv0);
     printf("  --ecid <hex-or-decimal>   Pre-select a device by ECID (skips the menu)\n");
     printf("  --udid <udid>             Pre-select a device by UDID (Normal mode only)\n");
-    printf("  --tether-boot             Tether-boot an already-jailbroken device\n");
-    printf("                            (default: install the jailbreak fresh)\n");
     printf("  --dry-run                 Do everything up to but not including the\n");
     printf("                            exploit and the USB upload to the device —\n");
     printf("                            prints what would run/be sent instead\n");
@@ -155,8 +153,6 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.ecid = strtoull(nextArg("--ecid").c_str(), nullptr, 0);
         } else if (arg == "--udid") {
             options.udid = nextArg("--udid");
-        } else if (arg == "--tether-boot") {
-            options.tetherBoot = true;
         } else if (arg == "--dry-run") {
             options.dryRun = true;
         } else if (arg == "--no-pwn") {
@@ -484,11 +480,9 @@ static pid_t spawnBakeAllRamdisksBackground(const std::string& deviceModel, cons
 // the same patch* calls as a side effect of assignment).
 std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, const AppleTVDevice& device,
                                                               const std::string& buildToRequest,
-                                                              bool onlyBootComponents,
                                                               bool dontCheckFirmwareSums, bool stockRamdisk,
                                                               bool stockRecovery, bool stockFirmware,
                                                               bool stockSecurerom) {
-    patcher.onlyBootComponents = onlyBootComponents;
     patcher.dontCheckFirmwareSums = dontCheckFirmwareSums;
 
     printf("Downloading firmware for %s %s...\n", device.deviceModel.c_str(), buildToRequest.c_str());
@@ -515,7 +509,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
         return std::nullopt;
     }
 
-    auto manifest = parseManifest(manifestPath, onlyBootComponents);
+    auto manifest = parseManifest(manifestPath);
     if (!manifest) {
         fprintf(stderr, "Failed to parse BuildManifest.plist\n");
         return std::nullopt;
@@ -525,8 +519,8 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     patcher.setBuildIdentity(manifest->buildIdentity);
     patcher.setBuildID(manifest->realBuildID);
 
-    // On the real jailbreak path (not onlyBootComponents' tether-boot, and
-    // not stockRamdisk/stockFirmware's diagnostic routes below, which still
+    // On the real jailbreak path (not stockRamdisk/stockFirmware's
+    // diagnostic routes below, which still
     // need a real download+decrypt of RestoreRamdisk via useStockRamdisk()),
     // patcher.patchRamdisk() below never actually reads a downloaded
     // RestoreRamdisk at all -- it only ever looks at
@@ -544,7 +538,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // much later, at the point RestoreRamdisk would previously have been
     // dispatched, by which point it's had this entire function's remaining
     // wall-clock time to finish.
-    bool needsRealRamdisk = !onlyBootComponents && !stockRamdisk && !stockFirmware;
+    bool needsRealRamdisk = !stockRamdisk && !stockFirmware;
     pid_t backgroundBakePid = -1;
     if (needsRealRamdisk && ramdiskBakeNeeded(device.deviceModel, manifest->realBuildID, dontCheckFirmwareSums)) {
         if (canSelfBakeRamdisk()) {
@@ -666,50 +660,50 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
                           [&](const std::string& path) { patcher.addLoadedByIBootComponent(name, path); });
     }
 
-    if (!onlyBootComponents) {
-        if (stockRamdisk || stockFirmware) {
-            // Diagnostic routes: useStockRamdisk() genuinely needs the
-            // downloaded file (see its own comment) -- unchanged from
-            // before.
-            downloadAndPatch("RestoreRamdisk", manifest->restoreRamdiskPath,
-                              [&](const std::string& path) { patcher.useStockRamdisk(path, stockRecovery); });
-        } else {
-            // Real jailbreak path: nothing to download here at all (see the
-            // comment above where backgroundBakePid was set, right after
-            // this build's manifest was parsed). Join the background bake
-            // now, if one was started -- this is the actual join point: by
-            // now it's had this whole function's remaining download/patch
-            // pipeline as concurrent wall-clock time to finish, so this
-            // wait is often brief or immediate.
-            if (backgroundBakePid > 0) {
-                printf("Waiting for the background bake-all-ramdisks run (pid %d) to finish...\n",
-                       (int)backgroundBakePid);
-                fflush(stdout);
-                int status = 0;
-                if (waitpid(backgroundBakePid, &status, 0) < 0) {
-                    fprintf(stderr, "Failed to wait for background bake-all-ramdisks (pid %d): %s\n",
-                            (int)backgroundBakePid, strerror(errno));
-                } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-                    // Not necessarily fatal here -- patcher.patchRamdisk()
-                    // right below does its own authoritative dist/
-                    // existence + staleness check and will produce the
-                    // real error/exit behavior if this genuinely didn't
-                    // produce what's needed. Still worth surfacing loudly
-                    // rather than swallowing, since a silent background
-                    // failure would otherwise be indistinguishable from
-                    // "nothing was needed" until that later check fires.
-                    std::string how = WIFEXITED(status) ? ("exit code " + std::to_string(WEXITSTATUS(status)))
-                                                          : std::string("killed/crashed");
-                    fprintf(stderr,
-                            "Background bake-all-ramdisks did not finish successfully (%s) -- continuing; the "
-                            "next step will fail clearly if it genuinely didn't produce what this run needs.\n",
-                            how.c_str());
-                } else {
-                    printf("Background bake-all-ramdisks finished successfully.\n");
-                }
+    // onlyBootComponents is gone with the tether-boot path -- this was
+    // its only guard here, and it is now unconditionally taken.
+    if (stockRamdisk || stockFirmware) {
+        // Diagnostic routes: useStockRamdisk() genuinely needs the
+        // downloaded file (see its own comment) -- unchanged from
+        // before.
+        downloadAndPatch("RestoreRamdisk", manifest->restoreRamdiskPath,
+                          [&](const std::string& path) { patcher.useStockRamdisk(path, stockRecovery); });
+    } else {
+        // Real jailbreak path: nothing to download here at all (see the
+        // comment above where backgroundBakePid was set, right after
+        // this build's manifest was parsed). Join the background bake
+        // now, if one was started -- this is the actual join point: by
+        // now it's had this whole function's remaining download/patch
+        // pipeline as concurrent wall-clock time to finish, so this
+        // wait is often brief or immediate.
+        if (backgroundBakePid > 0) {
+            printf("Waiting for the background bake-all-ramdisks run (pid %d) to finish...\n",
+                   (int)backgroundBakePid);
+            fflush(stdout);
+            int status = 0;
+            if (waitpid(backgroundBakePid, &status, 0) < 0) {
+                fprintf(stderr, "Failed to wait for background bake-all-ramdisks (pid %d): %s\n",
+                        (int)backgroundBakePid, strerror(errno));
+            } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                // Not necessarily fatal here -- patcher.patchRamdisk()
+                // right below does its own authoritative dist/
+                // existence + staleness check and will produce the
+                // real error/exit behavior if this genuinely didn't
+                // produce what's needed. Still worth surfacing loudly
+                // rather than swallowing, since a silent background
+                // failure would otherwise be indistinguishable from
+                // "nothing was needed" until that later check fires.
+                std::string how = WIFEXITED(status) ? ("exit code " + std::to_string(WEXITSTATUS(status)))
+                                                      : std::string("killed/crashed");
+                fprintf(stderr,
+                        "Background bake-all-ramdisks did not finish successfully (%s) -- continuing; the "
+                        "next step will fail clearly if it genuinely didn't produce what this run needs.\n",
+                        how.c_str());
+            } else {
+                printf("Background bake-all-ramdisks finished successfully.\n");
             }
-            patcher.patchRamdisk();
         }
+        patcher.patchRamdisk();
     }
 
     if (!result) {
@@ -736,26 +730,24 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
 
 // Replaces MainView's componentsReady: — the final upload sequence. Sends
 // iBSS first; aborts back to a fresh DFU wait if that fails (matching the
-// original's "spawn the DFU helper again" recovery path). Which iBEC gets
-// sent, and whether DeviceTree/Ramdisk get sent at all, depends on whether
-// this is a tether-boot of an already-jailbroken device or a fresh install
-// — verbatim from the original's `self.selected_device.jailbroken == 1`
-// branch.
+// original's "spawn the DFU helper again" recovery path).
+//
+// There is exactly one flow now: iBSS -> iBEC -> RestoreLogo -> Ramdisk ->
+// DeviceTree -> KernelCache('bootx'). The original app also had a
+// tether-boot variant that skipped Ramdisk/DeviceTree and booted the
+// installed OS off NAND (its `self.selected_device.jailbroken == 1`
+// branch); that whole path is gone -- see docs/HISTORY.md.
 bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device, const PatchedComponents& components,
-                             bool tetherBoot, bool dryRun, bool stockRecovery, bool stockSecurerom) {
+                             bool dryRun, bool stockRecovery, bool stockSecurerom) {
     if (dryRun) {
         printf("(dry run) Would send:\n");
         printf("  iBSS%s\n", components.iBSS ? "" : " (missing, would fail here)");
-        if (tetherBoot) {
-            printf("  iBEC (downgrade)%s\n", components.iBECDowngrade ? "" : " (missing)");
-        } else {
-            printf("  iBEC (boot)%s\n", components.iBECBoot ? "" : " (missing)");
-            if (components.restoreLogo) printf("  RestoreLogo\n");
-            printf("  Ramdisk%s\n", components.ramdisk ? "" : " (missing)");
-            printf("  DeviceTree%s\n", components.deviceTree ? "" : " (missing)");
-        }
+        printf("  iBEC%s\n", components.iBEC ? "" : " (missing)");
+        if (components.restoreLogo) printf("  RestoreLogo\n");
+        printf("  Ramdisk%s\n", components.ramdisk ? "" : " (missing)");
+        printf("  DeviceTree%s\n", components.deviceTree ? "" : " (missing)");
         printf("  KernelCache%s\n", components.kernel ? "" : " (missing, would fail here)");
-        printf("(dry run) Would then wait for the Apple TV to %s\n", tetherBoot ? "boot" : "reboot");
+        printf("(dry run) Would then wait for the Apple TV to reboot\n");
         return true;
     }
 
@@ -801,12 +793,10 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     // all the way back to DFU mode, matching real idevicerestore's own
     // recovery_enter_restore(), which never closes its connection across
     // this same span either. See sendStockRestoreTail()'s own comment.
-    auto sendStockTail = [&](bool onlyBootComponents) -> bool {
-        const char* what = onlyBootComponents
-                               ? "APTicket + KernelCache"
-                               : "APTicket + RestoreLogo + Ramdisk + DeviceTree + KernelCache";
+    auto sendStockTail = [&]() -> bool {
+        const char* what = "APTicket + RestoreLogo + Ramdisk + DeviceTree + KernelCache";
         console::out("Sending %s...\n", what);
-        int i = deviceManager.sendStockRestoreTail(device.ecid, components, device.deviceModel, onlyBootComponents);
+        int i = deviceManager.sendStockRestoreTail(device.ecid, components, device.deviceModel);
         if (i != 0) {
             console::err("Failed to send the post-iBEC stock restore sequence. Re-enter DFU mode and try "
                          "again.\n");
@@ -816,81 +806,54 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
         return true;
     };
 
-    if (tetherBoot) {
-        console::out("Sending iBEC (downgrade)...\n");
-        int i = components.iBECDowngrade ? deviceManager.sendiBEC(*components.iBECDowngrade, device.ecid) : -1;
-        if (i != 0) {
-            console::err("Failed to send iBEC (downgrade) -- the device may have rebooted out of the exploited\n"
-                         "state instead of staying put. Re-enter DFU mode and try again.\n");
-            return false;
-        }
-        console::out("iBEC (downgrade) sent.\n");
-        device.didTetheredBoot = 1;
-
-        if (stockRecovery) {
-            if (!sendStockTail(/*onlyBootComponents=*/true)) return false;
-            device.waitForRecovery = 1;
-            console::out("Waiting for Apple TV to boot\n");
-            return true;
-        }
-    } else {
-        console::out("Sending iBEC (boot)...\n");
-        int i = components.iBECBoot ? deviceManager.sendiBEC(*components.iBECBoot, device.ecid) : -1;
-        if (i != 0) {
-            console::err("Failed to send iBEC (boot) -- the device may have rebooted out of the exploited state\n"
-                         "instead of staying put (see any reconnect-attempt lines above for detail). Re-enter DFU\n"
-                         "mode and try again.\n");
-            return false;
-        }
-        console::out("iBEC (boot) sent.\n");
-
-        if (stockRecovery) {
-            if (!sendStockTail(/*onlyBootComponents=*/false)) return false;
-            device.needsPostInstall = 1;
-            device.waitForRecovery = 1;
-            console::out("Waiting for Apple TV to reboot\n");
-            return true;
-        }
-
-        console::out("Sending Ramdisk...\n");
-        i = components.ramdisk ? deviceManager.sendRamdisk(*components.ramdisk, device.ecid) : -1;
-        if (i != 0) {
-            console::err("Failed to send Ramdisk. Re-enter DFU mode and try again.\n");
-            return false;
-        }
-        console::out("Ramdisk sent.\n");
-
-        console::out("Sending DeviceTree...\n");
-        i = components.deviceTree ? deviceManager.sendDeviceTree(*components.deviceTree, device.ecid) : -1;
-        if (i != 0) {
-            console::err("Failed to send DeviceTree. Re-enter DFU mode and try again.\n");
-            return false;
-        }
-        console::out("DeviceTree sent.\n");
-
-        device.needsPostInstall = 1;
+    console::out("Sending iBEC...\n");
+    int i = components.iBEC ? deviceManager.sendiBEC(*components.iBEC, device.ecid) : -1;
+    if (i != 0) {
+        console::err("Failed to send iBEC -- the device may have rebooted out of the exploited state\n"
+                     "instead of staying put (see any reconnect-attempt lines above for detail). Re-enter DFU\n"
+                     "mode and try again.\n");
+        return false;
     }
+    console::out("iBEC sent.\n");
+
+    if (stockRecovery) {
+        if (!sendStockTail()) return false;
+        device.needsPostInstall = 1;
+        device.waitForRecovery = 1;
+        console::out("Waiting for Apple TV to reboot\n");
+        return true;
+    }
+
+    console::out("Sending Ramdisk...\n");
+    i = components.ramdisk ? deviceManager.sendRamdisk(*components.ramdisk, device.ecid) : -1;
+    if (i != 0) {
+        console::err("Failed to send Ramdisk. Re-enter DFU mode and try again.\n");
+        return false;
+    }
+    console::out("Ramdisk sent.\n");
+
+    console::out("Sending DeviceTree...\n");
+    i = components.deviceTree ? deviceManager.sendDeviceTree(*components.deviceTree, device.ecid) : -1;
+    if (i != 0) {
+        console::err("Failed to send DeviceTree. Re-enter DFU mode and try again.\n");
+        return false;
+    }
+    console::out("DeviceTree sent.\n");
+
+    device.needsPostInstall = 1;
 
     // Only reached when stockRecovery is unset -- sendStockTail() above
     // already includes KernelCache and returns directly otherwise.
     //
-    // ramdiskBoot = !tetherBoot, and that is not a restatement of the flag:
-    // the branch above sends Ramdisk + DeviceTree only in the non-tether
-    // (jailbreak) case, so that is exactly the case where a ramdisk exists
-    // for the kernel to root-mount. --tether-boot reaches here having sent
-    // iBEC and nothing else, and needs to boot the installed OS off NAND.
-    //
-    // This corrects a real inversion in the compiled-in boot-args that used
-    // to decide this: patchiBEC()'s args1 (WITH rd=md0) went into the iBEC
-    // that --tether-boot sends, and args2 (WITHOUT it) into the iBEC the
-    // jailbreak path sends -- i.e. exactly backwards. The jailbreak path was
-    // uploading a ramdisk and then telling the kernel to root off NAND
-    // anyway, so entrypoint.c could never have run as PID 1.
+    // A Ramdisk and DeviceTree were just sent, so the kernel boots from the
+    // ramdisk: sendKernelCache() sets `rd=md0` unconditionally now. The old
+    // tether-boot path was the only caller that wanted anything else, and it
+    // had the two boot-args sets wired up backwards anyway -- the compiled-in
+    // args WITH rd=md0 went into the iBEC that sent no ramdisk, and the ones
+    // WITHOUT it into this path, so entrypoint.c could never have run as
+    // PID 1. See docs/HISTORY.md.
     console::out("Sending KernelCache...\n");
-    int kernelResult = components.kernel
-                           ? deviceManager.sendKernelCache(*components.kernel, device.ecid,
-                                                           /*ramdiskBoot=*/!tetherBoot)
-                           : -1;
+    int kernelResult = components.kernel ? deviceManager.sendKernelCache(*components.kernel, device.ecid) : -1;
     if (kernelResult != 0) {
         console::err("Failed to send KernelCache.\n");
         return false;
@@ -898,7 +861,7 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     console::out("KernelCache sent.\n");
 
     device.waitForRecovery = 1;
-    console::out("%s\n", tetherBoot ? "Waiting for Apple TV to boot" : "Waiting for Apple TV to reboot");
+    console::out("Waiting for Apple TV to reboot\n");
     return true;
 }
 
@@ -1134,33 +1097,6 @@ int runCli(const CliOptions& options) {
         if (AppleTVDevice* d = deviceManager.deviceWithUDID("", ecid)) device = *d;
     }
 
-    bool tetherBoot = options.tetherBoot;
-
-    if (tetherBoot) {
-        // Verbatim from MainView's tetherbootClick: an already-jailbroken
-        // AppleTV2,1 with unknown version/build is assumed to be 7.1.2 —
-        // a real, documented device-support assumption, not a placeholder.
-        // Any other model must already have connected in Normal mode once
-        // (so its real version/buildID are known) before a tether-boot can
-        // be attempted at all.
-        device.jailbroken = 1;
-        if (device.version.empty() || device.buildID.empty()) {
-            if (device.deviceModel == "AppleTV2,1") {
-                device.version = "7.1.2";
-                device.buildID = "11D258";
-            } else {
-                fprintf(stderr, "Please connect this device in Normal Mode first (need its version/build).\n");
-                return 1;
-            }
-        }
-        // Verbatim from refreshInterface: AppleTV2,1 on 6.1.4 doesn't
-        // support the tether-boot path.
-        if (device.deviceModel == "AppleTV2,1" && device.version == "6.1.4") {
-            fprintf(stderr, "Tethered boot is not supported on AppleTV2,1 6.1.4.\n");
-            return 1;
-        }
-    }
-
     if (device.mode != "DFU") {
         {
             // Instructions the user has to follow step by step -- a device
@@ -1212,7 +1148,7 @@ int runCli(const CliOptions& options) {
                 joined.c_str());
     }
 
-    std::string buildToRequest = tetherBoot ? device.buildID : kJailbreakTargetBuild;
+    std::string buildToRequest = kJailbreakTargetBuild;
     if (device.jailbroken) buildToRequest = device.buildID;
     printf("Targeting %s %s for this run.\n", device.deviceModel.c_str(), buildToRequest.c_str());
     // Both --stock-securerom (real SecureROM, no checkm8) AND --stock-recovery
@@ -1279,7 +1215,7 @@ int runCli(const CliOptions& options) {
         }
     }
 
-    auto components = downloadAndPatchComponents(patcher, device, buildToRequest, tetherBoot,
+    auto components = downloadAndPatchComponents(patcher, device, buildToRequest,
                                                    options.dontCheckFirmwareSums, options.stockRamdisk,
                                                    options.stockRecovery, options.stockFirmware,
                                                    options.stockSecurerom);
@@ -1294,7 +1230,7 @@ int runCli(const CliOptions& options) {
         return 1;
     }
 
-    if (!sendComponentsToDevice(deviceManager, device, *components, tetherBoot, options.dryRun,
+    if (!sendComponentsToDevice(deviceManager, device, *components, options.dryRun,
                                  options.stockRecovery, options.stockSecurerom)) {
         return 1;
     }
@@ -1313,8 +1249,7 @@ int runCli(const CliOptions& options) {
                "non-jailbroken state if this run succeeded.\n",
                joined.c_str());
     } else {
-        printf("\nDone. %s\n", tetherBoot ? "The Apple TV should now boot the tethered jailbreak."
-                                           : "The Apple TV should now reboot into the jailbroken system.");
+        printf("\nDone. The Apple TV should now reboot into the jailbroken system.\n");
     }
     return 0;
 }

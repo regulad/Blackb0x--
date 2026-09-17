@@ -1657,13 +1657,7 @@ static bool checkDeviceLeftRecoveryModeAfterBoot(uint64_t ecid) {
 // writes, so there is nothing further to ask the kernel for.
 static const char* const kRamdiskBootArgs =
     "setenv boot-args rd=md0 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
-// No rd=md0: --tether-boot sends iBEC and a kernelcache only, no Ramdisk, so
-// this boots the installed OS off NAND. The AMFI/code-signing args stay,
-// since that path exists to run an already-jailbroken system tethered.
-static const char* const kTetherBootArgs =
-    "setenv boot-args -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
-
-int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid, bool ramdiskBoot) {
+int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid) {
     // get_tv_patient(): same reasoning as sendiBEC() above -- this reconnect
     // follows Ramdisk's own NOTIFY_FINISH-triggered reset.
     irecv_client_t client = get_tv_patient(ecid);
@@ -1674,10 +1668,9 @@ int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t
     // the kernelcache upload and its zero-length DFU_DNLOAD (dnloadFinish)
     // and before 'bootx' -- byte-for-byte the order real idevicerestore uses,
     // and the same order sendStockRestoreTail() below already follows.
-    const char* bootArgsCommand = ramdiskBoot ? kRamdiskBootArgs : kTetherBootArgs;
-    fprintf(stderr, "sendKernelCache: %s\n", bootArgsCommand);
+    fprintf(stderr, "sendKernelCache: %s\n", kRamdiskBootArgs);
     int result = sendFileThenCommand(client, "sendKernelCache", KernelCache_Path, "bootx", false, 1, true,
-                                      bootArgsCommand);
+                                      kRamdiskBootArgs);
     if (result == 0 && !checkDeviceLeftRecoveryModeAfterBoot(ecid)) {
         result = -1;
     }
@@ -1695,7 +1688,7 @@ int DeviceManager::sendDeviceTree(const std::string& DeviceTree_Path, uint64_t e
 }
 
 int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& components,
-                                         const std::string& deviceModel, bool onlyBootComponents) {
+                                         const std::string& deviceModel) {
     irecv_client_t client = get_tv_patient(ecid);
     if (!client) {
         fprintf(stderr, "sendStockRestoreTail: device did not reconnect\n");
@@ -1775,51 +1768,51 @@ int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& 
         return -1;
     }
 
-    if (!onlyBootComponents) {
-        if (components.restoreLogo) {
-            if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(RestoreLogo)", *components.restoreLogo,
-                                                   "setpicture 4")) {
-                if (client) irecv_close(client);
-                return -1;
-            }
-            err = irecv_send_command(client, "bgcolor 0 0 0");
-            if (err != IRECV_E_SUCCESS) {
-                fprintf(stderr, "sendStockRestoreTail: failed to send 'bgcolor 0 0 0' command: %s\n",
-                        irecv_strerror(err));
-                irecv_close(client);
-                return -1;
-            }
-        }
-
-        for (const auto& [name, path] : components.loadedByIBoot) {
-            if (!sendFileThenCommandWithReconnect(name.c_str(), path, "firmware")) {
-                if (client) irecv_close(client);
-                return -1;
-            }
-        }
-
-        if (!components.ramdisk) {
-            fprintf(stderr, "sendStockRestoreTail: no ramdisk to send\n");
-            irecv_close(client);
-            return -1;
-        }
-        warnIfRamdiskExceedsDeviceLimit(client, *components.ramdisk);
-        if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(Ramdisk)", *components.ramdisk, "ramdisk",
-                                               /*bReq=*/0, "getenv ramdisk-delay")) {
+    // onlyBootComponents is gone with the tether-boot path -- this was its
+    // only guard here, and it is now unconditionally taken.
+    if (components.restoreLogo) {
+        if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(RestoreLogo)", *components.restoreLogo,
+                                               "setpicture 4")) {
             if (client) irecv_close(client);
             return -1;
         }
-
-        if (!components.deviceTree) {
-            fprintf(stderr, "sendStockRestoreTail: no devicetree to send\n");
+        err = irecv_send_command(client, "bgcolor 0 0 0");
+        if (err != IRECV_E_SUCCESS) {
+            fprintf(stderr, "sendStockRestoreTail: failed to send 'bgcolor 0 0 0' command: %s\n",
+                    irecv_strerror(err));
             irecv_close(client);
             return -1;
         }
-        if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(DeviceTree)", *components.deviceTree,
-                                               "devicetree")) {
+    }
+
+    for (const auto& [name, path] : components.loadedByIBoot) {
+        if (!sendFileThenCommandWithReconnect(name.c_str(), path, "firmware")) {
             if (client) irecv_close(client);
             return -1;
         }
+    }
+
+    if (!components.ramdisk) {
+        fprintf(stderr, "sendStockRestoreTail: no ramdisk to send\n");
+        irecv_close(client);
+        return -1;
+    }
+    warnIfRamdiskExceedsDeviceLimit(client, *components.ramdisk);
+    if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(Ramdisk)", *components.ramdisk, "ramdisk",
+                                           /*bReq=*/0, "getenv ramdisk-delay")) {
+        if (client) irecv_close(client);
+        return -1;
+    }
+
+    if (!components.deviceTree) {
+        fprintf(stderr, "sendStockRestoreTail: no devicetree to send\n");
+        irecv_close(client);
+        return -1;
+    }
+    if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(DeviceTree)", *components.deviceTree,
+                                           "devicetree")) {
+        if (client) irecv_close(client);
+        return -1;
     }
 
     if (!components.kernel) {

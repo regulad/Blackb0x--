@@ -3143,6 +3143,24 @@ for anything else. The underlying reason is that **KASLR did not exist
 before iOS 6**, so there is genuinely nothing to disable on those builds and
 asking for `-k` is asking for a patch that has no meaning there.
 
+The full sweep puts the boundary exactly where that explanation predicts.
+iBEC fails on precisely the iOS 5-era builds -- `8M89`, `9A334v`, `9A335a`,
+`9A336a`, `9A405l`, `9A406a`, `9B179b`, `9B206f`, `9B830` -- and succeeds on
+every iOS 6-or-later build in the set (`10A406e`, `10A831`, `10B329a`,
+`10B809`, `11A502`, `11B511d`, `11B554a`, `11D169b`, `11D201c`, `11D257c`,
+`11D258`). Nine failures, all on one side of the iOS 6 line, none on the
+other. iBSS patches cleanly on every build that downloaded at all; the six
+iBSS/DeviceTree "failures" are the iOS 4.x-era `8C*`/`8F*` builds Apple no
+longer hosts, which the tool distinguishes in its note column.
+
+One real gotcha this run exposed in the tool itself: three targets reported
+"already built, skipping", carrying output from the earlier run made
+*before* `-k` was restored. Staleness here is `--force`-only by design (the
+inputs are Apple's immutable per-build components, so only this project's
+own patch code changes the output) -- but that means **any change to the
+patch flags or patch code requires `--force`**, or the sweep silently
+reports stale successes. Worth remembering before reading any table.
+
 It does not affect the real flow: `kJailbreakTargetBuild` is `10B329a`
 (6.1.3-era), where `patch_kaslr()` applies cleanly, and every component the
 jailbreak sends comes from that pinned build rather than from whatever the

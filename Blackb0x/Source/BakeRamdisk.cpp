@@ -1904,8 +1904,7 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
 // missing loose asset elsewhere: a ramdisk with no packages to install
 // can't actually finish the jailbreak.
 static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmwareVersion,
-                           std::vector<std::string>& outResolvedPackages,
-                           std::vector<std::string>& outPicklist) {
+                           std::vector<std::string>& outResolvedPackages) {
     GlobalDebcacheResult result;
     if (!computeGlobalDebcacheOnce(firmwareVersion, result)) {
         return false;
@@ -1928,16 +1927,15 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
     allOk &= stageAptListsCache(blackb0xRoot, result.aptListsDir);
 
     // The bundled local apt repo is NOT staged here -- it is
-    // xyz.regulad.blackb0x package content. package/build.sh builds it from
-    // the intersection of this picklist and package/local_only_debs.txt, and
-    // generates its Packages index with the real dpkg-scanpackages, so the
-    // picklist is what gets handed back rather than a prebuilt directory.
+    // xyz.regulad.blackb0x package content, and package/build.sh builds it
+    // itself from package/local_only_debs.txt (see its own comment for why no
+    // picklist is involved: every local-only filename is in the picklist
+    // unconditionally, so filtering against it would be a no-op).
     //
     // The debcache staged above (private/var/cache/apt/archives + apt-lists)
     // is a different thing entirely: the native apt cache, filled by the
     // baker with whatever could not usefully be pre-baked. Both happen to be
     // .debs, which is the only reason they were ever conflated.
-    outPicklist = result.allFilenames;
 
     outResolvedPackages = result.resolvedPackages;
     return allOk;
@@ -2398,8 +2396,7 @@ static bool stageVersionBranch(const fs::path& blackb0xRoot, const std::string& 
 // .deb ships them unprefixed, which is right for dpkg on-device (iOS's /etc
 // and /var are symlinks into /private), but /blackb0x is a flat mirror that
 // entrypoint.c replicates literally, so the real paths are used here.
-static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string& productVersion,
-                                  const std::vector<std::string>& picklist) {
+static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string& productVersion) {
     std::string stagingDir = makeTempDir("blackb0x-package-stage-");
     std::string outDir = makeTempDir("blackb0x-package-out-");
     if (stagingDir.empty() || outDir.empty()) {
@@ -2421,17 +2418,10 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
         return false;
     }
 
-    // build.sh builds the bundled local repo itself, from the intersection of
-    // this picklist and package/local_only_debs.txt. It is handed the picklist
-    // rather than a finished directory so the package owns its own repo
-    // construction (including generating the Packages index with the real
-    // dpkg-scanpackages, which only exists inside the container).
-    std::string picklistPath = outDir + "/picklist.txt";
-    {
-        std::ofstream f(picklistPath);
-        for (const auto& fn : picklist) f << fn << "\n";
-    }
-    setenv("BLACKB0X_PICKLIST", picklistPath.c_str(), 1);
+    // build.sh builds the bundled local repo itself, straight from
+    // package/local_only_debs.txt, and generates its Packages index with the
+    // real dpkg-scanpackages inside the container. Only the .deb source
+    // directory has to be pointed at, since it is not under package/.
     setenv("BLACKB0X_DEBS_DIR", fs::absolute(resolveDebsPath()).c_str(), 1);
 
     std::string debPath = outDir + "/xyz.regulad.blackb0x.deb";
@@ -2520,9 +2510,8 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
     // bundled local repo -- arrives as one real .deb instead of a dozen
     // stageFile() calls dpkg had no record of.
     std::vector<std::string> resolvedPackages;
-    std::vector<std::string> picklist;
-    if (!stageDebcache(blackb0xRoot, productVersion, resolvedPackages, picklist)) ok = false;
-    if (!stageBlackb0xPackage(blackb0xRoot, productVersion, picklist)) ok = false;
+    if (!stageDebcache(blackb0xRoot, productVersion, resolvedPackages)) ok = false;
+    if (!stageBlackb0xPackage(blackb0xRoot, productVersion)) ok = false;
     if (!stageVersionBranch(blackb0xRoot, productVersion)) ok = false;
 
     return ok;

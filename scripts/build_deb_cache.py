@@ -63,9 +63,8 @@ configured repo are FATAL for the whole run, with a deliberate exception
 has a real Packages stanza but genuinely doesn't satisfy its own Depends:
 firmware constraint against this sandbox's synthetic firmware version —
 expected, not a bug (see INNER_SCRIPT's own comment). net.tihmstar.etasonuntether
-used to be a second exception here for the same reason, but isn't
-apt-attempted at all anymore — see local_only_debs.txt's own comment on
-why. Anything else failing to resolve is exactly
+is a second exception for the same reason — it is applied statically by
+BakeRamdisk.cpp's stageEtasonatv() rather than by apt. Anything else failing to resolve is exactly
 the kind of silent breakage this used to just warn-and-skip past — real
 packages this project actually needs
 (see the "essential" incident: it turned out to be genuinely gone from
@@ -181,15 +180,19 @@ LOCAL_ONLY_LIST = PACKAGE_DIR / "local_only_debs.txt"
 # stageP0sixspwn() extracts straight out of its real .deb in
 # Blackb0x/Debs/ instead of going through apt resolution.
 #
-# net.tihmstar.etasonuntether used to be here too (same firmware-gated
-# reasoning — Depends: firmware (= 8.4.1) doesn't satisfy this sandbox's
-# synthetic firmware pin below), but it's not apt-attempted at all anymore:
-# it moved to package/local_only_debs.txt once repo.tihmstar.net (the
-# only repo that ever carried its Packages stanza) turned out to be an
-# unreliable live dependency — see Blackb0x/Misc/apt/net.tihmstar.list.disabled
-# and local_only_debs.txt's own comment on it.
+# net.tihmstar.etasonuntether is here for the same firmware-gated reason:
+# Depends: firmware (= 8.4.1) cannot satisfy this sandbox's synthetic firmware
+# pin below. It briefly moved to local_only_debs.txt instead (resolving through
+# a local file:// repo rather than repo.tihmstar.net, whose live
+# Packages/Release have been seen out of sync — see
+# Blackb0x/Misc/apt/net.tihmstar.list.disabled), but it is applied STATICALLY
+# by BakeRamdisk.cpp's stageEtasonatv(), with this project's own untether.bin
+# overriding the one its .deb ships. Shipping it through a local repo as well
+# meant two install paths for one package, so it is back to being a tolerated
+# resolution failure here, exactly like p0sixspwn above it.
 KNOWN_EXPECTED_UNRESOLVABLE = {
     "com.ih8sn0w-squiffy-winocm.p0sixspwn",
+    "net.tihmstar.etasonuntether",
 }
 
 # The one and only architecture every repo this project uses actually

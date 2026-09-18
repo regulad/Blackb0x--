@@ -30,10 +30,13 @@
 # apt at all today (its Depends: firmware constraint doesn't match this
 # project's sandboxed resolution — see Blackb0x/Misc/README.md and
 # scripts/build_deb_cache.py's KNOWN_EXPECTED_UNRESOLVABLE).
-# net.tihmstar.etasonuntether isn't even apt-attempted anymore at all (see
-# Blackb0x/Misc/local_only_debs.txt — it now reaches the device through a
-# local file:// repo instead of a live one), so it WILL show up as
-# "resolved" for postinstall.sh's own real `apt-get install` purposes.
+# net.tihmstar.etasonuntether is the same case: applied statically by
+# BakeRamdisk.cpp's stageEtasonatv() (with this project's own untether.bin
+# overriding the one its .deb ships), and a tolerated resolution failure in
+# KNOWN_EXPECTED_UNRESOLVABLE alongside p0sixspwn. It briefly reached the
+# device through a local file:// repo instead; that was removed, since the
+# static override is the path that actually matters and two install paths for
+# one package is one too many.
 # Both entries are belt-and-suspenders regardless: they belong here on
 # their own postinst's merits (etasonuntether's tests the live jsc stage1
 # exploit and can't run in a bootstrap sandbox at all) independent of

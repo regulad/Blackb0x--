@@ -7,10 +7,8 @@
 # [packages-file] overrides package/packages.txt; only useful for testing.
 #
 # Environment:
-#   BLACKB0X_PICKLIST    path to a picklist (one .deb filename per line -- the
-#                        bake's full resolved closure). Required to build the
-#                        bundled local repo; without it no local repo is added.
-#   BLACKB0X_DEBS_DIR    where those .deb files live (default Blackb0x/Debs).
+#   BLACKB0X_DEBS_DIR    where the local-only .deb files live
+#                        (default Blackb0x/Debs).
 #   LOCAL_ONLY_LIST      overrides package/local_only_debs.txt.
 #
 # <staging-dir> is a complete, ready-to-package tree: DEBIAN/ plus the payload
@@ -66,14 +64,16 @@ fi
 
 # The bundled file-backed apt repository at /var/.blackb0x/local-debs.
 #
-# Built from the INTERSECTION of the picklist and local_only_debs.txt: the
-# former is what this bake actually resolved (apt's transitive closure plus the
-# local-only entries), the latter is every .deb that can only ever come from a
-# local repo because no live repo carries it. Taking the intersection rather
-# than local_only_debs.txt wholesale means a local-only package that this
-# firmware did not end up needing does not get shipped.
+# Contents are exactly package/local_only_debs.txt -- every .deb that can only
+# ever come from a local repo, because no live repo carries a usable stanza for
+# it. No intersection with the bake's picklist: build_deb_cache.py adds every
+# local-only filename to that picklist unconditionally (it only checks the file
+# exists, fatally), so picklist n local_only_debs.txt is always just
+# local_only_debs.txt. Filtering against it would be a guaranteed no-op that
+# made this script need bake state it does not otherwise want.
 #
-# Both files list .deb FILENAMES, so this matches on filename directly.
+# That is what keeps the package buildable on its own: everything it needs is
+# checked in -- this list, packages.txt, layout/, and Blackb0x/Debs.
 #
 # The Packages index is generated in the container by the real
 # dpkg-scanpackages (see the container command at the bottom) -- apt needs a
@@ -84,33 +84,23 @@ fi
 : "${BLACKB0X_DEBS_DIR:=$(dirname "$0")/../Blackb0x/Debs}"
 LOCAL_DEBS_DEST="$STAGING/var/.blackb0x/local-debs"
 
-if [ -n "${BLACKB0X_PICKLIST:-}" ]; then
-    if [ ! -f "$BLACKB0X_PICKLIST" ]; then
-        echo "$0: BLACKB0X_PICKLIST=$BLACKB0X_PICKLIST does not exist" >&2
-        exit 1
-    fi
-    if [ ! -f "$LOCAL_ONLY_LIST" ]; then
-        echo "$0: $LOCAL_ONLY_LIST does not exist" >&2
-        exit 1
-    fi
+if [ -f "$LOCAL_ONLY_LIST" ]; then
     mkdir -p "$LOCAL_DEBS_DEST"
-    # Strip comments/blanks from both sides, then intersect.
-    sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$LOCAL_ONLY_LIST" | grep -v '^$' | sort -u > "$STAGING/.local-only.tmp"
-    sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$BLACKB0X_PICKLIST" | grep -v '^$' | sort -u > "$STAGING/.picklist.tmp"
-    WANTED=$(comm -12 "$STAGING/.local-only.tmp" "$STAGING/.picklist.tmp")
-    rm -f "$STAGING/.local-only.tmp" "$STAGING/.picklist.tmp"
-
+    WANTED=$(sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$LOCAL_ONLY_LIST" | grep -v '^$' || true)
     if [ -z "$WANTED" ]; then
-        echo "$0: note: no local-only .deb from $LOCAL_ONLY_LIST appears in the picklist; local repo will be empty" >&2
+        echo "$0: note: $LOCAL_ONLY_LIST lists nothing; local repo will be empty" >&2
     fi
     for f in $WANTED; do
         if [ ! -f "$BLACKB0X_DEBS_DIR/$f" ]; then
-            echo "$0: $LOCAL_ONLY_LIST lists $f and the picklist wants it, but $BLACKB0X_DEBS_DIR/$f is missing" >&2
+            echo "$0: $LOCAL_ONLY_LIST lists $f but $BLACKB0X_DEBS_DIR/$f is missing" >&2
             exit 1
         fi
         cp "$BLACKB0X_DEBS_DIR/$f" "$LOCAL_DEBS_DEST/$f"
         echo "$0: local repo <- $f" >&2
     done
+else
+    echo "$0: $LOCAL_ONLY_LIST does not exist" >&2
+    exit 1
 fi
 
 # postinstall.sh's install list is substituted HERE, at package-build time,

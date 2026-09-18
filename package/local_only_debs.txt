@@ -20,25 +20,21 @@
 # deliberately never bake-time-preinstalled).
 essential_0-1_iphoneos-arm.deb
 
-# net.tihmstar.etasonuntether — different reason than essential above, and
-# different reason than com.ih8sn0w-squiffy-winocm.p0sixspwn's own
-# still-live-but-firmware-gated KNOWN_EXPECTED_UNRESOLVABLE tolerance in
-# build_deb_cache.py: this package's real Packages stanza on
-# repo.tihmstar.net does exist, and — on a real device actually running
-# firmware 8.4.1 (this package's own `Depends: firmware (= 8.4.1)`) —
-# would genuinely resolve. It's here instead because that repo's live
-# Packages/Packages.gz has been observed transiently out of sync with its
-# own Release file (see Blackb0x/Misc/apt/net.tihmstar.list.disabled),
-# making it an unreliable live dependency for something this project
-# already has a real, previously-recovered .deb for. Real apt resolution
-# is skipped entirely for it now (same as essential above) — it reaches
-# the real device via this local file:// repo instead. This does NOT
-# change how it actually gets *installed*, though: BakeRamdisk.cpp's
-# stageEtasonatv() still extracts it directly and writes its dpkg status
-# manually (see that function's own comment) — postinstall.sh's later
-# real `apt-get install` of it (now that it appears in
-# resolved_packages.txt) finds a package already at the exact same
-# Status/Version stageEtasonatv() wrote, held (`Status: hold ok
-# installed`), so it's expected to be a real, harmless no-op there, not a
-# second, conflicting install path.
-net.tihmstar.etasonuntether-1.3.1.deb
+# net.tihmstar.etasonuntether is deliberately NOT here.
+#
+# It is applied statically instead, by BakeRamdisk.cpp's stageEtasonatv():
+# extracted straight from its real .deb in Blackb0x/Debs/, with this project's
+# own untether.bin substituted for the one that .deb ships (see that
+# function's own comment and Blackb0x/Misc/README.md for why the override
+# exists), then registered with a real held dpkg status stanza. Shipping it
+# through this local repo as well would mean two install paths for one
+# package, with the static override being the one that actually matters --
+# nothing the repo copy could add, and a second source of truth to keep in
+# sync.
+#
+# It remains in package/packages.txt and is a tolerated resolution failure in
+# build_deb_cache.py's KNOWN_EXPECTED_UNRESOLVABLE, exactly like its sibling
+# com.ih8sn0w-squiffy-winocm.p0sixspwn: both are firmware-gated persistence
+# payloads (`Depends: firmware (= 8.4.1)` here) that cannot satisfy the
+# sandbox's synthetic firmware pin, and both are applied statically rather
+# than by apt.

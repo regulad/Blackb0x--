@@ -96,17 +96,16 @@ not a statement about package content.
 ## The bundled local repository
 
 `/var/.blackb0x/local-debs` is a real file-backed apt repo shipped inside the
-package. `build.sh` builds it from the **intersection** of two lists:
+package. Its contents are exactly `local_only_debs.txt`: every `.deb` that can
+only ever come from a local repo, because no live repo carries a usable stanza
+for it.
 
-- the picklist (`BLACKB0X_PICKLIST`) — every `.deb` this bake actually
-  resolved: apt's transitive closure plus the local-only entries
-  (`build_deb_cache.py` unions them at line 583)
-- `local_only_debs.txt` — every `.deb` that can only ever come from a local
-  repo, because no live repo carries it
-
-Intersecting rather than shipping `local_only_debs.txt` wholesale means a
-local-only package this firmware did not end up needing is not shipped. Both
-files list `.deb` filenames, so the match is on filename.
+There is deliberately **no** filtering against the bake's picklist.
+`build_deb_cache.py` adds every local-only filename to that picklist
+unconditionally — it only checks the file exists, fatally (`:500-509`), then
+unions them in at `:583` — so `picklist ∩ local_only_debs.txt` is always just
+`local_only_debs.txt`. Filtering would be a guaranteed no-op that made this
+script depend on bake state it otherwise does not need.
 
 The `Packages` index is generated in the container by the real
 `dpkg-scanpackages` — apt is strict about the fields and checksums it expects,
@@ -115,10 +114,16 @@ so a hand-rolled index is not an option. That index is unsigned, which is why
 `build_deb_cache.py`'s comment describes the source line as
 `deb [trusted=yes] ...`; the real `local.list` has never carried that flag.)
 
-**This is why the package cannot be built standalone from a clean checkout.**
-`build.sh` works on any staging tree, but a *complete* package needs a
-debcache run to have produced a picklist first. Sequencing that is the baker's
-job.
+### What is *not* in here
+
+`net.tihmstar.etasonuntether` is applied statically by `BakeRamdisk.cpp`'s
+`stageEtasonatv()`, not shipped through this repo: it is extracted from its
+real `.deb`, **its `untether.bin` is replaced with this project's own**, and it
+is registered with `Status: hold ok installed`. The hold exists because of the
+override — `postinstall.sh` runs `apt-get upgrade`, which would otherwise
+resolve the real package and silently clobber the replaced binary on first
+boot. Shipping it here as well would have been a second install path competing
+with the one that actually matters.
 
 ## What's assembled at bake time
 

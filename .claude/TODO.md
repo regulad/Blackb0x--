@@ -539,6 +539,28 @@ distinct saurik dist branch — worth checking which do).
 
 ## 10. Additional ramdisk size shedding to get under the 64MiB watermark
 
+**The hard-fail half is DONE.** A finished ramdisk over the limit now fails
+the bake instead of warning: `bakeRamdisk()` returns false and removes the
+oversized output, so no known-unusable entry is left in `dist/` for
+`bake-all-ramdisks` to silently reuse on the next run (it skips targets whose
+output already exists). Warning-and-succeeding only moved the failure to real
+hardware, where it costs a DFU cycle to find and looks like an exploit problem
+rather than a size problem.
+
+`DEBUG_RAMDISK_LIMIT_MIB` overrides the limit, following the `DEBUG_`
+convention the pwn binaries use: unset is the hardware-confirmed 64 MiB,
+`-1` disables the failure and warns only (what the size-shedding work below
+needs, to measure real per-tuple sizes including tuples that are over), and
+`N` sets an N MiB limit. An unparseable or zero value is rejected rather than
+silently falling back, since that would be indistinguishable from the knob
+working.
+
+**Still open: whether `kNeverStageDebs` is complete.** That is the actual
+size-shedding work, and it still needs item 6's full bake sweep to measure
+real per-tuple sizes first.
+
+Original note follows.
+
 Not started. `BakeRamdisk.cpp`'s `kMaxRamdiskSize` (64MiB) is a real,
 hardware-confirmed tripwire — its own comment cites a real USB bulk
 short-write at exactly byte offset 0x4000000 (64MiB) on a 68.9MiB ramdisk,

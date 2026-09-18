@@ -32,9 +32,13 @@
 // other firmware target sharing the same cached debcache result (see
 // computeGlobalDebcacheOnce()) will fail identically, so callers should
 // treat it as fatal to the whole batch, not just this one target.
-// `outSizeWarning` is set to true if the finished ramdisk exceeded the
-// (non-fatal) kMaxRamdiskSize rule-of-thumb tripwire — still a real
-// success (`true` is returned), just worth surfacing in a batch summary.
+// A finished ramdisk over the size limit (64 MiB by default) is a FAILURE:
+// `false` is returned and the oversized output is removed, because a ramdisk
+// that big cannot be uploaded and leaving it in dist/ would get it silently
+// reused. `outSizeWarning` is only set when the limit was explicitly disabled
+// with DEBUG_RAMDISK_LIMIT_MIB=-1 — that is a real success (`true` is
+// returned) with something worth surfacing in a batch summary. See the limit's
+// own comment in BakeRamdisk.cpp for the knob and why 64 MiB is not arbitrary.
 bool bakeRamdisk(const std::string& path, const std::string& key, const std::string& iv,
                   const std::string& productVersion, const std::string& outputPath,
                   const std::string& entrypointBinaryPath, bool& outSizeWarning);

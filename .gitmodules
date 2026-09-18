@@ -50,10 +50,6 @@
 [submodule "third_party/zlib"]
 	path = third_party/zlib
 	url = https://github.com/madler/zlib.git
-[submodule "third_party/gaster"]
-	path = third_party/gaster
-	url = https://github.com/regulad/gaster.git
-	branch = linux-reset-race
 [submodule "third_party/p0sixspwn"]
 	path = third_party/p0sixspwn
 	url = https://github.com/beiyexertz/p0sixspwn.git

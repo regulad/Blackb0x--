@@ -268,6 +268,21 @@ the Linux build-deps list. `Cli.cpp`'s udev/sudo help text and
 `IPSWDownloader.hpp`'s `ipswDataRoot()` XDG-only fallback are both
 cosmetically Linux-flavored but not blockers.
 
+### 4c. gaster removed entirely (resolved)
+
+`gaster` is gone from the tree — submodule, CMake target, `--pwntool` flag,
+and the `regulad/gaster` fork. **It never pwned an AppleTV3,2 on either
+Linux 7.1.x or macOS 26**, which is the whole reason. `blackb0x-pwn` is now
+the only pwntool and is built unconditionally on every platform, so
+everything above that describes a *choice* between the two (item 4's
+`--pwntool` wording, 4b's `if(APPLE)` gating) is superseded — kept as
+written because it records what was believed at the time.
+
+See `docs/HISTORY.md`'s "gaster is removed" entry for what the fork carried,
+what the twelve commits bought, and why deleting the code does not delete
+the one finding gaster contributed (the two-implementation control that
+disproved "Linux cannot do checkm8").
+
 ### 4a. macOS support for the ramdisk baker (`bake-all-ramdisks`/`BakeRamdisk.cpp`) (resolved)
 
 Ported. As anticipated below, it ended up *simpler* on macOS than Linux's

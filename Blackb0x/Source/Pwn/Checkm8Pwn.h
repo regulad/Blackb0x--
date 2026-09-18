@@ -4,8 +4,8 @@
 //
 //  Blackb0x's own original checkm8/SHAtter exploit implementations
 //  (DeviceManager.m, git history — see docs/HISTORY.md's "Reopening macOS
-//  support" entry), ported byte-for-byte to C, as opposed to gaster's own
-//  separate implementation. Builds on every platform, against whichever
+//  support" entry), ported byte-for-byte to C. This is the project's only
+//  checkm8 implementation. Builds on every platform, against whichever
 //  backend libirecovery was configured with (IOKit on macOS, libusb
 //  elsewhere) -- see this target's own block in CMakeLists.txt.
 //

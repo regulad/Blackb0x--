@@ -57,20 +57,13 @@ void printCliUsage(const char* argv0) {
     printf("  --dry-run                 Do everything up to but not including the\n");
     printf("                            exploit and the USB upload to the device —\n");
     printf("                            prints what would run/be sent instead\n");
-    printf("  --no-pwn                  Never attempt to run a pwntool (gaster/\n");
-    printf("                            blackb0x-pwn) at all — if the connected device\n");
+    printf("  --no-pwn                  Never attempt to run the pwntool\n");
+    printf("                            (blackb0x-pwn) at all — if the connected device\n");
     printf("                            isn't already reporting a pwned DFU serial\n");
     printf("                            string, fail instead of attempting the exploit.\n");
     printf("                            For iterating on the post-exploit send flow\n");
     printf("                            against an already-pwned device without\n");
     printf("                            spawning a pwntool again.\n");
-#if defined(__APPLE__)
-    printf("  --pwntool <gaster|blackb0x-pwn>\n");
-    printf("                            Which tool runs the checkm8 exploit\n");
-    printf("                            (default: blackb0x-pwn — gaster does not\n");
-    printf("                            work on macOS no matter what has been\n");
-    printf("                            tried; see README.md)\n");
-#endif
     printf("  --stock-ramdisk           DIAGNOSTIC: send the stock RestoreRamdisk exactly\n");
     printf("                            as downloaded from Apple, instead of the\n");
     printf("                            blackb0x-patched one -- to check whether a boot\n");
@@ -157,19 +150,6 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.stockFirmware = true;
         } else if (arg == "--stock-securerom") {
             options.stockSecurerom = true;
-        } else if (arg == "--pwntool") {
-            std::string value = nextArg("--pwntool");
-#if defined(__APPLE__)
-            if (value != "gaster" && value != "blackb0x-pwn") {
-                fprintf(stderr, "--pwntool must be 'gaster' or 'blackb0x-pwn' (got '%s')\n", value.c_str());
-                exit(2);
-            }
-            options.pwnTool = value;
-#else
-            fprintf(stderr,
-                    "--pwntool is only meaningful on macOS (blackb0x-pwn isn't built on this "
-                    "platform, gaster is the only option) -- ignoring.\n");
-#endif
         } else if (arg == "--help" || arg == "-h") {
             options.help = true;
         } else {
@@ -313,8 +293,8 @@ bool waitForDFUMode(DeviceManager& deviceManager, uint64_t ecid, AppleTVDevice& 
 // pwntool) — SHAtter (AppleTV2,1) is a separate, hand-rolled exploit that
 // never touches a pwntool at all, so there's nothing for these flags to
 // refuse there. (`noPwn` was named noCheckm8/--no-checkm8; renamed once
-// "pwntool" became the general term for gaster/blackb0x-pwn both, keeping
-// its original hard-fail-if-not-already-pwned behavior.)
+// "pwntool" became this project's general term for the exploit binary,
+// keeping its original hard-fail-if-not-already-pwned behavior.)
 //
 // stockSecurerom is checked before the early pwnedDFU return below, not
 // after: its whole point is a genuinely un-exploited device (real,
@@ -323,7 +303,7 @@ bool waitForDFUMode(DeviceManager& deviceManager, uint64_t ecid, AppleTVDevice& 
 // needs to error out even though checkExploit() would otherwise treat an
 // already-pwned device as trivially "done" and return success.
 bool checkExploit(DeviceManager& deviceManager, const AppleTVDevice& device, bool dryRun, bool noPwn,
-                   bool stockSecurerom, const std::string& pwnTool) {
+                   bool stockSecurerom) {
     if (stockSecurerom && device.pwnedDFU) {
         fprintf(stderr,
                 "--stock-securerom: device is already in pwned DFU (PWND: in its serial string) -- this "
@@ -361,10 +341,8 @@ bool checkExploit(DeviceManager& deviceManager, const AppleTVDevice& device, boo
         if (noPwn) {
             fprintf(stderr,
                     "--no-pwn: device is not already in pwned DFU (no PWND: in its serial string) — "
-                    "refusing to run checkm8/%s. Pwn it separately first (e.g. `%s pwn`%s), or drop "
-                    "--no-pwn to let blackb0x do it.\n",
-                    pwnTool.c_str(), pwnTool.c_str(),
-                    pwnTool == "blackb0x-pwn" ? " — note blackb0x-pwn's own verb is `checkm8`, not `pwn`" : "");
+                    "refusing to run checkm8. Pwn it separately first (`blackb0x-pwn checkm8`), or "
+                    "drop --no-pwn to let blackb0x do it.\n");
             return false;
         }
         if (stockSecurerom) {
@@ -379,18 +357,17 @@ bool checkExploit(DeviceManager& deviceManager, const AppleTVDevice& device, boo
             // --stock-recovery before this ever runs, so there's nothing
             // left to caveat here.
             fprintf(stderr,
-                    "--stock-securerom: device confirmed not already pwned -- skipping %s entirely and "
-                    "proceeding into the rest of the boot chain, relying on the device's own real "
-                    "SecureROM signature verification.\n",
-                    pwnTool.c_str());
+                    "--stock-securerom: device confirmed not already pwned -- skipping blackb0x-pwn "
+                    "entirely and proceeding into the rest of the boot chain, relying on the device's "
+                    "own real SecureROM signature verification.\n");
             return true;
         }
         if (dryRun) {
             printf("(dry run) Would try checkm8\n");
             return true;
         }
-        printf("Trying checkm8 (%s)...\n", pwnTool.c_str());
-        if (deviceManager.checkm8(device.ecid, pwnTool) == 0) {
+        printf("Trying checkm8...\n");
+        if (deviceManager.checkm8(device.ecid) == 0) {
             fprintf(stderr, "Exploit failed.\n");
             return false;
         }
@@ -924,8 +901,8 @@ int runCli(const CliOptions& options) {
     // device-node permission, not something this process can determine in
     // advance for every possible udev/group setup. Running as root always
     // works; running as a normal user works too, given the right udev rule
-    // (see README's own setup section) — either way, gaster/libirecovery's
-    // own device-open calls are what actually surface a real permission
+    // (see README's own setup section) — either way, libirecovery's own
+    // device-open calls are what actually surface a real permission
     // error, with a real errno behind it, if access genuinely isn't there.
 
     // Nothing this tool can ever do succeeds without a baked ramdisk sitting
@@ -1107,8 +1084,7 @@ int runCli(const CliOptions& options) {
         }
     }
 
-    if (!checkExploit(deviceManager, device, options.dryRun, options.noPwn, options.stockSecurerom,
-                       options.pwnTool)) {
+    if (!checkExploit(deviceManager, device, options.dryRun, options.noPwn, options.stockSecurerom)) {
         return 1;
     }
 

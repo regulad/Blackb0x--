@@ -1133,114 +1133,22 @@ endforeach()
 add_dependencies(blackb0x_xpwntool wolfssl_ext)
 
 # ---------------------------------------------------------------------------
-# gaster: the actual checkm8 implementation DeviceManager.cpp's checkm8()
-# now shells out to for the exploit itself, instead of driving the
-# low-level USB request sequence in-process the way this port originally
-# did (see docs/HISTORY.md and DeviceManager.cpp's own comments for the full
-# reasoning — this is the real, actively-used tool palera1n's `legacy`
-# branch shells out to, confirmed via its own per-chip config table to
-# support this exact device/firmware, unlike checkra1n — what
-# current/mainline palera1n uses instead — which has never supported
-# A5-family chips at all).
-#
-# Built directly here rather than via gaster's own Makefile: its "libusb"
-# target links real OpenSSL (-lcrypto) for the one EVP_* AES-256-CBC call
-# gaster.c uses (gaster_decrypt_file()/gaster_decrypt_kbag() — neither of
-# which DeviceManager.cpp's checkm8Attempt() ever invokes; it only ever
-# runs "pwn"/"reset" — but the symbols still need to resolve at link time
-# regardless, since it's all one translation unit). Reusing this project's
-# existing wolfSSL OpenSSL-compatibility shim (OPENSSL_INCLUDE_DIR/
-# deps::wolfssl, set up above for xpwn/dmg/libimobiledevice) instead of
-# vendoring real OpenSSL avoids introducing a second crypto/TLS library
-# just for gaster, matching the "wolfSSL is this project's ONE crypto/TLS
-# library" rule stated at the top of this file. gaster.c's own bare
-# `#include <openssl/evp.h>` resolves unmodified against wolfSSL's shim
-# (built with --enable-opensslall, same as every other OpenSSL-API consumer
-# here) via the exact same include-path redirection xpwn/dmg already get
-# below — no fork of gaster needed at all.
-set(GASTER_DIR ${CMAKE_SOURCE_DIR}/third_party/gaster)
-set(GASTER_GEN_DIR ${CMAKE_BINARY_DIR}/gaster-gen)
-file(MAKE_DIRECTORY ${GASTER_GEN_DIR})
-
-# gaster.c #includes these headers directly (an `xxd -iC` C-array dump of
-# each payload_*.bin, not a normal binary-resource mechanism) — generated
-# at build time from the payload_*.bin files checked into the submodule,
-# the same way gaster's own Makefile does it, just via add_custom_command
-# instead of invoking `make libusb` (which this project doesn't use, per
-# the comment above).
-set(GASTER_PAYLOADS payload_A9 payload_A7 payload_notA9 payload_notA9_armv7
-                     payload_handle_checkm8_request payload_handle_checkm8_request_armv7)
-set(GASTER_PAYLOAD_HEADERS "")
-foreach(p ${GASTER_PAYLOADS})
-    # xxd -i derives the emitted variable name from its INPUT path, not the
-    # output filename — sanitizing every non-alphanumeric character to `_`,
-    # absolute path included. Passing the full ${GASTER_DIR}/${p}.bin path
-    # (confirmed directly) produces a variable name like
-    # `_var_home_..._third_party_gaster_payload_A9_bin` instead of the bare
-    # `payload_A9_bin` gaster.c's #include "payload_A9.h" actually expects
-    # — WORKING_DIRECTORY + a bare relative filename (matching how gaster's
-    # own Makefile invokes xxd, from inside its own source directory) is
-    # what keeps the generated name short and predictable regardless of
-    # where this repository happens to be checked out.
-    add_custom_command(
-        OUTPUT  ${GASTER_GEN_DIR}/${p}.h
-        COMMAND xxd -iC ${p}.bin ${GASTER_GEN_DIR}/${p}.h
-        WORKING_DIRECTORY ${GASTER_DIR}
-        DEPENDS ${GASTER_DIR}/${p}.bin
-        COMMENT "Generating ${p}.h from ${p}.bin"
-    )
-    list(APPEND GASTER_PAYLOAD_HEADERS ${GASTER_GEN_DIR}/${p}.h)
-endforeach()
-
-add_executable(gaster ${GASTER_DIR}/gaster.c ${GASTER_DIR}/lzfse.c ${GASTER_PAYLOAD_HEADERS})
-target_include_directories(gaster PRIVATE ${GASTER_GEN_DIR} ${DEPS_INCLUDE})
-if(APPLE)
-    # gaster.c's own `#else` branch (unconditional on !HAVE_LIBUSB, see its
-    # top-of-file includes) is its real upstream Darwin implementation: talks
-    # to the device directly via Apple's own IOKit USB stack (IOUSBLib) and
-    # CommonCrypto for its one AES-256-CBC call, instead of libusb + wolfSSL's
-    # OpenSSL shim. Both are first-party frameworks present on any Mac this
-    # project builds on — nothing to vendor. Selected here in preference to
-    # the portable libusb path specifically because it's gaster upstream's
-    # actively-used reference implementation for this platform, not a
-    # fallback — the libusb path below is what Linux (no IOKit) falls back
-    # to instead.
-    target_link_libraries(gaster PRIVATE "-framework CoreFoundation" "-framework IOKit" Threads::Threads)
-else()
-    target_compile_definitions(gaster PRIVATE HAVE_LIBUSB)
-    # BEFORE, same reasoning as dmg/xpwn above: guarantees wolfSSL's shim
-    # wins over anything else that might otherwise land ahead of it on the
-    # include path.
-    target_include_directories(gaster BEFORE PRIVATE ${DEPS_INCLUDE}/wolfssl)
-    target_compile_options(gaster PRIVATE -include ${DEPS_INCLUDE}/wolfssl/options.h)
-    target_link_libraries(gaster PRIVATE deps::usb deps::wolfssl Threads::Threads)
-    # Same Unix Makefiles generator caveat as blackb0x's own
-    # add_dependencies() call below: depend on the ExternalProject targets
-    # directly, not just the IMPORTED targets that wrap them. Only needed on
-    # this libusb/wolfSSL path — the native Apple path above has no vendored
-    # ExternalProject dependency of its own.
-    add_dependencies(gaster libusb_ext wolfssl_ext)
-endif()
-
-# ---------------------------------------------------------------------------
 # blackb0x-pwn: Blackb0x's own original checkm8/SHAtter exploit, standalone.
 #
-# Built on every platform. Its own sources (Blackb0x/Source/Pwn/) contain no
-# Apple-specific code at all -- only backend-independent irecv_* calls, every
-# one of which libirecovery implements for libusb as well as IOKit -- so the
-# Apple-only gate this target used to sit behind was a packaging decision
-# from the macOS effort, not a source requirement. It is built on Linux
-# specifically to serve as a control against gaster: blackb0x-pwn is the
-# implementation confirmed working on real Apple TV 3,2 hardware (on macOS),
-# so running it over libusb is what distinguishes "Linux's USB stack cannot
-# do checkm8" from "gaster specifically fails here" -- a question
-# docs/HISTORY.md currently answers on gaster's evidence alone. Ports
-# DeviceManager.m's original
+# The ONLY pwntool this project has. It is built on every platform, and its
+# own sources (Blackb0x/Source/Pwn/) contain no Apple-specific code at all --
+# only backend-independent irecv_* calls, every one of which libirecovery
+# implements for libusb as well as IOKit -- so the Apple-only gate this
+# target used to sit behind was a packaging decision from the macOS effort,
+# not a source requirement. Ports DeviceManager.m's original
 # +SHAtter:/+checkm8: methods (deleted from the tree in 907b64b, recovered
 # from git history -- see Blackb0x/Source/Pwn/Checkm8Pwn.c's own header
-# comment) byte-for-byte, independent of both gaster (a different
-# implementation, from a different author, covering a broader chip range)
-# and the main `blackb0x` binary's own gaster-based checkm8Attempt().
+# comment) byte-for-byte.
+#
+# This target used to sit alongside a vendored `gaster`, selected by a
+# --pwntool flag. gaster is gone: it was never made to work against an
+# AppleTV3,2 on either Linux 7.1.x or macOS 26, across a long investigation
+# (see docs/HISTORY.md). Nothing here depends on it.
 #
 # It links the same deps::irecovery every other target here does. On Apple
 # that archive is IOKit-backed, which libirecovery_ext now guarantees by
@@ -1334,9 +1242,9 @@ target_link_libraries(blackb0x PRIVATE
 # Undefined symbols spanned CoreFoundation (irecovery + wolfSSL),
 # IOKit (irecovery), Security (wolfSSL's Sec*/native cert validation), and
 # SystemConfiguration (curl's SCDynamicStoreCopyProxies) specifically --
-# confirmed against the real link error, not guessed. blackb0x-pwn/gaster's
-# own Apple link lines don't need Security/SystemConfiguration since
-# neither links wolfSSL or curl at all.
+# confirmed against the real link error, not guessed. blackb0x-pwn's own
+# Apple link line doesn't need Security/SystemConfiguration since it links
+# neither wolfSSL nor curl at all.
 if(APPLE)
     target_link_libraries(blackb0x PRIVATE
         "-framework CoreFoundation"

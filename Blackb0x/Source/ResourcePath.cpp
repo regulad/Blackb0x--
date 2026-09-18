@@ -37,9 +37,10 @@ std::string resolveImageKeyPath(const std::string& relativePath) {
     return "Blackb0x/ImageKeys/" + relativePath;
 }
 
-// Shared by resolveGasterPath()/resolvePwnPath() below: the directory
-// blackb0x's own executable lives in, or empty if it can't be determined
-// (falls back to a bare binaryName, resolved via PATH at exec time).
+// Shared by resolvePwnPath()/resolveBakeAllRamdisksPath()/
+// resolveIBoot32PatcherPath() below: the directory blackb0x's own executable
+// lives in, or empty if it can't be determined (falls back to a bare
+// binaryName, resolved via PATH at exec time).
 static std::string resolveOwnExecutableDir() {
     char exePath[PATH_MAX];
 #if defined(__APPLE__)
@@ -68,15 +69,6 @@ static std::string resolveOwnExecutableDir() {
         }
     }
     return "";
-}
-
-std::string resolveGasterPath() {
-    if (const char* override_ = getenv("BLACKB0X_GASTER")) {
-        return std::string(override_);
-    }
-    std::string dir = resolveOwnExecutableDir();
-    if (!dir.empty()) return dir + "/gaster";
-    return "gaster";
 }
 
 std::string resolvePwnPath() {

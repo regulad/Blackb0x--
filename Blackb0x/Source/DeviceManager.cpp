@@ -65,7 +65,6 @@ static bool serialStringIndicatesRealDFU(const char* serialString);
 static bool isPwnedDFU(const struct irecv_device_info* info);
 static int send_data(irecv_client_t client, unsigned char* data, size_t size);
 static bool commandExistsOnPath(const char* name);
-static int runGaster(const std::vector<std::string>& args, int timeoutSeconds = 0);
 static int runBlackb0xPwn(const std::vector<std::string>& args, int timeoutSeconds = 0);
 static int boot_client(irecv_client_t client, void* buf, size_t sz, bool allowUnpwned = false);
 static int check_img3_file_format(irecv_client_t client, void* file, size_t sz, void** out, size_t* outsz);
@@ -189,8 +188,8 @@ void DeviceManager::disconnectDevice(uint64_t ecid, const std::string& udid) {
 // ---------------------------------------------------------------------------
 
 // While an external pwntool owns the device, this process has no business
-// touching USB at all: gaster/blackb0x-pwn claim the DFU interface for the
-// whole exploit and deliberately reset the device several times along the
+// touching USB at all: blackb0x-pwn claims the DFU interface for the
+// whole exploit and deliberately resets the device several times along the
 // way, and the pwn is the one operation here whose USB timing actually
 // matters. Left alone, this process talks to the same device from two
 // places of its own -- libirecovery's event-handler thread, which
@@ -326,12 +325,11 @@ int DeviceManager::SHAtter(uint64_t ecid) {
 // seconds to reappear, especially through some xHCI/Thunderbolt host
 // controllers. Confirmed necessary directly: a real run got all the way
 // through "Executing payload" and still hit get_tv()'s own give-up path
-// right after. gaster (github.com/verygenericname/gaster) — the checkm8
-// implementation actually used by palera1n today, a real, actively
-// maintained, cross-platform tool for this exact exploit — takes this to
-// its logical extreme: its own USB-wait helper never gives up at all,
-// just polls in an unbounded loop until the device reappears or the user
-// kills the process. attempts=30 here isn't unbounded (the CLI should
+// right after. Other checkm8 implementations take this to its logical
+// extreme — gaster's USB-wait helper (back when this project vendored it)
+// never gave up at all, just polled in an unbounded loop until the device
+// reappeared or the user killed the process. attempts=30 here isn't
+// unbounded (the CLI should
 // still eventually report a real failure instead of hanging forever) but
 // is deliberately far more patient than get_tv()'s own default.
 static irecv_client_t get_tv_patient(uint64_t ecid, int attempts = 30) {
@@ -439,23 +437,21 @@ static std::string resolveStdbufBinary() {
     return "";
 }
 
-// Spawns the vendored `gaster` binary (third_party/gaster, built as its own
-// executable alongside blackb0x — see CMakeLists.txt), streaming its
-// stdout/stderr straight through to blackb0x's own stdout/stderr, verbatim
-// and live rather than buffered-then-dumped-on-failure — genuinely useful
-// for this exploit specifically, since a stuck or failing run is exactly
-// the kind of thing worth watching happen in real time. Bounded by
-// timeoutSeconds (0 = no timeout): gaster's own wait-for-device and
-// pwn-retry loops are genuinely unbounded (see the docs/HISTORY.md entry on this
-// switch), and this project's CLI needs to eventually give up instead of
-// hanging forever if the device is gone for good — SIGTERM, then SIGKILL,
-// on timeout.
+// Spawns a pwntool binary, streaming its stdout/stderr straight through to
+// blackb0x's own stdout/stderr, verbatim and live rather than
+// buffered-then-dumped-on-failure — genuinely useful for this exploit
+// specifically, since a stuck or failing run is exactly the kind of thing
+// worth watching happen in real time. Bounded by timeoutSeconds (0 = no
+// timeout): a pwntool's own wait-for-device and pwn-retry loops are
+// genuinely unbounded, and this project's CLI needs to eventually give up
+// instead of hanging forever if the device is gone for good — SIGTERM, then
+// SIGKILL, on timeout.
 //
 // SIGKILL is not actually guaranteed to work here: a process blocked
 // inside a kernel-level USB control-transfer syscall sits in
 // uninterruptible sleep ("D" state, isUninterruptible() above) until that
 // specific syscall returns — confirmed to happen for real against this
-// exact hardware (gaster stuck in D state, unresponsive to
+// exact hardware (a pwntool stuck in D state, unresponsive to
 // SIGTERM/SIGKILL, for well over a minute, while a completely independent
 // fresh libusb session against the same device worked fine moments
 // earlier — see docs/HISTORY.md). No signal can interrupt that; the only real
@@ -463,20 +459,20 @@ static std::string resolveStdbufBinary() {
 // unplugging the device to force it. Rather than block blackb0x itself
 // waiting on an unkillable child (a real bug in an earlier version of this
 // function: its post-SIGKILL cleanup used a *blocking* waitpid(), which
-// just moved the hang from gaster into blackb0x itself, confirmed live
-// against this same stuck process), this gives the kill a short bounded
+// just moved the hang from the pwntool into blackb0x itself, confirmed
+// live against this same stuck process), this gives the kill a short bounded
 // grace period, diagnoses+reports a D-state explicitly if it's still
 // there, and moves on regardless — leaving the child to be reaped
 // whenever/if the kernel call it's stuck in ever actually returns.
-// Shared by runGaster()/runBlackb0xPwn() below: spawns binaryPath with
-// args, streaming stdout/stderr live via the same stdbuf/timeout/D-state
-// machinery either way. toolName is used only in diagnostic messages.
+// Wrapped by runBlackb0xPwn() below: spawns binaryPath with args, streaming
+// stdout/stderr live via the stdbuf/timeout/D-state machinery described
+// above. toolName is used only in diagnostic messages.
 //
 // Prefixed with `stdbuf -oL -eL`: glibc's (and Darwin libc's) stdio only
 // line-buffers stdout/stderr when they're attached to a terminal —
 // attached to a pipe (exactly what this function does below), it
 // silently switches to full block buffering instead, and neither
-// gaster.c nor blackb0x-pwn's own main.c/Checkm8Pwn.c ever call
+// blackb0x-pwn's own main.c nor Checkm8Pwn.c ever call
 // setvbuf()/fflush() themselves. Confirmed directly: a short-lived
 // invocation (no args, prints usage then exits) shows its output fine
 // either way, since exit() flushes stdio regardless — but a long-running
@@ -625,40 +621,28 @@ static int runLineBufferedSubprocess(const std::string& binaryPath, const std::v
     return WEXITSTATUS(status);
 }
 
-static int runGaster(const std::vector<std::string>& args, int timeoutSeconds) {
-    return runLineBufferedSubprocess(resolveGasterPath(), args, timeoutSeconds, "gaster");
-}
-
-// blackb0x-pwn only exists on Apple platforms (see CMakeLists.txt's
-// if(APPLE) block) -- this function is still compiled everywhere so
-// checkm8Attempt() below doesn't need its own #ifdef, but is only ever
-// actually called when pwnTool == "blackb0x-pwn", which the CLI only ever
-// sets on Apple (Cli.hpp's CliOptions::pwnTool default, --pwntool's
-// argument validation in Cli.cpp).
 static int runBlackb0xPwn(const std::vector<std::string>& args, int timeoutSeconds) {
     return runLineBufferedSubprocess(resolvePwnPath(), args, timeoutSeconds, "blackb0x-pwn");
 }
 
 // The low-level USB request sequence/payload/timing that used to live
 // directly in this function (hand-ported from the original
-// DeviceManager.m) is gone: checkm8Attempt() now shells out to the
-// vendored `gaster` binary for the actual pwn step instead. gaster is the
-// real checkm8 implementation palera1n's `legacy` branch shells out to
-// (not a from-scratch reimplementation of our own), open source, and
-// confirmed via its own per-chip config table to support this exact
-// device/firmware (cpid 0x8947, "SRTG:[iBoot-1458.2]" — byte-identical to
-// this file's old hand-ported exploit parameters, so this switch was never
-// about our own port being wrong; it's about running a real, actively-used
-// implementation instead of one nobody but this laptop has ever exercised).
-// checkra1n — what current/mainline palera1n uses instead of gaster — was
-// ruled out: it has never supported A5-family chips at all, only A7 and up
-// (see docs/HISTORY.md for the full writeup). After a successful `gaster pwn`,
-// this still reconnects and checks for "PWND:[" in the serial string
-// itself, same as before — gaster reports its own success/failure via exit
-// status, but that's still worth confirming independently before handing
+// DeviceManager.m) is gone from HERE, but not from the project: it now
+// lives in Blackb0x/Source/Pwn/ and runs as the standalone `blackb0x-pwn`
+// binary, which this function shells out to for the actual pwn step.
+//
+// For a long stretch this shelled out to a vendored `gaster` instead, with
+// --pwntool to pick between the two. gaster is gone entirely: it was never
+// made to pwn an AppleTV3,2 on either Linux 7.1.x or macOS 26, over an
+// investigation long enough to have its own section in docs/HISTORY.md.
+// Don't reintroduce it without new evidence.
+//
+// After a successful pwn this still reconnects and checks for "PWND:[" in
+// the serial string itself — blackb0x-pwn reports its own success/failure
+// via exit status, but that's worth confirming independently before handing
 // control back to the rest of this project's own boot-chain code
 // (sendiBSS/sendiBEC/etc., all unchanged).
-bool DeviceManager::checkm8Attempt(uint64_t ecid, const std::string& pwnTool) {
+bool DeviceManager::checkm8Attempt(uint64_t ecid) {
     auto status = [this](const char* s) { if (sink_.onStatus) sink_.onStatus(s); };
     auto progress = [this](double p) { if (sink_.onProgress) sink_.onProgress(p); };
 
@@ -669,8 +653,8 @@ bool DeviceManager::checkm8Attempt(uint64_t ecid, const std::string& pwnTool) {
     // verification ran, or the tool itself finishing the pwn in the
     // background after this project gave up waiting on it (see
     // runLineBufferedSubprocess()'s timeout/D-state handling above — this
-    // is exactly the scenario that produces: confirmed live, a `gaster
-    // pwn` stuck past its own timeout while the device had, per this same
+    // is exactly the scenario that produces: confirmed live, a pwntool
+    // stuck past its own timeout while the device had, per this same
     // check, already rebooted into pwned DFU). Re-running the exploit
     // against an already-pwned device is pointless at best; check first,
     // quickly (get_tv(), not get_tv_patient() — if it's not there within
@@ -702,26 +686,16 @@ bool DeviceManager::checkm8Attempt(uint64_t ecid, const std::string& pwnTool) {
     // the device is still settling from the exploit's last reset.
     UsbQuietWindow quiet(*this);
 
-    // pwnTool selects which subprocess actually runs the exploit -- see
-    // Cli.hpp's CliOptions::pwnTool and docs/HISTORY.md for why: gaster
-    // does not work on macOS no matter what has been tried; blackb0x-pwn
-    // (this project's own original checkm8, run standalone over
-    // libirecovery's native IOKit backend — see Blackb0x/Source/Pwn/) does.
-    // blackb0x-pwn's own CLI takes an explicit --ecid (gaster's doesn't --
-    // it just waits for any DFU device), so pass it through for precision.
-    int exitCode;
-    if (pwnTool == "blackb0x-pwn") {
-        exitCode = runBlackb0xPwn({"checkm8", "--ecid", std::to_string(ecid)}, 180);
-    } else {
-        exitCode = runGaster({"pwn"}, 180);
-    }
+    // blackb0x-pwn's own CLI takes an explicit --ecid, so pass it through
+    // for precision rather than letting it grab whichever DFU device it
+    // finds first.
+    int exitCode = runBlackb0xPwn({"checkm8", "--ecid", std::to_string(ecid)}, 180);
     if (exitCode != 0) {
         if (exitCode == -2) {
-            fprintf(stderr, "checkm8: %s timed out waiting for the device.\n", pwnTool.c_str());
+            fprintf(stderr, "checkm8: blackb0x-pwn timed out waiting for the device.\n");
         } else {
-            fprintf(stderr, "checkm8: %s failed (exit %d).\n", pwnTool.c_str(), exitCode);
+            fprintf(stderr, "checkm8: blackb0x-pwn failed (exit %d).\n", exitCode);
         }
-        if (pwnTool != "blackb0x-pwn") runGaster({"reset"}, 15);
         status("Checkm8 unsuccessful");
         progress(100.0);
         return 0;
@@ -731,7 +705,7 @@ bool DeviceManager::checkm8Attempt(uint64_t ecid, const std::string& pwnTool) {
 
     irecv_client_t client = get_tv_patient(ecid);
     if (!client) {
-        fprintf(stderr, "checkm8: device did not reappear after %s.\n", pwnTool.c_str());
+        fprintf(stderr, "checkm8: device did not reappear after blackb0x-pwn.\n");
         status("Checkm8 unsuccessful");
         progress(100.0);
         return 0;
@@ -740,7 +714,7 @@ bool DeviceManager::checkm8Attempt(uint64_t ecid, const std::string& pwnTool) {
     const struct irecv_device_info* info = irecv_get_device_info(client);
     if (!isPwnedDFU(info)) {
         irecv_close(client);
-        fprintf(stderr, "checkm8: device did not report pwned DFU after %s.\n", pwnTool.c_str());
+        fprintf(stderr, "checkm8: device did not report pwned DFU after blackb0x-pwn.\n");
         status("Checkm8 unsuccessful");
         progress(100.0);
         return 0;
@@ -753,19 +727,17 @@ bool DeviceManager::checkm8Attempt(uint64_t ecid, const std::string& pwnTool) {
     return 1;
 }
 
-// gaster/blackb0x-pwn both already retry internally and unboundedly within
-// a single invocation (gaster's own RESET -> SETUP -> SPRAY -> PATCH state
-// machine resets and starts over on any stage failure on its own;
-// blackb0x-pwn's get_tv() is likewise patient) — this outer retry is now
+// blackb0x-pwn already retries internally and unboundedly within a single
+// invocation (its get_tv() is patient by design) — this outer retry is
 // mostly a safety net for the rarer case of a hard failure/timeout out of
 // runLineBufferedSubprocess() itself (e.g. the child exiting outright, or
 // this project's own 180s ceiling on top of the child's patience being
 // hit). kMaxAttempts stays finite so the CLI still eventually reports a
 // real, actionable failure rather than retrying forever.
-int DeviceManager::checkm8(uint64_t ecid, const std::string& pwnTool) {
+int DeviceManager::checkm8(uint64_t ecid) {
     constexpr int kMaxAttempts = 3;
     for (int attempt = 1; attempt <= kMaxAttempts; attempt++) {
-        if (checkm8Attempt(ecid, pwnTool)) return 1;
+        if (checkm8Attempt(ecid)) return 1;
         if (attempt < kMaxAttempts) {
             if (sink_.onStatus) sink_.onStatus("checkm8 attempt failed, retrying...");
             sleep(1);

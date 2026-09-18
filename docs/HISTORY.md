@@ -3307,3 +3307,78 @@ buffers and duplicate the parent's output.
 
 This is what made a complete 29/29 table possible at all, so it is
 load-bearing rather than defensive.
+
+## gaster is removed: it never pwned an AppleTV3,2, on Linux or macOS
+
+`gaster` is gone from the tree — submodule, CMake target, `--pwntool` flag, the
+`regulad/gaster` fork, all of it. `blackb0x-pwn` is now the only pwntool, built
+unconditionally on every platform.
+
+**The reason is simply that it never worked.** Across the whole investigation
+recorded in the sections above, gaster was never once able to put the one
+available AppleTV3,2 into pwned DFU — not on Linux 7.1.x, and not on macOS 26.
+No configuration, no instrumentation, no fork commit ever produced a successful
+pwn on this hardware. Everything that follows is secondary to that single fact.
+
+### Why the project adopted it, and why that reasoning failed
+
+The original case for gaster was `AGENTS.md`'s standing convention: prefer a
+real, maintained implementation over a hand-port. gaster is the tool palera1n's
+`legacy` branch shells out to, it is open source, and it carries a config entry
+for this exact device — `gaster.c`'s `checkm8_check_usb_device()` matches
+`SRTG:[iBoot-1458.2]` and sets `cpid = 0x8947` with a full address table
+(`config_large_leak`, `config_overwrite_pad`, `memcpy_addr`,
+`usb_core_do_transfer`, …), plus sibling entries for the other A5s at `0x8950`
+and `0x8955` and a dedicated armv7 payload path. So this was never a case of
+gaster not covering the chip on paper. Note the contrast with **checkra1n**,
+which genuinely has never supported A5-family chips at all (A7 and up only) and
+was ruled out on those grounds much earlier — the two rejections have different
+reasons and should not be conflated.
+
+What the convention did not anticipate is that "someone else maintains it" and
+"it works on this hardware" are different claims. gaster's A5/armv7 path is
+present in source but, on the evidence here, unexercised: nothing in this
+project's experience suggests anyone has landed checkm8 on an A5 with it.
+
+### What was spent finding that out
+
+The fork (`regulad/gaster@linux-reset-race`, twelve commits) carried: claiming
+interface 0 with `libusb_set_auto_detach_kernel_driver()` instead of sending DFU
+class requests unclaimed; a reverted experiment in skipping the post-`SETUP`/
+`SPRAY` reset (disproved on real hardware — the reset is load-bearing, the device
+wedged in `D` state inside `usb_reset_configuration` without it); per-stage
+logging and a 60s per-reconnect timeout; `DEBUG_CANCEL_DELAY_US` and
+`DEBUG_SETUP_FULL_PAD`; and the missing IOKit
+`send_usb_control_request_async_{,no_data_}precise_cancel` implementations.
+
+Three real, independent software causes were found and fixed along the way
+(`apple_mfi_fastcharge` auto-binding in DFU mode; unclaimed interfaces; and a bug
+in the interface-claim fix itself that gated success on a claim which a
+zero-interface descriptor makes impossible). All three were genuine. **None of
+them was the cause**, and the "Linux host-stack limitation" conclusion drawn after
+them was subsequently retracted by the `usbmon` work in the section above.
+
+The final measured position on gaster specifically: its SETUP stage requires the
+1632-byte malformed control write to come back `USB_TRANSFER_STALL`, and on Linux
+it *succeeds* instead — 300 of 384 attempts delivered the full payload, and it
+stalled exactly once. gaster therefore spun in its own unbounded retry loop and
+never left SETUP. That is a coherent description of a failure, not a fix, and no
+further blind changes to its exploit-timing code were justifiable.
+
+### What removing it costs, and what it doesn't
+
+The one genuinely useful thing gaster provided at the end was a **control**: two
+independent implementations failing differently on the same host is what proved
+the failure is not a blanket "Linux cannot do checkm8" (gaster's equivalent
+transfer *delivers*; `blackb0x-pwn`'s is refused). That contrast is already
+measured and written down in the section above, so deleting the code does not
+delete the finding.
+
+Deleting the fork does mean `git submodule update --init` will fail for any commit
+before this one, since `.gitmodules` there still points at `regulad/gaster`. That
+is the accepted cost of the cleanup; anyone bisecting that far back can drop the
+submodule line locally.
+
+The open question is unchanged and does not involve gaster: **what the overwrite
+transfer does on a working macOS run.** See the tcpdump instructions in the
+section above.

@@ -15,7 +15,7 @@ original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
 ## Conventions (don't re-litigate without asking)
 
 - **CLI-only.** No GUI — dropped, not dual-maintained. Primary target is Linux;
-  macOS support (`blackb0x`/`gaster` only, not the ramdisk baker yet) is actively
+  macOS support (`blackb0x`/`blackb0x-pwn` only, not the ramdisk baker yet) is actively
   being brought up — see `.claude/TODO.md` item 4 for exactly what's done vs. still
   needs real macOS hardware to verify.
 - **Every third-party dependency is a git submodule under `third_party/`, built from
@@ -36,9 +36,12 @@ original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
   equivalent.** This has been the deciding factor twice already: a from-scratch
   lockdownd/AFC client was fully verified working, then deleted in favor of forking
   real `libimobiledevice` once it became clear that was strictly less code to
-  maintain; a hand-ported `checkm8` USB exploit sequence was replaced with shelling
-  out to `gaster` (the same implementation `palera1n` itself uses) once it became the
-  more proven path. Default to this; don't reach for a rewrite first.
+  maintain. Default to this; don't reach for a rewrite first. (The counter-example
+  is worth knowing: the hand-ported `checkm8` USB exploit sequence was once replaced
+  with a shell-out to `gaster`, on exactly this reasoning — and `gaster` was never
+  made to work against an AppleTV3,2 on either Linux 7.1.x or macOS 26, so the
+  hand-port came back as `blackb0x-pwn` and gaster is gone. "Someone else maintains
+  it" is not the same as "it works on this hardware.")
 - **Terse, single-source CLI output.** Every user-facing message flows through
   `Cli.cpp`'s rendering of `DeviceManager`'s `DeviceEventSink` callbacks
   (`onStatus`/`onProgress`/`onDeviceAdded`/`onDeviceUpdated`/`onDeviceRemoved`) in one
@@ -114,7 +117,6 @@ statically linked. **Forked** means: patched on our own branch, pushed, pointed 
 | `libgeneral` | tihmstar/libgeneral | No |
 | `xpwn` | **regulad/xpwn**@`legacy` | Yes — a wolfSSL AES-CBC buffer over-read fix in `img3.c`, plus disabling the legacy-libusb-0.1-only `pwnmetheus2` subdirectory |
 | `wolfssl`, `curl`, `libusb`, `libzip`, `libpng`, `bzip2`, `zlib` | upstream | No — current HEAD or latest stable tag; none of these existed in the original app |
-| `gaster` | **regulad/gaster** (fork), `linux-reset-race` branch, off verygenericname/gaster | Yes — claims interface 0 (with `libusb_set_auto_detach_kernel_driver()`) instead of sending every DFU class request unclaimed, which is what the kernel's own "did not claim interface 0 before use" warning was about. A second change (skipping the post-`SETUP`/`SPRAY` reset) was tried and reverted after real hardware proved it load-bearing, not precautionary — see `docs/HISTORY.md`. Also carries `checkm8_stage_setup()` instrumentation: it logs the cancelled transfer's reported size (the only value the cancel delay actually feeds, and the reason sweeping `CANCEL_DELAY_US` changes nothing), and `GASTER_SETUP_FULL_PAD=1` pads as `blackb0x-pwn` does instead of trusting that size |
 | `iBoot32Patcher` | **regulad/iBoot32Patcher**@`blackb0x`, off zzanehip/iBoot32Patcher | Yes — two real bug fixes: `patch_kaslr()` fell off the end of a non-void function on every *successful* branch (garbage return read non-zero on x86_64, 0 on arm64, so a real macOS run treated a successful KASLR patch as a hard failure), and `iBootPatcher()` tested its `RSA` argument twice so the `debug` argument was dead and `patch_debug_enabled()` ran whenever the RSA patch was asked for. **Built as a separate EXECUTABLE and fork/exec'd, never linked** — it is GPL-3.0-or-later and blackb0x declares no license, so linking would make blackb0x a GPLv3 derivative. Do not "simplify" it back into a static library |
 
 `Blackb0x/Libraries/xpwntool.c` (in-tree, not a submodule) is sourced from
@@ -178,10 +180,9 @@ Two binaries, deliberately separated by privilege:
 
 **Build-time system dependencies, verified against a real fresh clone + build (see
 README for the full list)**: a C/C++ toolchain, GNU make, CMake ≥3.16,
-autoconf/automake/libtool/pkg-config (most of the tree is autotools-based), and
-`xxd` — genuinely required, easy to miss, since it's only used once: embedding
-`gaster`'s exploit payload binaries as C arrays at build time
-(`add_custom_command(... COMMAND xxd -iC ...)` in `CMakeLists.txt`).
+autoconf/automake/libtool/pkg-config (most of the tree is autotools-based).
+(`xxd` used to be required too, solely to embed `gaster`'s payload binaries as C
+arrays; with gaster gone, nothing in the build shells out to it any more.)
 
 **Runtime requirements beyond the build** (not just build-time deps):
 - `mkfs.hfsplus`/`fsck.hfsplus` (`hfsprogs` package) and a kernel with `hfsplus`
@@ -209,15 +210,16 @@ autoconf/automake/libtool/pkg-config (most of the tree is autotools-based), and
   package — over `usbmuxd`/`iproxy`, then pushes the file like a normal
   `ssh-copy-id`). Entirely optional, no root/sudo needed, and nothing else in
   `blackb0x` depends on it.
-- `stdbuf` (GNU coreutils) — **required**, not optional: `runGaster()`
-  (`DeviceManager.cpp`) checks for it on `PATH` before ever forking `gaster` and
+- `stdbuf` (GNU coreutils) — **required**, not optional:
+  `runLineBufferedSubprocess()` (`DeviceManager.cpp`) checks for it on `PATH` before
+  ever forking `blackb0x-pwn` and
   refuses to run the exploit at all if it's missing, rather than silently falling
   back to unbuffered output. An earlier version of this code did fall back silently
   — that's exactly the "blind the whole time" bug documented in `docs/HISTORY.md`,
   reintroduced by treating this as optional. Don't re-add that fallback.
 - The in-tree `apple_mfi_fastcharge` kernel driver **must be blacklisted** (a
   `/etc/modprobe.d` drop-in — see the README's own setup section) or it fights
-  `gaster` for the DFU-mode device mid-exploit; see `docs/HISTORY.md` for exactly
+  the pwntool for the DFU-mode device mid-exploit; see `docs/HISTORY.md` for exactly
   why. Same pattern as `usbmuxd --no-preflight` above: a documented one-time manual
   step, not something `blackb0x` checks or fixes for you at runtime.
 
@@ -237,98 +239,60 @@ re-encrypt pipeline, and `--dry-run` are all verified working against real hardw
 **Only one physical unit has ever been available to test against: an AppleTV3,2** —
 `AppleTV2,1`(SHAtter)/`AppleTV3,1` (external-hardware checkm8) paths are implemented
 from protocol analysis only, unverified.
+The `checkm8` exploit run itself is **the open problem**, and it is the reason this
+branch exists. It has never succeeded on Linux. Two independent implementations have
+been tried against the one physical AppleTV3,2 available:
 
-The actual `checkm8` exploit run has repeatedly hung/frozen the USB stack across
-*multiple different Linux machines* — initially misdiagnosed (on a single machine) as
-a host-controller-level USB limitation, since the symptoms (D-state hangs, corrupted
-enumeration) looked hardware-specific. A live `dmesg` capture during a real hang found
-the actual cause: the in-tree Linux `apple_mfi_fastcharge` driver auto-binds to the
-Apple TV even in DFU mode (its product-ID match range, `0x1200`-`0x12ff`, includes this
-device's real DFU PID `0x1227`) and independently issues its own `usb_reset_device()`
-calls while `gaster`'s own raw, timing-sensitive control transfers are in flight — two
-actors resetting the same device at once, which explains both the corruption and why it
-reproduces on any Linux box with this common, usually-autoloaded kernel module present.
-Fixed the same way as the `usbmuxd --no-preflight` requirement above — a one-time
-manual system setup step documented in the README, not code in `blackb0x` itself: the
-module needs to be blacklisted via `/etc/modprobe.d`, since a bare `modprobe -r` alone
-was tried first and confirmed insufficient on real hardware (the kernel reloads it on
-its own via `request_module()` on every one of gaster's stage-transition reconnects,
-independent of anything either binary does in userspace); see the README's own setup
-section for the exact commands.
+- **`gaster`** (verygenericname/gaster, the tool palera1n's `legacy` branch shells
+  out to) — vendored, then forked to `regulad/gaster@linux-reset-race` for a long
+  instrumentation and bug-fixing campaign. **Never pwned the device on either Linux
+  7.1.x or macOS 26.** It is now removed from the tree entirely, fork included.
+- **`blackb0x-pwn`** — this project's own original hand-ported checkm8, recovered
+  from git history and built as a standalone binary on every platform. This is the
+  implementation confirmed working on real AppleTV3,2 hardware **on macOS**, and it
+  is now the only pwntool. On Linux it fails at a specific, well-characterised point
+  (see below).
 
-**Tested against real hardware with the module actually blacklisted — confirmed
-working as designed, but confirmed *not* the fix for the hang.** `apple_mfi_fastcharge`
-genuinely stayed unloaded through the whole run (no competing driver anymore, confirmed
-via `lsmod` and the kernel log's driver attribution), but the exact same corruption and
-hang happened anyway — `gaster` still got stuck at the same point, and the device was
-left in the same descriptor-corrupted state (`lsusb -v`: garbled `iManufacturer`/
-`iProduct`, `Couldn't open device`) that only clears on a physical unplug/replug. So
-`apple_mfi_fastcharge` was a real, additive conflict worth fixing, but not the (sole)
-root cause — this pointed back at a genuine host-side (kernel/xHCI) limitation
-reinitializing this device after `gaster`'s own reset, independent of any competing
-driver.
+Along the way three real, independent software causes were each found, fixed, and
+ruled out as *the* cause — all three fixes are genuine improvements worth keeping
+regardless:
 
-`gaster` is now forked (**regulad/gaster**, `linux-reset-race` branch — see the vendored
-dependencies table above). Two changes were tried; one was reverted after a real-hardware
-test disproved it:
+1. **`apple_mfi_fastcharge`** auto-binds to the Apple TV even in DFU mode (its
+   product-ID match range `0x1200`-`0x12ff` covers this device's DFU PID `0x1227`)
+   and issues its own `usb_reset_device()` calls mid-exploit. Must be blacklisted via
+   `/etc/modprobe.d` — a bare `modprobe -r` is confirmed insufficient, since the
+   kernel reloads it via `request_module()` on every stage-transition reconnect. Real
+   conflict, **not** the root cause: with it genuinely unloaded the hang was identical.
+2. **Unclaimed interfaces.** DFU class requests were being sent without claiming
+   interface 0, which is what the kernel's "did not claim interface 0 before use"
+   warning was about. Fixed — and a second bug inside that very fix turned up: it
+   *gated* success on the claim succeeding, but with a device-side truncated config
+   descriptor (`bNumInterfaces 0`, confirmed stable for minutes via `lsusb -v`) the
+   claim fails forever, turning a possibly-transient state into an unconditional
+   "device not found."
+3. **The reset-skip theory** — skipping the post-`SETUP`/`SPRAY` USB reset, on the
+   reasoning that unlike `RESET`/`PATCH` those stages never enter
+   `DFU_STATE_MANIFEST_WAIT_RESET`. **Disproved on real hardware**: the device wedged
+   in true `D` state inside `usb_reset_configuration`/`usb_control_msg`. The reset is
+   load-bearing, not precautionary. Reverted.
 
-- **Tried and reverted**: skipping `gaster_checkm8()`'s post-stage `reset_usb_handle()`
-  call after a successful `SETUP`/`SPRAY` stage (reasoning: unlike `RESET`/`PATCH`, those
-  two never put the device into `DFU_STATE_MANIFEST_WAIT_RESET`, so the reset looked
-  merely precautionary). **Confirmed wrong against real hardware**: with this change,
-  `gaster` hung deterministically after `Stage: SETUP` with *no* corruption or kernel log
-  activity at all — `ps` showed the process in real `D` state, and
-  `sudo cat /proc/<pid>/stack` showed it blocked inside
-  `usb_reset_configuration`/`usb_control_msg`/`usb_start_wait_urb` — the kernel side of
-  `libusb_set_configuration()` in the next stage's reconnect, waiting on a
-  `SET_CONFIGURATION` URB that never completes. `checkm8_stage_setup()`'s async-abort
-  heap-race technique apparently leaves the device's own USB peripheral controller
-  unresponsive at the hardware level until a real bus reset clears it — the reset was
-  load-bearing, not precautionary. Reverted; `gaster_checkm8()` is back to upstream's
-  unconditional post-stage reset for every stage.
-- **Kept**: `wait_usb_handle()` now claims interface 0 (with
-  `libusb_set_auto_detach_kernel_driver()` enabled first) before running any DFU class
-  request against it, instead of sending every one of those requests unclaimed — the
-  direct fix for the "did not claim interface 0 before use" kernel warning seen
-  throughout this investigation, and a code-level handling of a conflicting kernel driver
-  (like `apple_mfi_fastcharge`) that doesn't depend solely on it being blacklisted ahead
-  of time.
+**The "Linux host-stack limitation" conclusion that followed those three was itself
+wrong, and has been retracted.** A `usbmon` capture established that the resets work,
+that the partial-transfer mechanism is precise and predictable, and that large
+malformed control writes *are* delivered by this host. What actually fails is
+narrower: the device refuses the overwrite transfer for `blackb0x-pwn` specifically,
+and the acceptance window is structurally impossible to hit — acceptance needs the
+groom size above 320 bytes, while fitting all 1660 payload bytes needs it at or below
+388, and the device treats anything from 1472 up as a continuation of the same
+2048-byte DFU buffer. No cancel delay reconciles those. See `docs/HISTORY.md` for the
+full evidence trail, the measured tables, and the dead ends worth not re-trying.
 
-**Tested against real hardware in this (reverted-reset, claim-fix-only) form: one real
-improvement confirmed, the core hang still not fixed.** The unkillable `D`-state hang is
-gone — `/proc/<pid>/stack` this time showed the process just sleeping normally in
-`wait_usb_handle()`'s retry loop, not wedged in the kernel — but the device still fails
-to reconnect cleanly after the post-`SETUP` reset: the identical `error -110`/`error -75`/
-"config 1 has 0 interfaces" corruption as the very first capture, confirmed to never
-self-recover. Three independent, real software causes have now each been ruled out in
-turn (`apple_mfi_fastcharge`, the reset-skip theory, unclaimed interfaces) without fixing
-the underlying hang, though two of the three are genuine, permanent improvements worth
-keeping regardless. **This converges on the same conclusion the original single-machine
-investigation reached, now corroborated by elimination of every specific software
-mechanism tested plus the original report that this reproduces across multiple different
-Linux machines: a genuine host-side (kernel/xHCI) limitation, not a userspace software
-bug.** See `docs/HISTORY.md`'s checkm8/gaster section for the full evidence trail and the
-six earlier real software bugs found and fixed getting here.
+The decisive outstanding measurement is **what that same transfer does on a working
+macOS run** — see the tcpdump/`analyze_usbmon_checkm8.py` instructions in
+`docs/HISTORY.md`.
 
-**That "host limitation" framing was re-examined instead of accepted outright, and a real
-bug in the interface-claim fix itself turned up.** Rather than guess further, directly
-validated the two things actually in question: whether libusb's Linux sysfs-based
-matching (this project builds with `--disable-udev`) really finds the device, and whether
-the device genuinely still exists while `gaster` is stuck. A standalone probe against the
-exact same static `libusb-1.0.a`, run live while `gaster` was stuck waiting, found and
-opened the device immediately and successfully called `libusb_set_configuration()` — the
-same call previously found wedged in `D` state — ruling out "libusb can't find/open the
-device" as an explanation. `libusb_claim_interface()` failed with
-`LIBUSB_ERROR_INVALID_PARAM`, and `lsusb -v` confirmed why: a genuinely truncated
-configuration descriptor (`bNumInterfaces 0`), stable for minutes with no exploit running
-at all — real device-side descriptor corruption after `SETUP`'s heap-race. The actual bug:
-`wait_usb_handle()` was *gating* success on that claim succeeding, but upstream `gaster`
-never claims at all — with a permanently-zero-interface descriptor, the claim failed every
-time and `wait_usb_handle()` never even reached `checkm8_check_usb_device()`'s own check,
-turning a possibly-transient exploit-related state into an unconditional "not found."
-Fixed: the claim is now attempted only when `libusb_get_active_config_descriptor()` shows
-`bNumInterfaces > 0`, and `wait_usb_handle()` proceeds to `usb_check_cb()` regardless of
-whether the claim happened — matching upstream's permissiveness for exactly the case
-where claiming isn't possible. **Not yet re-verified against real hardware.** Still
-unresolved; further blind changes to gaster's exploit-timing code are not recommended
-without a new, specific mechanism to test.
+All investigation knobs are `DEBUG_`-prefixed and every default is the
+macOS-confirmed behaviour, so an unset environment is the original path byte for
+byte: `DEBUG_CANCEL_DELAY_US` (100), `DEBUG_OVERWRITE_TIMEOUT_MS` (100),
+`DEBUG_RECONNECT_ATTEMPTS` (30), `DEBUG_KEEP_CONNECTION` (unset),
+`DEBUG_IGNORE_GROOM_ERRORS` (unset).

@@ -3,9 +3,9 @@
 //  blackb0x-pwn
 //
 //  Standalone CLI for Blackb0x's own original checkm8/SHAtter exploit
-//  implementations (see Checkm8Pwn.c) -- deliberately independent of the
-//  main `blackb0x` binary's gaster-based checkm8Attempt() path. Builds on
-//  every platform: nothing here is Apple-specific, only libirecovery's own
+//  implementations (see Checkm8Pwn.c) -- the same code the main `blackb0x`
+//  binary's checkm8Attempt() shells out to. Builds on every platform:
+//  nothing here is Apple-specific, only libirecovery's own
 //  backend-independent irecv_* API, which resolves to IOKit on Darwin and
 //  libusb elsewhere. See this target's own block in CMakeLists.txt.
 //
@@ -25,16 +25,16 @@ static void printUsage(const char* argv0) {
         "\n"
         "Runs Blackb0x's own original, hand-ported exploit implementations\n"
         "directly over libirecovery (its native IOKit backend on macOS, libusb\n"
-        "elsewhere) -- no gaster. Waits for a single already-connected DFU-mode\n"
-        "device; if --ecid is omitted, the first one found is used.\n"
+        "elsewhere). Waits for a single already-connected DFU-mode device; if\n"
+        "--ecid is omitted, the first one found is used.\n"
         "\n"
         "env (all DEBUG_-prefixed knobs exist for investigating why this does\n"
         "not work on Linux -- every default is the macOS-confirmed behaviour,\n"
         "so leaving them unset changes nothing):\n"
         "  DEBUG_CANCEL_DELAY_US\n"
         "      Microseconds to let checkm8's bug-setup DFU_DNLOAD run before\n"
-        "      aborting it. Default 100, from the macOS original. gaster takes\n"
-        "      the same variable. See scripts/sweep_pwn_cancel_delay.py.\n"
+        "      aborting it. Default 100, from the macOS original. See\n"
+        "      scripts/sweep_pwn_cancel_delay.py.\n"
         "  DEBUG_OVERWRITE_TIMEOUT_MS\n"
         "      Milliseconds to let the overwrite transfer deliver its payload.\n"
         "      Default 100, likewise from the macOS original.\n"

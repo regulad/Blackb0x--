@@ -11,10 +11,10 @@
 //  plain C -- same rule DeviceManager.cpp's own SHAtter() port already
 //  follows, see that file's comment. checkm8() here is a *fresh* port of
 //  that same original: DeviceManager.cpp's own checkm8() was replaced
-//  with a shell-out to the vendored `gaster` tool before this file
-//  existed (see docs/HISTORY.md) and never carried the original body
-//  forward, so it's recovered from git history here rather than copied
-//  from DeviceManager.cpp.
+//  with a shell-out to a vendored `gaster` (since removed -- see
+//  docs/HISTORY.md) before this file existed, and never carried the
+//  original body forward, so it's recovered from git history here rather
+//  than copied from DeviceManager.cpp.
 //
 //  The one deliberate deviation from the original: status/progress used
 //  to update AppKit widgets via dispatch_async(dispatch_get_main_queue(),
@@ -189,8 +189,9 @@ static int isTransferTimeout(int ret) {
 // complete in 27-820us, so 100us is simply below the floor for getting a data
 // stage moving there.
 //
-// Named to match gaster's own DEBUG_CANCEL_DELAY_US, so one sweep covers
-// both tools. See scripts/sweep_pwn_cancel_delay.py.
+// See scripts/sweep_pwn_cancel_delay.py. (The name matched the vendored
+// gaster's own DEBUG_CANCEL_DELAY_US back when a single sweep covered both
+// tools; gaster is gone, the name is kept so old sweep output still reads.)
 #define kDefaultCancelDelayUs 100u
 
 static unsigned cancelDelayUs(void) {
@@ -239,15 +240,16 @@ static unsigned overwriteTimeoutMs(void) {
 // instead of closing, sleeping 500ms and reopening in between.
 //
 // The close/reopen is what the macOS original does and it works there. On
-// Linux a usbmon capture shows the device treating the same request very
-// differently either side of it: gaster, which issues its equivalent
-// immediately after the aborted download on the same connection, gets the
-// device to accept up to the full 1632 bytes; blackb0x-pwn, which issues it
-// after CLRSTATUS plus a close, half a second of nothing, a reopen, a stall
-// and a leak, gets it stalled with zero bytes delivered at every bug-setup
-// size tried. Half a second with the handle closed is a long time for a DFU
-// state machine to keep a dangling buffer, and it is the one step gaster
-// does not perform.
+// Linux a usbmon capture showed the device treating the same request very
+// differently either side of it. The comparison was against the vendored
+// gaster (since removed): issuing the equivalent request immediately after
+// the aborted download on the same connection got the device to accept up
+// to the full 1632 bytes, while blackb0x-pwn -- which issues it after
+// CLRSTATUS plus a close, half a second of nothing, a reopen, a stall and a
+// leak -- got it stalled with zero bytes delivered at every bug-setup size
+// tried. Half a second with the handle closed is a long time for a DFU
+// state machine to keep a dangling buffer, and it was the one step gaster
+// did not perform.
 //
 // Off by default: the close/reopen is the behaviour the working macOS path
 // uses, so this only changes anything when deliberately switched on.
@@ -336,8 +338,8 @@ static int get_exploit_configuration(uint16_t cpid, checkm8_config_t* config) {
 }
 
 // ecid == 0 opens the first DFU-mode device irecv_open_with_ecid() finds --
-// matches how the rest of this tool (and gaster itself) work: one device
-// connected at a time, no menu.
+// matches how the rest of this tool works: one device connected at a time,
+// no menu.
 //
 // Thirty one-second retries by default: a device re-initialising its USB
 // stack after a bus reset, or after running injected SecureROM-level code,

@@ -22,12 +22,12 @@ struct CliOptions {
     uint64_t ecid = 0;    // 0 = not specified
     std::string udid;     // empty = not specified
     bool dryRun = false;
-    // Never attempt to run a pwntool (gaster/blackb0x-pwn) at all -- if the
+    // Never attempt to run the pwntool (blackb0x-pwn) at all -- if the
     // connected device isn't already reporting a pwned DFU serial string,
     // fail instead of attempting the exploit. For iterating on the
     // post-exploit send flow against an already-pwned device without
     // spawning a pwntool again. (Was named --no-checkm8; renamed once
-    // "pwntool" became the general term for gaster/blackb0x-pwn both.)
+    // "pwntool" became this project's general term for the exploit binary.)
     bool noPwn = false;
     // Sends the stock RestoreRamdisk exactly as downloaded from Apple
     // instead of the blackb0x-patched dist/ one -- a diagnostic for
@@ -36,7 +36,7 @@ struct CliOptions {
     // Patcher::useStockRamdisk()'s own comment).
     bool stockRamdisk = false;
     // Sends the stock iBSS/iBEC exactly as downloaded from Apple instead
-    // of blackb0x's own patched versions -- checkm8/pwnTool still runs
+    // of blackb0x's own patched versions -- checkm8/the pwntool still runs
     // first (SecureROM's own signature check still needs bypassing to
     // accept any file at all), but no boot-args/KASLR/ticket-check
     // patches get applied to the bootloader itself (see
@@ -78,7 +78,7 @@ struct CliOptions {
     // patches specifically; if it fails the same way, the iBSS/iBEC
     // patches themselves are implicated instead) or combined with
     // stockRecovery above for a fully-stock suite end to end (checkm8/
-    // pwnTool still runs regardless, unless noPwn above also skips it) --
+    // the pwntool still runs regardless, unless noPwn above also skips it) --
     // stockRecovery above REQUIRES this combination specifically (see its
     // own comment for why).
     bool stockFirmware = false;
@@ -100,18 +100,6 @@ struct CliOptions {
     // SecureROM/iBEC's check regardless.
     bool stockSecurerom = false;
     bool help = false;
-    // Which tool actually runs the checkm8 exploit -- "gaster" or
-    // "blackb0x-pwn". Only ever meaningfully choosable on Apple platforms
-    // (--pwntool, see printCliUsage()/parseCliOptions()): gaster does not
-    // work on macOS no matter what has been tried, blackb0x-pwn does (see
-    // README.md/docs/HISTORY.md), so blackb0x-pwn is the Apple default;
-    // blackb0x-pwn itself is never built at all on Linux, so gaster is the
-    // only option there, unconditionally.
-#if defined(__APPLE__)
-    std::string pwnTool = "blackb0x-pwn";
-#else
-    std::string pwnTool = "gaster";
-#endif
 };
 
 CliOptions parseCliOptions(int argc, char** argv);

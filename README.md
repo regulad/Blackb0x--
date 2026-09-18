@@ -23,11 +23,8 @@ firmware combination listed above is implemented from protocol analysis and
 disassembly, not confirmed on real hardware. Platform status, from real
 hardware testing:
 
-- **macOS + `blackb0x-pwn`: known-good.** `blackb0x-pwn` (see "checkm8 on
-  macOS" below) has been run successfully against real AppleTV3,2 hardware.
-- **macOS + gaster: does not work, no matter what has been tried.** Not "flaky" —
-  genuinely non-functional on every macOS attempt so far. Use `--pwntool
-  blackb0x-pwn` (the default on macOS) instead; see below.
+- **macOS: known-good.** `blackb0x-pwn` has been run successfully against
+  real AppleTV3,2 hardware.
 - **Linux: should work per the code/design, but has not worked reliably on
   any Linux machine tested.** Confirmed on two different real PCs — one
   Intel 11th-gen, one AMD Zen 2 — both showing the same class of
@@ -78,9 +75,6 @@ fresh clone + build, not just assumed):
   macOS build attempt: without an explicit `brew install libtool`, `autoreconf`/
   `autogen.sh` steps in the vendored dependencies fail outright, the same way a
   from-scratch Linux distro missing that package would.
-- **`xxd`** (usually in a `vim-common`/`xxd`/`vim` package) — used to embed `gaster`'s
-  exploit payload binaries as C arrays at build time.
-
 ### Runtime system dependencies
 
 - **`hfsprogs`** (`mkfs.hfsplus`/`fsck.hfsplus`) and a kernel built with
@@ -97,7 +91,7 @@ fresh clone + build, not just assumed):
 - **`ssh`** — used by `scripts/push_authorized_keys.sh` to grant yourself SSH access
   to the device once it's jailbroken; see that step below.
 - **`stdbuf`** (GNU coreutils) — **required**, not optional: `blackb0x` refuses to
-  run the checkm8 exploit (gaster or `blackb0x-pwn`, see below) at all without it.
+  run the checkm8 exploit (`blackb0x-pwn`, see below) at all without it.
   Its progress output only gets flushed live through `stdbuf`; without it, a
   stuck/hanging exploit run would be silently indistinguishable from a working
   one, which is worse than just refusing to start. **On macOS, Homebrew's
@@ -106,43 +100,42 @@ fresh clone + build, not just assumed):
   unprefixed `stdbuf` first, so either `brew install coreutils` alone, or also
   opting into coreutils' "gnubin" PATH shim for the unprefixed names, works.
 
-### checkm8 on macOS: use `--pwntool blackb0x-pwn`
+### The pwntool: `blackb0x-pwn`
 
-`blackb0x` normally runs the checkm8 exploit by shelling out to the vendored
-`gaster` tool. **On macOS, gaster does not work — not intermittently, not
-"needs a workaround," genuinely non-functional no matter what has been
-tried.** `blackb0x` therefore builds a second executable on macOS,
-`blackb0x-pwn` (see `Blackb0x/Source/Pwn/`), that runs this project's own
-original checkm8/SHAtter exploit directly over libirecovery's native IOKit
-backend instead — no gaster, no libusb. **This is the default on macOS**
-(`--pwntool` defaults to `blackb0x-pwn` there; pass `--pwntool gaster` to
-force the old, broken path anyway, e.g. for debugging gaster itself).
-`blackb0x-pwn` is **known-good**: confirmed working against real AppleTV3,2
-hardware. It can also be run standalone (`blackb0x-pwn checkm8` /
+`blackb0x` runs the checkm8 exploit by shelling out to `blackb0x-pwn` (see
+`Blackb0x/Source/Pwn/`), a second executable built on every platform. It runs
+this project's own original checkm8/SHAtter exploit directly over
+libirecovery — its native IOKit backend on macOS, libusb elsewhere. There is
+no choice to make and no flag to pass.
+
+`blackb0x-pwn` is **known-good on macOS**: confirmed working against real
+AppleTV3,2 hardware. It can also be run standalone (`blackb0x-pwn checkm8` /
 `blackb0x-pwn shatter`, both accepting `--ecid`) independent of `blackb0x`
 entirely.
+
+This used to be a choice between `blackb0x-pwn` and a vendored `gaster`,
+selected with `--pwntool`. **`gaster` never pwned an AppleTV3,2 on either
+Linux 7.1.x or macOS 26**, across a long instrumentation campaign, so it has
+been removed along with the flag; `docs/HISTORY.md` keeps the full record of
+what was measured.
 
 **Apple Silicon tip:** if `blackb0x-pwn` is unreliable over a direct
 USB-C connection, try a plain (non-Thunderbolt) USB hub between the Mac and
 the Apple TV instead — this has been reported to make it reliable.
-
-`--pwntool` (and `blackb0x-pwn` itself) only exist on macOS; on Linux,
-gaster is the only option, unconditionally, and passing `--pwntool` prints
-a warning and is otherwise ignored.
 
 ### One-time system setup: blacklist `apple_mfi_fastcharge`
 
 The in-tree `apple_mfi_fastcharge` driver (Apple Lightning fast-charge support) binds
 to *any* USB device with Apple's vendor ID whose product ID falls in `0x1200`-`0x12ff`
 — a range that includes the Apple TV's real DFU-mode PID (`0x1227`), so this driver
-attaches to it even in DFU mode. `gaster` never claims the interface first, so this
-driver stays attached and independently resets the device while `gaster`'s own
+attaches to it even in DFU mode. It stays attached and independently resets the device
+while the pwntool's own
 exploit-timing-sensitive USB transfers are in flight — two things resetting the same
 device at once, which corrupts USB enumeration and can hang the exploit (sometimes
 taking the whole USB stack down with it) in a way that reproduces across different
 Linux machines, not just one host's controller. Removing the module once isn't
 enough either — it reloads itself automatically the moment the device reconnects
-(which `gaster`'s own exploit does several times per run) — so it needs to be
+(which the exploit does several times per run) — so it needs to be
 blacklisted, not just unloaded:
 
 ```sh
@@ -292,5 +285,3 @@ See [`AGENTS.md`](AGENTS.md) for repo conventions, and
 **p0sixninja**
 * SHAtter
 
-**[verygenericname](https://github.com/verygenericname/gaster)**
-* gaster (the checkm8 implementation this port shells out to)

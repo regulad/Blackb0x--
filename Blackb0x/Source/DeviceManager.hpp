@@ -101,10 +101,11 @@ public:
 
     // --- Exploits (ported verbatim from the original; see DeviceManager.cpp) ---
     int SHAtter(uint64_t ecid);
-    // pwnTool: "gaster" (default off Apple platforms) or "blackb0x-pwn"
-    // (Apple-only, default there — see Cli.hpp's CliOptions::pwnTool and
-    // docs/HISTORY.md for why gaster specifically doesn't work on macOS).
-    int checkm8(uint64_t ecid, const std::string& pwnTool = "gaster");
+    // Shells out to blackb0x-pwn, this project's only pwntool. There used to
+    // be a choice here (a vendored `gaster`, selected by --pwntool); gaster
+    // never worked against an AppleTV3,2 on either Linux 7.1.x or macOS 26
+    // and is gone — see docs/HISTORY.md.
+    int checkm8(uint64_t ecid);
 
     irecv_client_t get_tv(uint64_t ecid);
 
@@ -239,11 +240,10 @@ private:
     void checkJailbreakRunning(const std::string& udid);
 
     // One full pass through the checkm8 exploit sequence — shells out to
-    // either the vendored `gaster` binary or `blackb0x-pwn` (pwnTool;
-    // rather than driving the low-level USB request sequence itself — see
-    // docs/HISTORY.md for why); checkm8() (public) retries this a bounded
-    // number of times on failure — see its own comment for why.
-    bool checkm8Attempt(uint64_t ecid, const std::string& pwnTool);
+    // `blackb0x-pwn` rather than driving the low-level USB request sequence
+    // itself (see docs/HISTORY.md for why); checkm8() (public) retries this
+    // a bounded number of times on failure — see its own comment for why.
+    bool checkm8Attempt(uint64_t ecid);
 
     friend void ::blackb0x_irecv_device_event_cb(const irecv_device_event_t* event, void* user_data);
     friend void ::blackb0x_idevice_event_cb(const idevice_event_t* event, void* user_data);

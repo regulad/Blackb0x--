@@ -39,6 +39,34 @@ This is the opposite call from `entrypoint/`, which explicitly rejected Theos
 opposite") and builds its own cctools-port image. Both are right: `entrypoint/`
 needs a compiler and no packaging; this needs packaging and no compiler.
 
+## Ownership and modes are asserted, not inherited
+
+`build.sh` runs `chown -R 0:0` plus a directories-0755/files-0644 pass over the
+staging tree immediately before `dm.pl` tars it, then re-marks the maintainer
+scripts and `postinstall.sh` executable.
+
+This is not belt-and-braces. A `.deb` *can* express arbitrary uid/gid/mode per
+entry — `data.tar` records them — but a staging tree on a non-root host cannot:
+an ordinary user cannot chown a file to root, and modes come from whatever the
+checkout and umask produced. So the assertion has to happen where we are root,
+which is inside the container.
+
+Before this it only *looked* right: under rootless podman the container's root
+maps to the invoking host user, so a host-owned bind mount appears root-owned
+inside and `tar` recorded `0/root` by accident. Rootful podman, a set
+`BLACKB0X_THEOS_UID`, or a checkout with odd modes would each have changed the
+answer silently.
+
+Everything is `root:wheel` (0:0), which is correct for all of it — `/etc/apt`
+sources and keyrings, the LaunchDaemon plist, root's own `.profile`, and
+`/var/.blackb0x`. **launchd refuses to load a plist that is not root-owned or
+is group/world-writable**, and that failure presents as "the daemon simply
+never ran" with nothing pointing at permissions.
+
+Verified by deliberately breaking three modes in a staging tree (`777` on an
+apt source, `600` on the plist, `644` on `postinstall.sh`) and confirming the
+built `.deb` carried `0644`/`0644`/`0755`, all `0/root`.
+
 ## Container notes
 
 The image sets `THEOS` from the login profile of its `regulad.linux` user, but

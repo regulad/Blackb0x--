@@ -115,6 +115,41 @@ if [ -n "$THEOS_UID" ]; then
 fi
 
 # shellcheck disable=SC2086  # UID_ARGS is deliberately word-split
+# Ownership and modes are ASSERTED here, immediately before dm.pl tars the
+# tree -- not inherited from whatever the staging tree happened to carry.
+#
+# A .deb can express arbitrary uid/gid/mode per entry (data.tar records them),
+# but a staging tree on a non-root host cannot: an ordinary user cannot chown
+# a file to root, and modes come from whatever the checkout/umask produced. So
+# the assertion has to happen at the point where we are root, which is inside
+# the container.
+#
+# Without this it only LOOKED correct: under rootless podman the container's
+# root maps to the invoking host user, so a host-owned bind mount appears
+# root-owned inside and tar recorded 0/root by accident. Rootful podman, a set
+# BLACKB0X_THEOS_UID, or a checkout with odd modes would all have changed the
+# answer silently.
+#
+# Everything is root:wheel (0:0). That is correct for all of it: /etc/apt
+# sources and keyrings, the LaunchDaemon plist, root's own .profile, and
+# /var/.blackb0x. launchd in particular REFUSES to load a plist that is not
+# root-owned or is group/world-writable, which fails as "the daemon simply
+# never ran" with nothing pointing at permissions.
+#
+# Directories 0755, files 0644, then the two things that must execute.
+PERMS_SCRIPT='
+set -eu
+chown -R 0:0 /stage
+find /stage -type d -exec chmod 755 {} +
+find /stage -type f -exec chmod 644 {} +
+[ -f /stage/DEBIAN/postinst ] && chmod 755 /stage/DEBIAN/postinst
+[ -f /stage/DEBIAN/preinst ] && chmod 755 /stage/DEBIAN/preinst
+[ -f /stage/DEBIAN/prerm ] && chmod 755 /stage/DEBIAN/prerm
+[ -f /stage/DEBIAN/postrm ] && chmod 755 /stage/DEBIAN/postrm
+[ -f /stage/var/.blackb0x/postinstall.sh ] && chmod 755 /stage/var/.blackb0x/postinstall.sh
+true
+'
+
 exec podman run --rm \
     $UID_ARGS \
     -e "THEOS=$THEOS_DIR" \
@@ -122,4 +157,6 @@ exec podman run --rm \
     -v "$STAGING:/stage:Z" \
     -v "$OUT_DIR:/out:Z" \
     "$IMAGE" \
-    bash -c "set -eu; \"\$THEOS/bin/dm.pl\" -b -Zgzip /stage \"/out/$OUT_NAME\""
+    bash -c "$PERMS_SCRIPT
+set -eu
+\"\$THEOS/bin/dm.pl\" -b -Zgzip /stage \"/out/$OUT_NAME\""

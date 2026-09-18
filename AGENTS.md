@@ -276,26 +276,34 @@ regardless:
    in true `D` state inside `usb_reset_configuration`/`usb_control_msg`. The reset is
    load-bearing, not precautionary. Reverted.
 
-**The "Linux host-stack limitation" conclusion that followed those three was itself
-wrong, and has been retracted.** A `usbmon` capture established that the resets work,
-that the partial-transfer mechanism is precise and predictable, and that large
-malformed control writes *are* delivered by this host. What actually fails is
-narrower: the device refuses the overwrite transfer for `blackb0x-pwn` specifically,
-and the acceptance window is structurally impossible to hit — acceptance needs the
-groom size above 320 bytes, while fitting all 1660 payload bytes needs it at or below
-388, and the device treats anything from 1472 up as a continuation of the same
-2048-byte DFU buffer. No cancel delay reconciles those. See `docs/HISTORY.md` for the
-full evidence trail, the measured tables, and the dead ends worth not re-trying.
+**Two successive conclusions here have now been retracted; read `docs/HISTORY.md`
+before trusting any summary of this problem.** First the "Linux host-stack limitation"
+verdict fell to a `usbmon` capture. Then its replacement — "the device refuses the
+overwrite transfer, and the acceptance window is structurally impossible to hit" — fell
+to a `DEBUG_TRACE_TRANSFERS` trace of a **working macOS run**, which stalls the overwrite
+having moved **zero bytes**, exactly like the failing Linux run. A stalled overwrite
+moving nothing is what success looks like, so the 320/388 acceptance arithmetic was
+describing a non-symptom. The in-code assertion `want 0 < n <= 1632` is likewise
+backwards: macOS succeeds at n = 0.
 
-The decisive outstanding measurement is still **what that same transfer does on a
-working macOS run** — but the way to get it has changed. The `XHC20`/tcpdump route
-`docs/HISTORY.md` originally prescribed is a **dead end**: macOS hides the USB capture
-interfaces unless SIP is fully disabled (confirmed by Apple DTS), and reports say the
-method fails on macOS 15.6.1+ even with SIP off. `analyze_usbmon_checkm8.py`'s
-`DLT_USB_DARWIN` path is consequently unverified *and* unreachable — don't invest in
-it. The measurement has to come from instrumenting `blackb0x-pwn` itself and diffing
-its output across platforms; see `docs/HISTORY.md` for what is and isn't recoverable
-that way.
+Also ruled out, in both directions and on the correct (PWND) success criterion: **the
+cancel delay**. Sweeping 0–90 µs on Linux reproduced macOS's `consumed = 0` at every
+step and failed nine for nine.
+
+What actually differs is one row: **`payload-upload moved` is 0 on the successful run
+and 678 on the failing one** — a success/failure oracle available before the final
+reset. Linux dies at `device did not reappear after payload execution` with the device
+**wedged off the bus entirely**, which points at the post-payload reset, where
+`irecv_reset()` (`libirecovery.c:2548`) has a real backend asymmetry: IOKit does
+`ResetDevice()` *plus* `USBDeviceReEnumerate()` and tolerates `kIOReturnNotResponding`
+from both, while libusb does a bare `libusb_reset_device()` with no re-enumerate and the
+return value discarded.
+
+Getting that trace needed `blackb0x-pwn`'s own instrumentation, because the `XHC20`/
+tcpdump route is a **dead end**: macOS hides the USB capture interfaces unless SIP is
+fully disabled (confirmed by Apple DTS), and reports say the method fails on macOS
+15.6.1+ even with SIP off. `analyze_usbmon_checkm8.py`'s `DLT_USB_DARWIN` path is
+consequently unverified *and* unreachable — don't invest in it.
 
 All investigation knobs are `DEBUG_`-prefixed and every default is the
 macOS-confirmed behaviour, so an unset environment is the original path byte for

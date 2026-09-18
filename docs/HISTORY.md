@@ -3456,3 +3456,98 @@ The caveat to respect: on timeout `wLenDone` reflects what the host controller b
 it sent, which is not automatically what the device accepted. That is the precise gap
 the usbmon capture closes on Linux, and it is why the Linux-side numbers stay the
 reference for anything the two disagree about.
+
+## The overwrite was never the problem: a working macOS trace refutes the whole analysis
+
+`DEBUG_TRACE_TRANSFERS` (added because macOS will not give up the wire) produced the
+first side-by-side of a **successful** macOS run against a failing Linux one. The result
+retracts most of the two sections above.
+
+| | macOS (**succeeds**, `PWND:[checkm8]`) | Linux (fails) |
+|---|---|---|
+| bug setup consumed | **0** of 2048 | 64 of 2048 |
+| `OVERWRITE` ret | −10 (`IRECV_E_PIPE`) | −9 (`LIBUSB_ERROR_PIPE`) |
+| `OVERWRITE` moved | **0** | **0** |
+| `payload-upload` moved | **0** | **678** |
+
+### Retraction 1: a stalled overwrite moving 0 bytes IS success
+
+The section "Where this leaves the platform conclusion" treats the overwrite being
+refused as *the* failure, and builds an arithmetic argument on top of it: acceptance
+needs the groom above 320, fitting 1660 bytes needs it at or below 388, the device
+treats 1472+ as a continuation of the same 2048-byte buffer, therefore "no setting
+satisfies both" and no cancel delay can help.
+
+**Every step of that reasoning rests on the premise that the overwrite is supposed to
+deliver its bytes, and it is not.** The macOS run that pwns the device stalls the
+overwrite having moved **zero bytes**, identically to Linux. The acceptance window, the
+320/388 conflict, and the "structurally impossible" conclusion describe a non-symptom.
+Disregard them.
+
+### Retraction 2: the in-code assertion is backwards
+
+`Checkm8Pwn.c` prints `want 0 < n <= 1632` for the bug-setup count and guards on
+`sent > config.overwrite_offset`. macOS succeeds with **n = 0**, outside that range.
+Linux fails with n = 64, inside it. Whatever that range meant, it does not describe the
+working configuration.
+
+### The one real divergence, and a cheap oracle
+
+`payload-upload` is the only row where `moved` differs: **0 on the successful run, 678
+on the failing one.** The reading that fits: after a successful overwrite the device is
+running the injected handler and never ACKs the data stage, so nothing moves; on Linux
+it is still running stock DFU and absorbs all 678 bytes.
+
+That makes `payload-upload moved != 0` a **success/failure oracle available before the
+final reset**, much earlier than the closing PWND check, and it is the fastest way to
+tell "the overwrite did not take" from "the overwrite took and something later broke."
+
+### Ruled out: the cancel delay, conclusively this time
+
+The obvious hypothesis from the table was that Linux's 64 consumed bytes were the
+problem -- Linux is measurably *faster* at every stage (`bug-setup/abort` 378us vs
+738us, `groom1/stall` 327us vs 422us), so the data stage plausibly beats the 100us
+cancel window on Linux and not on macOS. The previous sweep had only ever gone upward
+from 100us (its default range is `100,250,...,3000`), so downward was untested.
+
+**Swept 0,10,20,30,40,50,60,75,90: every single one consumed 0 bytes -- exactly matching
+macOS -- and every single one still failed.** Nine for nine, device wedged each time.
+
+So the bug-setup count is reproducible on demand and is *not* the differentiator. The
+cancel delay is now ruled out in both directions, on the correct success criterion
+(PWND). The sweep's closing hint, "the abort is still landing before the host controller
+starts the data stage -- try larger delays", is actively misleading: landing before the
+data stage is the macOS behaviour and is what we want.
+
+### Where the failure actually is, and the next suspect
+
+With consumed == 0 and the overwrite stalling at 0 bytes -- both now matching macOS --
+Linux still dies at `checkm8: device did not reappear after payload execution`, and the
+device is left **wedged**: off the USB bus entirely, needing a power cycle, not merely a
+failed reconnect.
+
+That points at the post-payload reset, where there is a real backend asymmetry in
+`irecv_reset()` (`libirecovery.c:2548`):
+
+- **IOKit** calls `ResetDevice()` **and then `USBDeviceReEnumerate(handle, 0)`**, and
+  explicitly tolerates `kIOReturnNotResponding` from both -- precisely what a device
+  executing injected SecureROM code would return.
+- **libusb** calls bare `libusb_reset_device()`, with **no re-enumerate and the return
+  value discarded**. Per libusb's own contract, a device whose descriptors changed
+  across the reset returns `LIBUSB_ERROR_NOT_FOUND` and invalidates the handle -- and
+  checkm8's payload changes the serial string (it appends `PWND:[checkm8]`), so a
+  descriptor change is exactly what happens here.
+
+This is a documented code difference, not a theory about timing, and it sits at the
+step where Linux dies.
+
+**The decisive next measurement is one run**: Linux at any delay <= 90us with
+`DEBUG_TRACE_TRANSFERS=1`, reading `payload-upload moved`.
+
+- `moved == 0` -> the overwrite took and the payload ran; the failure is purely reset /
+  re-enumeration, and the fix is in `irecv_reset()`'s libusb branch.
+- `moved == 678` -> the overwrite still is not taking, the reset is a red herring, and
+  the divergence is somewhere in the grooming that the per-stage timings do not capture.
+
+Do not skip this. Both branches above are plausible and they lead to completely
+different places.

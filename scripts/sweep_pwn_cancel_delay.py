@@ -171,7 +171,7 @@ def main():
     ap.add_argument("--binary", default="./build/blackb0x-pwn")
     ap.add_argument("--ecid", default=None,
                     help="pass through to blackb0x-pwn --ecid")
-    ap.add_argument("--delays", default="100,250,500,750,1000,1500,2000,3000",
+    ap.add_argument("--delays", default="0,25,50,75,100,250,500,1000,2000,3000",
                     help="comma-separated microsecond values; 'lo-hi:step' expands "
                          "to a range (default: %(default)s)")
     ap.add_argument("--attempt-timeout", type=int, default=180,
@@ -258,13 +258,24 @@ def main():
             "PWNED" if pwned else ("timeout" if code is None else "failed"),
             post_state))
 
-    useful = [(d, s) for d, s, _, _, _ in results if s not in (None, 0)]
-    if not useful:
-        print("\nEvery attempt consumed 0 bytes. The abort is still landing before the "
-              "host controller starts the data stage -- try larger delays.")
-    else:
+    # Deliberately NOT advising a direction any more. This used to say "every
+    # attempt consumed 0 bytes ... try larger delays", which is now known to be
+    # backwards: a confirmed-working macOS run consumes 0, and a Linux sweep of
+    # 0-90us reproduced consumed == 0 at every step and still failed nine for
+    # nine. Both the count and the delay are ruled out as the differentiator --
+    # see docs/HISTORY.md, "The overwrite was never the problem".
+    consumed_any = [(d, s) for d, s, _, _, _ in results if s not in (None, 0)]
+    if consumed_any:
         print("\nDelays that got the device to consume anything: %s" %
-              ", ".join("%dus -> %d bytes" % (d, s) for d, s in useful))
+              ", ".join("%dus -> %d bytes" % (d, s) for d, s in consumed_any))
+    else:
+        print("\nEvery attempt consumed 0 bytes -- which is what a working macOS run "
+              "does too, so this is not by itself a failure signal.")
+    print("\nThe consumed count is NOT known to be the thing that matters: a macOS run "
+          "that pwns the device consumes 0, and 0-90us on Linux all consume 0 and all "
+          "fail. If nothing here pwned, the next measurement is a single run with "
+          "DEBUG_TRACE_TRANSFERS=1, reading 'payload-upload moved' -- 0 means the "
+          "overwrite took and the failure is later (the reset); 678 means it did not.")
     return 0
 
 

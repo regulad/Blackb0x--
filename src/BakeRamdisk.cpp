@@ -357,79 +357,18 @@ struct MountGuard {
     }
 };
 
-// Runs `argv`, transparently re-invoked as the real (non-root) invoking
-// user via `runuser` when bakeRamdisk() itself is running under sudo. This
-// needs to happen: bakeRamdisk() runs privileged (CAP_SYS_ADMIN, for the
-// HFS+ mount below), but podman's own rootless image/volume storage —
-// `blackb0x-entrypoint-toolchain`, `blackb0x-cctools-target`, set up once
-// per entrypoint/README.md's own setup steps, and whatever
-// scripts/build_deb_cache.py's own podman calls need underneath it — all
-// belong to the real user, not root's own (separate) rootless podman
-// storage.
-static bool runAsInvokingUser(const std::vector<std::string>& argv) {
-    std::vector<std::string> cmd;
-    const char* sudoUser = getenv("SUDO_USER");
-    if (sudoUser && *sudoUser) {
-        cmd = {"runuser", "-u", sudoUser, "--"};
-        // runuser does NOT reset XDG_RUNTIME_DIR — under `sudo`, that
-        // variable is still whatever the original (root) shell had it as
-        // (commonly /run/user/0), not the target user's own real runtime
-        // directory, even though the command genuinely now runs as that
-        // user. Confirmed directly against a real bake-firmware run:
-        // without this, podman failed with "mkdir /run/user/0/libpod:
-        // permission denied" — trying to use root's runtime dir while
-        // running as uid 1000. `env VAR=value` here is a real, separate
-        // argv entry (no shell involved), same "no shell interpretation"
-        // guarantee as every other runCommand() call in this file.
-        const char* sudoUid = getenv("SUDO_UID");
-        if (sudoUid && *sudoUid) {
-            cmd.push_back("env");
-            cmd.push_back(std::string("XDG_RUNTIME_DIR=/run/user/") + sudoUid);
-        }
-        cmd.insert(cmd.end(), argv.begin(), argv.end());
-    } else {
-        cmd = argv;
-    }
-    return runCommand(cmd);
-}
-
-// bakeRamdisk() itself runs as real root (sudo), so any temp dir it
-// creates via makeTempDir() comes out root-owned (mkdtemp() defaults to
-// 0700, owner-only) — but anything invoked through runAsInvokingUser()
-// runs as the non-root invoking user instead, and needs real write access
-// if it's expected to write its own output files into that same
-// directory. Confirmed directly against a real bake run: without this,
-// scripts/build_deb_cache.py crashed with a plain PermissionError trying
-// to write picklist.txt into a root-owned temp dir. Only the top-level
-// directory needs chowning — files that user creates inside it afterward
-// are already owned by them.
-static void chownToInvokingUserIfSudo(const std::string& path) {
-    const char* sudoUid = getenv("SUDO_UID");
-    const char* sudoGid = getenv("SUDO_GID");
-    if (sudoUid && *sudoUid && sudoGid && *sudoGid) {
-        chown(path.c_str(), (uid_t)atoi(sudoUid), (gid_t)atoi(sudoGid));
-    }
-}
-
-// Always the absolute /usr/bin/podman — a broken/shadowed `podman` earlier
-// on some PATH is a real failure mode this project has already hit once
-// (see entrypoint/README.md).
-static bool runPodman(const std::vector<std::string>& podmanArgs) {
-    std::vector<std::string> cmd = {"/usr/bin/podman"};
-    cmd.insert(cmd.end(), podmanArgs.begin(), podmanArgs.end());
-    return runAsInvokingUser(cmd);
-}
-
 // Builds entrypoint/'s freestanding ARMv6 replacement for /sbin/launchd,
 // rather than shipping a precompiled binary — see entrypoint/README.md for
-// why (needs cctools-port's real Apple ld64 port; a normal host toolchain
-// can't produce this). Assumes the one-time toolchain setup documented
-// there has already been done (the blackb0x-entrypoint-toolchain image
-// built, blackb0x-cctools-target volume populated via cctools-port's
-// SDK-gated build.sh) — this only runs the actual `make`, it doesn't
-// bootstrap the whole cross-toolchain from scratch, since that needs an SDK
-// that is deliberately not checked into this repo at all (Apple's
-// copyrighted material — see entrypoint/assets/README.md).
+// why. Assumes the one-time toolchain setup documented there has already
+// been done: `arm-apple-darwin11-clang` and `ldid` on $PATH. This only runs
+// the actual `make`; it doesn't bootstrap the cross-toolchain, since that
+// needs an iPhoneOS SDK deliberately not checked into this repo at all
+// (Apple's copyrighted material — see entrypoint/assets/README.md).
+//
+// This used to run inside a podman container, which existed solely to give
+// a LINUX host a port of Apple's own ld64/as (cctools-port). On macOS those
+// are the native tools, so the container had nothing left to provide — see
+// entrypoint/README.md for the Homebrew setup that replaced it.
 //
 // The binary is identical for every firmware target (no per-firmware
 // customization at all), so BakeFirmware.cpp's main() calls this exactly
@@ -446,19 +385,12 @@ std::string buildEntrypointBinary() {
     std::error_code rmEc;
     fs::remove(outputPath, rmEc);
 
-    bool ok = runPodman({
-        "run", "--rm", "--security-opt", "label=disable",
-        "-v", entrypointDir + ":/work",
-        "-v", "blackb0x-cctools-target:/opt/cctools-port/usage_examples/ios_toolchain:ro",
-        "-e", "PATH=/opt/cctools-port/usage_examples/ios_toolchain/target/bin:/usr/bin:/bin",
-        "-w", "/work",
-        "blackb0x-entrypoint-toolchain",
-        "make", "clean", "all",
-    });
+    bool ok = runCommand({"make", "clean", "all"}, entrypointDir);
     if (!ok) {
         fprintf(stderr,
-                "bakeRamdisk: failed to build entrypoint/ via podman — if this is the first run, see "
-                "entrypoint/README.md's one-time toolchain setup steps\n");
+                "bakeRamdisk: failed to build entrypoint/ — if this is the first run, see "
+                "entrypoint/README.md's one-time toolchain setup steps (arm-apple-darwin11-clang "
+                "and ldid have to be on $PATH)\n");
         return "";
     }
     if (!fs::exists(outputPath)) {
@@ -1271,6 +1203,13 @@ static bool mergeRealFilesystemTree(const fs::path& blackb0xRoot, const std::str
 // genuinely-consistent root and (b) both actually catch a real broken
 // case (tested by unpacking a package whose Pre-Depends: was deliberately
 // left unsatisfied). Either one failing aborts the whole step.
+// NOT EXECUTED ANY MORE. This is the shell script the containerized dpkg
+// bootstrap used to run inside a debian:stretch sandbox, kept verbatim
+// because several comments below reason about what it did and why the
+// current no-container path is a safe simplification of it. It references
+// container-only paths (/debs, /preinstall, /work) and a real era-matched
+// dpkg, neither of which exists on the host. Delete it only together with
+// the comments that cite it.
 static const char* kPreinstallInnerScript = R"SCRIPT(#!/bin/sh
 set -e
 export DEBIAN_FRONTEND=noninteractive
@@ -1393,8 +1332,10 @@ static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const s
 
 // macOS has no container runtime at all (confirmed directly — not just
 // podman, no viable alternative either), so the real, containerized dpkg
-// bootstrap the #else branch below runs is off the table here. That real
-// dpkg run only exists to correctly SEQUENCE maintainer-script execution
+// bootstrap this used to do on Linux is off the table. That real dpkg run
+// (kPreinstallInnerScript, kept below purely as the record of what it did —
+// nothing executes it any more) only existed to correctly SEQUENCE
+// maintainer-script execution
 // around a genuine dpkg/tar/gzip/sed dependency cycle in this bootstrap-era
 // package set (see kPreinstallInnerScript's own long comment for the full
 // cycle) — force-unpack everything with checking off, then one real forced
@@ -1411,8 +1352,8 @@ static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const s
 // "unpack every package" degenerates to "copy every package's real payload
 // files onto disk," an operation with no meaningful ordering constraint
 // left to get wrong — so `stripPostinstPackages`/`stripPreinstFilenames`
-// are accepted for signature parity with the #else branch but genuinely
-// unused here, not an oversight.
+// are accepted for signature parity with that older, containerized path
+// but genuinely unused here, not an oversight.
 //
 // Mechanism: reuse extractDebAndBuildStanza() (already proven by
 // stageEtasonatv()/stageP0sixspwn() below) per eligible package to pull its
@@ -1423,10 +1364,10 @@ static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const s
 // exactly what a real `dpkg --unpack` would have left on disk); concatenate
 // every stanza into one status file and hand-write matching per-package
 // dpkg/info/ state. The result lands in the exact same outPreinstallDir/
-// outDpkgStateDir shape the #else branch produces, so mergePreinstalledPackages()
-// (the shared, non-platform-specific caller) needs no changes at all.
+// outDpkgStateDir shape the containerized path produced, so
+// mergePreinstalledPackages() (the shared caller) needs no changes at all.
 //
-// This intentionally skips the #else branch's `dpkg --audit`/`apt-get
+// This intentionally skips the containerized path's `dpkg --audit`/`apt-get
 // check` consistency pass — there is no real dpkg/apt state machine
 // running here to audit in the first place, just files being copied. What
 // substitutes for it: computePreinstallEligibleFilenames()'s own
@@ -1580,7 +1521,7 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
     }
 
     // The synthetic "firmware" package — the exact same entry
-    // kPreinstallInnerScript's own copy declares in the #else branch (see
+    // kPreinstallInnerScript's own copy declares (see
     // its own comment), and the one scripts/build_deb_cache.py /
     // scripts/build_deb_cache_experimental_no_container.py's own outer apt
     // resolution already declares too. Genuinely needed here, not just for
@@ -1709,20 +1650,16 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
         outResult = cached;
         return false;
     }
-    chownToInvokingUserIfSudo(tempDir);
-    // No container runtime on macOS (see computePreinstalledPackages()'s
-    // own macOS branch above for the full story) — build_deb_cache.py
-    // itself shells out to real apt-get inside a podman sandbox, so it
-    // can't run here either. scripts/build_deb_cache_experimental_no_container.py
-    // is the portable, no-container stand-in: same --output-dir/picklist.txt/
-    // resolved_packages.txt contract (verified directly against its own
-    // main()), just a plain local transitive-closure walk over Blackb0x/Debs/
-    // instead of a real apt dependency solve — see that script's own module
-    // docstring for its real, accepted gaps versus build_deb_cache.py. It
-    // has no notion of firmware-version-gated Depends: at all (see its own
-    // module docstring — parse_dependency_groups() strips version
-    // constraints outright), so it takes no --firmware-version flag.
-    bool ok = runAsInvokingUser(
+    // No container runtime on macOS (confirmed directly — not just podman,
+    // no viable alternative either), so a real apt-get dependency solve in a
+    // Debian sandbox is off the table.
+    // scripts/build_deb_cache_experimental_no_container.py does the job
+    // without one: a plain local transitive-closure walk over Blackb0x/Debs/
+    // instead of a real apt solve — see that script's own module docstring
+    // for its real, accepted gaps. It has no notion of firmware-version-gated
+    // Depends: at all (parse_dependency_groups() strips version constraints
+    // outright), so it takes no --firmware-version flag.
+    bool ok = runCommand(
         {"python3", "scripts/build_deb_cache_experimental_no_container.py", "--output-dir", tempDir});
     if (!ok) {
         fprintf(stderr, "bakeRamdisk: scripts/build_deb_cache_experimental_no_container.py failed\n");

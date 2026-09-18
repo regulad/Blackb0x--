@@ -43,7 +43,8 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
                   const std::string& productVersion, const std::string& outputPath,
                   const std::string& entrypointBinaryPath, bool& outSizeWarning);
 
-// Builds entrypoint/'s freestanding ARMv6 replacement for /sbin/launchd via
-// podman — see BakeRamdisk.cpp's own comment for full detail. Returns the
-// built binary's path, or "" on failure.
+// Builds entrypoint/'s freestanding ARMv6 replacement for /sbin/launchd by
+// running `make` in entrypoint/ — see BakeRamdisk.cpp's own comment for full
+// detail, and entrypoint/README.md for the one-time toolchain setup it
+// assumes. Returns the built binary's path, or "" on failure.
 std::string buildEntrypointBinary();

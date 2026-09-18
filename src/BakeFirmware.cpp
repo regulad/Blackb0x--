@@ -55,7 +55,7 @@
 //  which is what the vast majority of real devices will actually be on.
 //
 //  --only bootchain|ramdisk runs just that half. `--only bootchain` is the
-//  fast iteration loop for patch logic: no podman entrypoint build, no
+//  fast iteration loop for patch logic: no entrypoint cross-compile, no
 //  debcache, no HFS+ work at all. `--only ramdisk` is what Cli.cpp spawns
 //  when a live run finds the dist/ entry it needs is missing.
 //
@@ -443,7 +443,7 @@ static TargetResult bakeBootchainForked(const std::string& device, const std::st
 // bakeRamdisk() leans on two things that only pay off when they are shared
 // across every target in one process: computeGlobalDebcacheOnce()
 // (BakeRamdisk.cpp) resolves and caches the whole apt closure once, and
-// buildEntrypointBinary() pays for a podman build once. Forking per target
+// buildEntrypointBinary() pays for one entrypoint cross-compile. Forking per target
 // would throw both away and re-do them dozens of times. The bootchain half
 // forks because the vendored patch code it drives 4x per target does not
 // survive being reused; the ramdisk half drives one decrypt and one encrypt
@@ -759,7 +759,7 @@ int main(int argc, char** argv) {
 
         // Built once — the same binary gets spliced into every firmware's
         // ramdisk (see BakeRamdisk.hpp's bakeRamdisk() comment), so there's
-        // no reason to pay for the podman build again per target. Skipped
+        // no reason to pay for the cross-compile again per target. Skipped
         // entirely under --only bootchain, which is most of why that flag is
         // worth having.
         entrypointBinaryPath = buildEntrypointBinary();

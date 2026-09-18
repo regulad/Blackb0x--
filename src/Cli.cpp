@@ -398,9 +398,8 @@ bool checkExploit(DeviceManager& deviceManager, const AppleTVDevice& device, boo
 // --only ramdisk, not a full bake: this path exists solely because
 // patchRamdisk() needs a dist/ entry that isn't there. The bootchain half
 // would be pure waste here — this run patches iBSS/iBEC/kernel/DeviceTree
-// live itself (see below), and paying for a podman-free but still
-// download-and-patch-heavy second pass would only slow down the bake that is
-// actually blocking.
+// live itself (see below), and paying for a second, download-and-patch-heavy
+// pass would only slow down the bake that is actually blocking.
 static pid_t spawnBakeFirmwareBackground(const std::string& deviceModel, const std::string& buildID) {
     std::string binPath = resolveBakeFirmwarePath();
     std::vector<std::string> argvStrings = {binPath,     "--only",  "ramdisk", "--device",

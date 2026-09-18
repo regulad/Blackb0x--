@@ -414,8 +414,8 @@ bake needed `CAP_SYS_ADMIN` for its loop mount. With the loop mount gone
 and the two were merged into the single `bake-firmware`, which had been
 carrying two verbatim copies of the target enumeration and the
 `--signed-only`/`--device`/`--build` filters. `--only bootchain` is the
-fast iteration loop the old split used to provide: it skips the podman
-entrypoint build and the debcache entirely.
+fast iteration loop the old split used to provide: it skips the entrypoint
+cross-compile and the debcache entirely.
 
 Still to do for this item: `blackb0x` itself does not yet *consume*
 `dist/bootchain/`. The live path still downloads and patches inside the

@@ -20,8 +20,7 @@ archive.org — the official Apple developer tools DMG (1.7GB), preserved
 there for exactly this kind of legacy-development use. Xcode 4.6 bundles the
 iOS 6 SDK, matching AppleTV2,1/3,x's software range.
 
-**Reproduction steps** (all done in a throwaway container, nothing installed
-on the host):
+**Reproduction steps** (needs `7z` — `brew install p7zip`):
 
 ```sh
 curl -L -o xcode460417218a.dmg \
@@ -31,13 +30,18 @@ curl -L -o xcode460417218a.dmg \
 # "koly" trailer in the last 512 bytes) containing "Xcode.app" directly
 # (this era predates the separate .pkg installer format). p7zip can walk
 # into the nested HFS+ volume without mounting anything.
-podman run --rm -v "$PWD:/dl:ro" -v "$PWD/_extract:/out" debian:bookworm-slim sh -c '
-  apt-get update -qq && apt-get install -y -qq p7zip-full
-  cd /out
-  7z x /dl/xcode460417218a.dmg \
-    "Xcode/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS6.1.sdk" -r
-'
+mkdir -p _extract && cd _extract
+7z x ../xcode460417218a.dmg \
+  "Xcode/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS6.1.sdk" -r
+cd ..
 ```
+
+This ran under podman on a debian:bookworm-slim image for as long as the
+host was an immutable Linux box that shouldn't have p7zip installed on it.
+On macOS there is no podman, and `7z` is one `brew install` away, so it
+just runs directly. `hdiutil attach` would also open this DMG natively, but
+7z walks the nested HFS+ volume without mounting anything, which is both
+faster and what the symlink note below is written against.
 
 p7zip refuses 5 symlinks as "dangerous link path" (its own path-traversal
 safety check, not a real problem with these — they're ordinary

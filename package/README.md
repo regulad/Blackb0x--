@@ -18,7 +18,7 @@ invisible to apt.
 - `layout/DEBIAN/postinst` — a bare `launchctl load` of the first-boot
   LaunchDaemon. Read its header comment before editing it; its triviality is
   load-bearing for the ramdisk baker.
-- `build.sh` — runs Theos's `dm.pl` inside `ghcr.io/regulad/dotfiles:latest`.
+- `build.sh` — runs Theos's `dm.pl` (`$THEOS`, default `~/theos`).
 
 ## Why Theos, and which half of it
 
@@ -30,33 +30,43 @@ to build a package would be a step backwards.
 
 We use **none** of Theos's compilation half. This package is pure data — apt
 sources, gpg keys, a plist, shell scripts, and the bundled `.deb`s. Nothing is
-compiled, so the image's SDKs never come into it. That is fortunate, because
-the image ships only `AppleTVOS12.4.sdk` and `iPhoneOS16.5.sdk`, both
-arm64-era and neither able to target this project's armv7 devices. **If this
-package ever grows a real binary, that is a genuine blocker, not a detail.**
+compiled, so Theos's SDKs never come into it. That is fortunate, because no
+current SDK can target this project's armv7 devices. **If this package ever
+grows a real binary, that is a genuine blocker, not a detail.**
 
 This is the opposite call from `entrypoint/`, which explicitly rejected Theos
 ("this binary is freestanding, Theos's `tool.mk` assumes exactly the
-opposite") and builds its own cctools-port image. Both are right: `entrypoint/`
-needs a compiler and no packaging; this needs packaging and no compiler.
+opposite") and uses a `cctools-port` cross-compiler instead. Both are right:
+`entrypoint/` needs a compiler and no packaging; this needs packaging and no
+compiler.
 
 ## Ownership and modes are asserted, not inherited
 
-`build.sh` runs `chown -R 0:0` plus a directories-0755/files-0644 pass over the
-staging tree immediately before `dm.pl` tars it, then re-marks the maintainer
-scripts and `postinstall.sh` executable.
+`build.sh` runs a directories-0755/files-0644 pass over the staging tree
+immediately before `dm.pl` tars it, then re-marks the maintainer scripts and
+`postinstall.sh` executable. Modes are asserted; a `.deb` records them per
+entry and a checkout's umask is not a spec.
 
-This is not belt-and-braces. A `.deb` *can* express arbitrary uid/gid/mode per
-entry — `data.tar` records them — but a staging tree on a non-root host cannot:
-an ordinary user cannot chown a file to root, and modes come from whatever the
-checkout and umask produced. So the assertion has to happen where we are root,
-which is inside the container.
+Ownership is **not** chown'd, and `build.sh` refuses to run as root. `dm.pl`
+picks entry ownership off its own euid:
 
-Before this it only *looked* right: under rootless podman the container's root
-maps to the invoking host user, so a host-owned bind mount appears root-owned
-inside and `tar` recorded `0/root` by accident. Rootful podman, a set
-`BLACKB0X_THEOS_UID`, or a checkout with odd modes would each have changed the
-answer silently.
+```perl
+if ($< == 0) { $tf->chown($stat[4], $stat[5]); }   # root: preserve on-disk
+else         { $tf->chown("root", "wheel"); }      # non-root: force 0:0
+```
+
+So a non-root `dm.pl` stamps `root:wheel` on everything by construction —
+exactly what this package wants — and running as root is the broken case,
+because it would record whatever the staging tree happens to carry. An
+ordinary user cannot chown a file to root anyway, so there is no way to
+prepare a correct tree for the root path.
+
+The containerized build hit exactly that: `dm.pl` ran as container root, so it
+needed an explicit `chown -R 0:0` to put the ownership back. Before that was
+added it only *looked* right — under rootless podman the container's root maps
+to the invoking host user, so a host-owned bind mount appeared root-owned
+inside and `tar` recorded `0/root` by accident. Running natively removes the
+whole class of problem.
 
 Everything is `root:wheel` (0:0), which is correct for all of it — `/etc/apt`
 sources and keyrings, the LaunchDaemon plist, root's own `.profile`, and
@@ -68,19 +78,18 @@ Verified by deliberately breaking three modes in a staging tree (`777` on an
 apt source, `600` on the plist, `644` on `postinstall.sh`) and confirming the
 built `.deb` carried `0644`/`0644`/`0755`, all `0/root`.
 
-## Container notes
+## Requirements
 
-The image sets `THEOS` from the login profile of its `regulad.linux` user, but
-`build.sh` passes `THEOS` explicitly and uses a non-login shell instead. The
-profile also triggers a Homebrew API fetch, which would make every bake slow,
-network-dependent and non-deterministic.
+- Theos, for `bin/dm.pl`. `$THEOS` if set, else `~/theos`.
+- `dpkg-scanpackages`, for the bundled local repo's `Packages` index —
+  `brew install dpkg`. A hand-rolled index is not an option; apt is strict
+  about the fields and checksums it expects there.
 
-`build.sh` deliberately does **not** pass `-u`. Under rootless podman the
-container's root maps to the invoking host user, so running as container root
-is what makes the output land owned by the caller; passing `-u 1000` maps to a
-subuid owning nothing on the host and `dm.pl` fails with a bare "Permission
-denied" that reads like a `dm.pl` bug rather than a uid-mapping one.
-`BLACKB0X_THEOS_UID` is the escape hatch for a rootful setup.
+This used to run inside `ghcr.io/regulad/dotfiles:latest` under podman, which
+existed only to supply a Linux box with Theos on it. Theos is macOS-native and
+`dm.pl` is plain Perl, so on this project's only supported host the container
+had nothing left to provide — and, per the section above, running natively is
+also what makes `dm.pl` get ownership right without help.
 
 ## Package lists
 

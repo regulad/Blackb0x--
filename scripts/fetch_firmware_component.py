@@ -34,15 +34,17 @@ Examples:
     scripts/fetch_firmware_component.py AppleTV2,1 11D257c RestoreRamDisk \\
         /tmp/ramdisk.raw
 
-    # Pull one file out of it directly (needs podman + p7zip, no root):
+    # Pull one file out of it directly (needs 7z, no root):
     scripts/fetch_firmware_component.py AppleTV2,1 11D257c RestoreRamDisk \\
         --extract sbin/launchd --extract-out /tmp/real_launchd
 
 Requires: this repo's Blackb0x/ImageKeys/<device>/*.keys for the requested
 build, and build/third_party/xpwn/ipsw-patch/xpwntool already built
-(`cmake --build build`). --extract additionally needs `podman` on PATH
-(runs p7zip in a throwaway debian:bookworm-slim container, matching
-entrypoint/'s own approach — nothing installed on the host).
+(`cmake --build build`). --extract additionally needs `7z` on PATH
+(`brew install p7zip`). That used to run inside a throwaway
+debian:bookworm-slim container under podman, which only ever existed to
+supply p7zip without installing it on an immutable Linux host; podman does
+not exist on macOS, and 7z is one brew away.
 """
 
 import argparse
@@ -58,10 +60,6 @@ import zipfile
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 XPWNTOOL = os.path.join(REPO_ROOT, "build", "third_party", "xpwn", "ipsw-patch", "xpwntool")
 IMAGEKEYS_DIR = os.path.join(REPO_ROOT, "Blackb0x", "ImageKeys")
-# /usr/bin/podman explicitly, not whatever "podman" resolves to on PATH —
-# this dev machine has a broken linuxbrew-shadowed podman earlier on PATH
-# than the real system one (see entrypoint/README.md's own note on this).
-PODMAN = "/usr/bin/podman" if os.path.exists("/usr/bin/podman") else "podman"
 
 
 class HTTPRangeFile:
@@ -178,19 +176,13 @@ def decrypt_component(encrypted_path, key_hex, iv_hex, out_path):
 
 
 def extract_file(raw_payload_path, path_substring, extract_out):
-    """Extract one file from the raw HFS+ payload via p7zip in a throwaway
-    podman container — no mount, no root, matches entrypoint/'s own
-    DMG-extraction approach (see entrypoint/assets/README.md)."""
+    """Extract one file from the raw HFS+ payload with 7z — no mount, no
+    root. `hdiutil attach` would also work on macOS, but 7z reads the
+    volume without asking the kernel to mount an untrusted HFS+ image."""
     workdir = os.path.dirname(os.path.abspath(raw_payload_path))
     basename = os.path.basename(raw_payload_path)
     listing = subprocess.run(
-        [
-            PODMAN, "run", "--rm", "--security-opt", "label=disable",
-            "-v", f"{workdir}:/dl:ro",
-            "debian:bookworm-slim", "sh", "-c",
-            f"apt-get update -qq >/dev/null && apt-get install -y -qq p7zip-full >/dev/null 2>&1 "
-            f"&& 7z l /dl/{basename}",
-        ],
+        ["7z", "l", os.path.join(workdir, basename)],
         capture_output=True, text=True, check=True,
     )
     matches = [line for line in listing.stdout.splitlines() if path_substring in line]
@@ -205,14 +197,7 @@ def extract_file(raw_payload_path, path_substring, extract_out):
     extract_root = os.path.join(workdir, "_extract_tmp")
     os.makedirs(extract_root, exist_ok=True)
     subprocess.run(
-        [
-            PODMAN, "run", "--rm", "--security-opt", "label=disable",
-            "-v", f"{workdir}:/dl:ro",
-            "-v", f"{extract_root}:/out",
-            "debian:bookworm-slim", "sh", "-c",
-            f"apt-get update -qq >/dev/null && apt-get install -y -qq p7zip-full >/dev/null 2>&1 "
-            f"&& cd /out && 7z x /dl/{basename} '{member_path}'",
-        ],
+        ["7z", "x", f"-o{extract_root}", os.path.join(workdir, basename), member_path],
         check=True,
     )
     extracted = os.path.join(extract_root, member_path)

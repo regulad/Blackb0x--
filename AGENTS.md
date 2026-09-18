@@ -173,13 +173,14 @@ raw-USB device nodes, and neither applies on macOS.
     `dist/<device>_<buildID>-Ramdisk.dmg`. **This path has never been run on real
     macOS** — written with no Mac available; see `BakeRamdisk.cpp`'s caveat and
     `.claude/TODO.md` item 4a. Stays in-process, unlike the bootchain half, because
-    the debcache and the podman entrypoint build are resolved once and shared across
+    the debcache and the entrypoint cross-compile are resolved once and shared across
     every target.
 
   `--signed-only` restricts the run to builds ipsw.me currently reports Apple as still
   signing (a small fraction of the total — what most real devices are actually on);
-  `--device`/`--build` narrow it further. `--only bootchain` skips the podman and
-  debcache work entirely, which is the fast loop for iterating on patch logic.
+  `--device`/`--build` narrow it further. `--only bootchain` skips the entrypoint
+  cross-compile and the debcache entirely, which is the fast loop for iterating on
+  patch logic.
 
   The overlay is fully static (no per-device secrets get baked in), so each patched
   output is valid for every device on that firmware; there's no reason to re-derive
@@ -209,13 +210,25 @@ the build shells out to it any more.)
 **Runtime requirements beyond the build** (not just build-time deps):
 - `hdiutil`/`diskutil`/`cp`/`tar` (invoked directly as subprocesses, no shell) —
   `bake-firmware`'s ramdisk half only, all built in to macOS.
-- `python3` and `podman` — `bake-firmware`'s ramdisk half shells out to
-  `scripts/build_deb_cache.py` (via `python3`, which shells out to `podman`
-  itself) to resolve the debcache picklist fresh on every bake; see
-  `BakeRamdisk.cpp`'s `buildPicklist()`. Same `$SUDO_USER`/`runuser`
-  re-invocation as the existing `entrypoint/` podman calls, for the same
-  reason (podman's own rootless storage belongs to the real invoking user,
-  not root's).
+- `python3` — `bake-firmware`'s ramdisk half shells out to
+  `scripts/build_deb_cache_experimental_no_container.py` to resolve the debcache
+  fresh on every bake.
+- `arm-apple-darwin11-clang` and `ldid` on `$PATH` — `bake-firmware`'s ramdisk
+  half cross-compiles `entrypoint/` on every bake (once per run, not per
+  firmware). One-time setup in `entrypoint/README.md`; `brew install ldid`
+  plus a `cctools-port` build against the iPhoneOS 6.1 SDK.
+- Theos (`$THEOS`, default `~/theos`) and `dpkg-scanpackages` (`brew install dpkg`)
+  — `package/build.sh` builds the `xyz.regulad.blackb0x` `.deb` with Theos's
+  `dm.pl` on every bake.
+
+**No container runtime is required anywhere.** Podman used to be a hard runtime
+dependency of three separate steps, and in every case it existed to give a *Linux*
+host something macOS already has natively: Apple's `ld64`/`as` (via `cctools-port`)
+for `entrypoint/`, a box with Theos on it for the `.deb`, and `p7zip` for the
+by-hand extraction helpers. `scripts/build_deb_cache.py` is the one thing that still
+wants podman — it is a Linux-only maintenance tool, never invoked by a build or a
+bake, kept only because growing `Blackb0x/Debs/` needs a real apt-get solve. See its
+own header.
 - `usbmuxd` — macOS's own built-in daemon; Normal-mode discovery has nothing to talk
   to without it. (Linux additionally needed it run with `--no-preflight` via a systemd
   drop-in or discovery silently never fired; that requirement is gone with Linux.)

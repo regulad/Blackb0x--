@@ -1,12 +1,12 @@
 #!/bin/sh
-# Build the xyz.regulad.blackb0x .deb with Theos's dm.pl, inside
-# ghcr.io/regulad/dotfiles:latest.
+# Build the xyz.regulad.blackb0x .deb with Theos's dm.pl.
 #
 # Usage: package/build.sh <staging-dir> <output.deb> [version] [packages-file]
 #
 # [packages-file] overrides package/packages.txt; only useful for testing.
 #
 # Environment:
+#   THEOS                Theos checkout (default $HOME/theos).
 #   BLACKB0X_DEBS_DIR    where the local-only .deb files live
 #                        (default Blackb0x/Debs).
 #   LOCAL_ONLY_LIST      overrides package/local_only_debs.txt.
@@ -17,6 +17,13 @@
 # resolved package list, and the bundled local-repo .debs depend on what that
 # bake actually resolved), then calls this.
 #
+# This used to run inside ghcr.io/regulad/dotfiles:latest under podman. The
+# container existed to supply a Linux box with Theos on it; Theos is macOS-
+# native and dm.pl is plain Perl, so on this project's only supported host
+# there is nothing left for a container to provide. See the ownership note
+# above the dm.pl call for why running it natively is also strictly MORE
+# correct than running it as container root.
+#
 # Why Theos and not plain dpkg-deb: dm.pl builds a correct .deb without root
 # and without fakeroot, and it is the tool this ecosystem actually uses. That
 # matters here because nothing else in the bake needs root any more (the one
@@ -25,19 +32,12 @@
 #
 # Notably we use NONE of Theos's compilation half. This package is pure data --
 # apt sources, gpg keys, a LaunchDaemon plist, shell scripts, and the bundled
-# .debs. Nothing is compiled, so the image's SDKs (AppleTVOS12.4, iPhoneOS16.5,
-# both arm64-era and both useless for this project's armv7 target) never come
-# into it. If this package ever grows a real binary, that is a genuine problem
-# to solve, not a detail -- neither SDK can target armv7.
+# .debs. Nothing is compiled, so Theos's SDKs never come into it. If this
+# package ever grows a real binary, that is a genuine problem to solve, not a
+# detail -- no modern SDK can target armv7.
 set -eu
 
-IMAGE="${BLACKB0X_THEOS_IMAGE:-ghcr.io/regulad/dotfiles:latest}"
-# Set explicitly rather than relying on the image's login profile to export it.
-# The profile does set THEOS, but it also triggers a Homebrew API fetch, which
-# makes every bake slow, network-dependent and non-deterministic. A non-login
-# shell with THEOS passed in avoids all of that.
-THEOS_DIR="${BLACKB0X_THEOS_DIR:-/home/regulad.linux/theos}"
-THEOS_UID="${BLACKB0X_THEOS_UID:-}"
+THEOS_DIR="${THEOS:-$HOME/theos}"
 
 if [ "$#" -lt 2 ]; then
     echo "usage: $0 <staging-dir> <output.deb> [version] [packages-file]" >&2
@@ -50,13 +50,28 @@ VERSION=${3:-}
 PACKAGES_FILE=${4:-}
 # Empty means "use package/packages.txt" (set below).
 
+if [ ! -x "$THEOS_DIR/bin/dm.pl" ]; then
+    echo "$0: no dm.pl at $THEOS_DIR/bin/dm.pl" >&2
+    echo "    Install Theos (https://theos.dev) or point \$THEOS at an existing checkout." >&2
+    exit 1
+fi
+
+if ! command -v dpkg-scanpackages >/dev/null 2>&1; then
+    echo "$0: dpkg-scanpackages not found -- install dpkg (brew install dpkg)" >&2
+    exit 1
+fi
+
 if [ ! -f "$STAGING/DEBIAN/control" ]; then
     echo "$0: $STAGING has no DEBIAN/control -- not a staging tree" >&2
     exit 1
 fi
 
+# Not `sed -i`: this used to run under GNU sed inside the container, and BSD
+# sed (the one on the host now) spells the in-place flag differently. A temp
+# file is the spelling both agree on.
 if [ -n "$VERSION" ]; then
-    sed -i "s/__BLACKB0X_VERSION__/$VERSION/" "$STAGING/DEBIAN/control"
+    sed "s/__BLACKB0X_VERSION__/$VERSION/" "$STAGING/DEBIAN/control" > "$STAGING/DEBIAN/control.tmp"
+    mv "$STAGING/DEBIAN/control.tmp" "$STAGING/DEBIAN/control"
 fi
 if grep -q '__BLACKB0X_VERSION__' "$STAGING/DEBIAN/control"; then
     echo "$0: DEBIAN/control still has an unsubstituted __BLACKB0X_VERSION__" >&2
@@ -67,19 +82,14 @@ fi
 #
 # Contents are exactly package/local_only_debs.txt -- every .deb that can only
 # ever come from a local repo, because no live repo carries a usable stanza for
-# it. No intersection with the bake's picklist: build_deb_cache.py adds every
-# local-only filename to that picklist unconditionally (it only checks the file
-# exists, fatally), so picklist n local_only_debs.txt is always just
-# local_only_debs.txt. Filtering against it would be a guaranteed no-op that
-# made this script need bake state it does not otherwise want.
+# it.
 #
 # That is what keeps the package buildable on its own: everything it needs is
 # checked in -- this list, packages.txt, layout/, and Blackb0x/Debs.
 #
-# The Packages index is generated in the container by the real
-# dpkg-scanpackages (see the container command at the bottom) -- apt needs a
-# real index, not just loose .deb bytes, to resolve these by name. The index
-# is unsigned, which is why postinstall.sh installs with
+# The Packages index is generated below by the real dpkg-scanpackages -- apt
+# needs a real index, not just loose .deb bytes, to resolve these by name. The
+# index is unsigned, which is why postinstall.sh installs with
 # --allow-unauthenticated.
 : "${LOCAL_ONLY_LIST:=$(dirname "$0")/local_only_debs.txt}"
 : "${BLACKB0X_DEBS_DIR:=$(dirname "$0")/../Blackb0x/Debs}"
@@ -115,9 +125,9 @@ fi
 #
 # It is also more correct on-device. Bake-time resolution runs sandboxed
 # against a synthetic "firmware" package, and a few entries legitimately fail
-# there (build_deb_cache.py's KNOWN_EXPECTED_UNRESOLVABLE) while resolving
-# fine against the real repos on a real device. Templating the resolved subset
-# silently dropped those; packages.txt asks for what was actually asked for.
+# there while resolving fine against the real repos on a real device.
+# Templating the resolved subset silently dropped those; packages.txt asks for
+# what was actually asked for.
 #
 # cydia is filtered out: postinstall.sh installs it first, on its own, because
 # its postinst does its own thing and nothing else may assume Cydia is
@@ -146,69 +156,43 @@ if [ -f "$POSTINSTALL" ] && grep -q "$PLACEHOLDER" "$POSTINSTALL"; then
     chmod 755 "$POSTINSTALL"
 fi
 
-OUT_DIR=$(cd "$(dirname "$OUTPUT")" && pwd)
-OUT_NAME=$(basename "$OUTPUT")
-
-# Deliberately NOT passing -u. Under rootless podman the CONTAINER's root maps
-# to the invoking host user, so running as container root is what makes the
-# output .deb come back owned by the caller. Passing -u 1000 instead maps to a
-# subuid that owns nothing on the host, and dm.pl fails with a bare
-# "Permission denied" writing its output -- which looks like a dm.pl bug rather
-# than a uid-mapping one. BLACKB0X_THEOS_UID is kept as an escape hatch for a
-# rootful podman/docker setup, where the mapping is the other way around.
-UID_ARGS=""
-if [ -n "$THEOS_UID" ]; then
-    UID_ARGS="-u $THEOS_UID"
-fi
-
-# shellcheck disable=SC2086  # UID_ARGS is deliberately word-split
-# Ownership and modes are ASSERTED here, immediately before dm.pl tars the
-# tree -- not inherited from whatever the staging tree happened to carry.
-#
-# A .deb can express arbitrary uid/gid/mode per entry (data.tar records them),
-# but a staging tree on a non-root host cannot: an ordinary user cannot chown
-# a file to root, and modes come from whatever the checkout/umask produced. So
-# the assertion has to happen at the point where we are root, which is inside
-# the container.
-#
-# Without this it only LOOKED correct: under rootless podman the container's
-# root maps to the invoking host user, so a host-owned bind mount appears
-# root-owned inside and tar recorded 0/root by accident. Rootful podman, a set
-# BLACKB0X_THEOS_UID, or a checkout with odd modes would all have changed the
-# answer silently.
-#
-# Everything is root:wheel (0:0). That is correct for all of it: /etc/apt
-# sources and keyrings, the LaunchDaemon plist, root's own .profile, and
-# /var/.blackb0x. launchd in particular REFUSES to load a plist that is not
-# root-owned or is group/world-writable, which fails as "the daemon simply
-# never ran" with nothing pointing at permissions.
-#
-# Directories 0755, files 0644, then the two things that must execute.
-PERMS_SCRIPT='
-set -eu
 # Real dpkg-scanpackages, not a hand-rolled index: apt is strict about the
 # fields and checksums it expects here.
-if [ -d /stage/var/.blackb0x/local-debs ] && ls /stage/var/.blackb0x/local-debs/*.deb >/dev/null 2>&1; then
-    ( cd /stage/var/.blackb0x/local-debs && dpkg-scanpackages . /dev/null 2>/dev/null > Packages )
+if [ -d "$LOCAL_DEBS_DEST" ] && ls "$LOCAL_DEBS_DEST"/*.deb >/dev/null 2>&1; then
+    ( cd "$LOCAL_DEBS_DEST" && dpkg-scanpackages . /dev/null 2>/dev/null > Packages )
 fi
-chown -R 0:0 /stage
-find /stage -type d -exec chmod 755 {} +
-find /stage -type f -exec chmod 644 {} +
-[ -f /stage/DEBIAN/postinst ] && chmod 755 /stage/DEBIAN/postinst
-[ -f /stage/DEBIAN/preinst ] && chmod 755 /stage/DEBIAN/preinst
-[ -f /stage/DEBIAN/prerm ] && chmod 755 /stage/DEBIAN/prerm
-[ -f /stage/DEBIAN/postrm ] && chmod 755 /stage/DEBIAN/postrm
-[ -f /stage/var/.blackb0x/postinstall.sh ] && chmod 755 /stage/var/.blackb0x/postinstall.sh
-true
-'
 
-exec podman run --rm \
-    $UID_ARGS \
-    -e "THEOS=$THEOS_DIR" \
-    -e "HOME=/tmp" \
-    -v "$STAGING:/stage:Z" \
-    -v "$OUT_DIR:/out:Z" \
-    "$IMAGE" \
-    bash -c "$PERMS_SCRIPT
-set -eu
-\"\$THEOS/bin/dm.pl\" -b -Zgzip /stage \"/out/$OUT_NAME\""
+# Modes are ASSERTED here, immediately before dm.pl tars the tree -- not
+# inherited from whatever the checkout/umask produced. Directories 0755,
+# files 0644, then the handful of things that must execute.
+find "$STAGING" -type d -exec chmod 755 {} +
+find "$STAGING" -type f -exec chmod 644 {} +
+for f in DEBIAN/postinst DEBIAN/preinst DEBIAN/prerm DEBIAN/postrm var/.blackb0x/postinstall.sh; do
+    [ -f "$STAGING/$f" ] && chmod 755 "$STAGING/$f"
+done
+
+# OWNERSHIP: deliberately NOT chown'd, and this script deliberately refuses to
+# run as root.
+#
+# dm.pl decides entry ownership by looking at its own euid:
+#     if ($< == 0) { $tf->chown($stat[4], $stat[5]); }   # preserve on-disk
+#     else         { $tf->chown("root", "wheel"); }      # force 0:0
+# So a NON-root dm.pl stamps every entry root:wheel by construction, which is
+# exactly what this package wants for all of it: /etc/apt sources and
+# keyrings, the LaunchDaemon plist, root's own .profile, and /var/.blackb0x.
+# launchd in particular REFUSES to load a plist that is not root-owned or is
+# group/world-writable, and fails as "the daemon simply never ran" with
+# nothing pointing at permissions.
+#
+# Running as root is the broken case, not the safe one: dm.pl would then
+# record whatever the staging tree actually carries. The old containerized
+# build hit exactly that -- dm.pl ran as container root, so it needed an
+# explicit `chown -R 0:0` to put the ownership back. Natively there is nothing
+# to correct.
+if [ "$(id -u)" = "0" ]; then
+    echo "$0: refusing to run as root -- dm.pl preserves on-disk ownership when euid is 0," >&2
+    echo "    and stamps the correct root:wheel only when it is not. Run as an ordinary user." >&2
+    exit 1
+fi
+
+exec "$THEOS_DIR/bin/dm.pl" -b -Zgzip "$STAGING" "$OUTPUT"

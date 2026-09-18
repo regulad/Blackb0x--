@@ -105,7 +105,7 @@ std::string resolveMiscPath(const std::string& relativePath);
 // Resolves the entrypoint/ source directory (the freestanding ARMv6
 // replacement for /sbin/launchd — see entrypoint/README.md):
 // $BLACKB0X_ENTRYPOINT_DIR if set, otherwise "entrypoint" relative to the
-// current working directory. bakeRamdisk() builds this fresh via podman on
+// current working directory. bakeRamdisk() builds this fresh on
 // every bake rather than shipping a precompiled binary — see that
 // directory's own README for why (freestanding, no libSystem, needs
 // cctools-port's real Apple ld64 port; nothing to check in that a normal

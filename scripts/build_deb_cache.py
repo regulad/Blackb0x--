@@ -5,6 +5,26 @@ list against this project's real apt sources (Blackb0x/Misc/apt/*.list),
 fetch the full dependency closure, and grow Blackb0x/Debs/ with whatever's
 new.
 
+*** LINUX-ONLY MAINTENANCE TOOL. THE BAKE NEVER RUNS THIS. ***
+
+It needs podman, and podman does not exist on macOS — which is this
+project's only supported platform now. bakeRamdisk()'s
+computeGlobalDebcacheOnce() calls
+scripts/build_deb_cache_experimental_no_container.py instead,
+unconditionally; nothing in the build or the bake invokes this file at all.
+
+It is kept, rather than deleted with the rest of the podman machinery,
+because it is the only thing that can correctly GROW Blackb0x/Debs/: that
+needs a real apt-get dependency solve with real version constraints and
+GPG-verified fetches from live repos, and the no-container stand-in
+explicitly cannot do any of that (see its own docstring's "Known gaps").
+It is also the reference this project's debcache contract is defined
+against, cited by name throughout BakeRamdisk.cpp and Blackb0x/Misc/README.md.
+
+So: run this by hand, on a Linux box with podman, when and only when
+Blackb0x/Debs/ needs new packages in it. Then commit the resulting .deb
+bytes, which is what every macOS bake actually consumes.
+
 Deliberately does NOT reimplement dependency resolution, repo-index parsing,
 or GPG/hash verification — those are exactly what apt itself already does
 correctly, and hand-rolling a second implementation of any of them is

@@ -1463,26 +1463,37 @@ static int sendFileThenCommand(irecv_client_t client, const char* what, const st
 // 32-bit iBoot it is logging a variable that isn't there, which is harmless
 // for it and equally uninformative for us.
 //
-// Removing the check also removed the `getenv ramdisk-size` round trip from
-// the wire sequence. That is a real, if small, divergence from
-// idevicerestore's traffic, and this project has been bitten by wire-level
-// differences before (the bReq=1 `bootx`, the zero-length DFU_DNLOAD). If a
-// ramdisk upload ever regresses in a way that traffic shape could explain,
-// restoring a bare round trip here is the first thing to try.
+// The COMPARISON is what went away. The `getenv ramdisk-size` ROUND TRIP is
+// still here, deliberately, in sendRamdiskSizeGetenv() below: it is the exact
+// request real idevicerestore makes at this exact point, and this project has
+// been bitten by wire-level differences before (the bReq=1 `bootx`, the
+// zero-length DFU_DNLOAD). Keeping the traffic identical costs one no-op
+// command and removes a whole category of "is it because our USB sequence
+// differs?" from any future investigation. It is kept for that reason ALONE
+// -- the response is discarded, and on this hardware there is no response to
+// speak of.
 //
-// What replaced it: a real size limit enforced at BAKE time in
+// What replaced the check: a real size limit enforced at BAKE time in
 // BakeRamdisk.cpp, where the number is knowable and the failure is cheap.
-// See that limit's own comment (and DEBUG_RAMDISK_LIMIT_MIB) for why 64MiB
-// is an empirically observed ceiling rather than anything the device tells
-// us -- a real AppleTV3,2 short-writes mid-upload at exactly 0x4000000.
+// See that limit's own comment (and DEBUG_RAMDISK_LIMIT_MIB).
+
+// Fire-and-forget, purely for wire fidelity with idevicerestore's
+// recovery_send_ramdisk(). The value is read and dropped on the floor; see
+// the block comment above for why there is nothing to read on this hardware
+// and why we send it anyway.
+static void sendRamdiskSizeGetenv(irecv_client_t client) {
+    if (!client) return;
+    char* value = nullptr;
+    irecv_getenv(client, "ramdisk-size", &value);
+    free(value);
+}
 
 int DeviceManager::sendRamdisk(const std::string& Ramdisk_Path, uint64_t ecid) {
     // get_tv_patient(): same reasoning as sendiBEC() above -- this reconnect
     // follows DeviceTree's own NOTIFY_FINISH-triggered reset.
     irecv_client_t client = get_tv_patient(ecid);
-    // No ramdisk-size check here any more -- see the block comment above
-    // sendFileThenCommand() for why it could never fire on this hardware.
-    // The size limit is enforced at bake time now (BakeRamdisk.cpp).
+    // Round trip only, result discarded -- see its own comment above.
+    sendRamdiskSizeGetenv(client);
     int result = sendFileThenCommand(client, "sendRamdisk", Ramdisk_Path, "ramdisk", false, 0, false,
                                       "getenv ramdisk-delay");
     sleep(2);
@@ -1816,7 +1827,8 @@ int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& 
         irecv_close(client);
         return -1;
     }
-    // No ramdisk-size check here either -- see sendRamdisk() above.
+    // Round trip only, result discarded -- see sendRamdiskSizeGetenv() above.
+    sendRamdiskSizeGetenv(client);
     if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(Ramdisk)", *components.ramdisk, "ramdisk",
                                            /*bReq=*/0, "getenv ramdisk-delay")) {
         if (client) irecv_close(client);

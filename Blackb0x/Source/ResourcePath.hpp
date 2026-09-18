@@ -76,6 +76,19 @@ std::string resolveIBoot32PatcherPath();
 // these from real Cydia repos directly rather than checking them in at all.
 std::string resolveDebsPath();
 
+// Resolves `relativePath` against package/layout/ -- the xyz.regulad.blackb0x
+// package's own source tree, laid out at the FINAL on-device paths
+// (etc/apt/..., var/root/.profile, System/Library/LaunchDaemons/...), matching
+// what real Cydia .debs ship (checked: the vendored packages use ./etc/, not
+// ./private/etc/). $BLACKB0X_PACKAGE_DIR if set, otherwise "package/layout"
+// relative to the current working directory, same convention as
+// resolveMiscPath() below.
+//
+// These files used to live loose under Blackb0x/Misc/ and be staged one
+// stageFile() call at a time. They are package payload now -- see package/
+// and .claude/TODO.md item 11.
+std::string resolvePackagePath(const std::string& relativePath);
+
 // Resolves `relativePath` against the loose-legacy-asset root:
 // $BLACKB0X_MISC_DIR if set, otherwise "Blackb0x/Misc" relative to the
 // current working directory. Holds files that need in-place content

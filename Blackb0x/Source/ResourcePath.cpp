@@ -106,6 +106,13 @@ std::string resolveIBoot32PatcherPath() {
     return "iBoot32Patcher";
 }
 
+std::string resolvePackagePath(const std::string& relativePath) {
+    if (const char* override_ = getenv("BLACKB0X_PACKAGE_DIR")) {
+        return std::string(override_) + "/" + relativePath;
+    }
+    return "package/layout/" + relativePath;
+}
+
 std::string resolveDebsPath() {
     if (const char* override_ = getenv("BLACKB0X_DEBS_DIR")) {
         return std::string(override_);
@@ -204,6 +211,14 @@ std::string ramdiskOverlayContentHash() {
     // obj/ build output and churn the hash on every bake for no reason;
     // hash only the inputs that actually change what gets compiled.
     hashDirectoryTreeInto(h, resolveMiscPath(""));
+    // package/layout/ -- the xyz.regulad.blackb0x package's own payload tree.
+    // This MUST be hashed: the apt sources, keyrings, LaunchDaemon plist and
+    // .profile all used to live under Misc/ (covered by the line above) and
+    // moved here when they became package content. Without this, editing any
+    // of them would leave every already-baked dist/ ramdisk looking current,
+    // which is exactly the stale-output failure the .sum sidecar exists to
+    // catch.
+    hashDirectoryTreeInto(h, resolvePackagePath(""));
     hashFileInto(h, resolveEntrypointPath() + "/entrypoint.c");
     hashFileInto(h, resolveEntrypointPath() + "/Makefile");
 

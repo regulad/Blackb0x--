@@ -2262,7 +2262,7 @@ static bool stageEtasonatv(const fs::path& blackb0xRoot) {
     ok &= stageFile(blackb0xRoot, "untether/expl.js", tempDir + "/untether/expl.js", 0, 0, 0644);
     stageSymlink(blackb0xRoot, "--early-boot", "/untether/expl.js");
     ok &= stageFile(blackb0xRoot, "Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
-                     resolveMiscPath("xyz.regulad.blackb0x.postinstall.plist"), 0, 0, 0644);
+                     resolvePackagePath("System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist"), 0, 0, 0644);
     if (!stanza.empty()) {
         ok &= stageManualDpkgInstall(blackb0xRoot, stanza, "net.tihmstar.etasonuntether",
                                       {"/etc/rc.d/daemonload", "/usr/bin/orphan_commander", "/untether/untether.bin",
@@ -2285,7 +2285,7 @@ static bool stageIos7Tether(const fs::path& blackb0xRoot) {
     bool ok = stageFile(blackb0xRoot, "usr/libexec/dirhelper", resolveMiscPath("dirhelper"), kUidMobile,
                          kGidStaff, 0755);
     ok &= stageFile(blackb0xRoot, "System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
-                     resolveMiscPath("xyz.regulad.blackb0x.postinstall.plist"), 0, 0, 0644);
+                     resolvePackagePath("System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist"), 0, 0, 0644);
     return ok;
 }
 
@@ -2335,7 +2335,7 @@ static bool stageP0sixspwn(const fs::path& blackb0xRoot) {
     ok &= stageFile(blackb0xRoot, "private/var/untether/_.dylib", tempDir + "/var/untether/_.dylib", 0, 0, 0644);
     ok &= stageFile(blackb0xRoot, "private/var/untether/untether", tempDir + "/var/untether/untether", 0, 0, 0755);
     ok &= stageFile(blackb0xRoot, "System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
-                     resolveMiscPath("xyz.regulad.blackb0x.postinstall.plist"), 0, 0, 0644);
+                     resolvePackagePath("System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist"), 0, 0, 0644);
     if (!stanza.empty()) {
         ok &= stageManualDpkgInstall(blackb0xRoot, stanza, "com.ih8sn0w-squiffy-winocm.p0sixspwn",
                                       {"/usr/libexec/dirhelper", "/var/untether/_.dylib", "/var/untether/untether"});
@@ -2436,7 +2436,7 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
 
     bool ok = true;
 
-    stageFile(blackb0xRoot, "private/var/root/.profile", resolveMiscPath("profile"), kUidMobile, kGidStaff, 0755);
+    stageFile(blackb0xRoot, "private/var/root/.profile", resolvePackagePath("var/root/.profile"), kUidMobile, kGidStaff, 0755);
     // dpkg itself has no raw loose-file source in this repo, but it
     // doesn't need one anymore: "dpkg" is a real, no-postinst entry in
     // packages.txt, so stageDebcache()'s bake-time preinstall mechanism
@@ -2451,26 +2451,35 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
         stageDir(blackb0xRoot, dir, kUidMobile, kGidStaff, 0755);
     }
 
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/regulad.list", resolveMiscPath("apt/regulad.list"),
+    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/regulad.list", resolvePackagePath("etc/apt/sources.list.d/regulad.list"),
               kUidMobile, kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/regulad.gpg", resolveMiscPath("apt/regulad.gpg"), 0, 0,
+    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/regulad.gpg", resolvePackagePath("etc/apt/trusted.gpg.d/regulad.gpg"), 0, 0,
               0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/saurik.list", resolveMiscPath("apt/saurik.list"),
+    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/saurik.list", resolvePackagePath("etc/apt/sources.list.d/saurik.list"),
               kUidMobile, kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/saurik.gpg", resolveMiscPath("apt/saurik.gpg"), 0, 0,
+    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/saurik.gpg", resolvePackagePath("etc/apt/trusted.gpg.d/saurik.gpg"), 0, 0,
               0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/awkwardtv.list", resolveMiscPath("apt/awkwardtv.list"),
+    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/awkwardtv.list", resolvePackagePath("etc/apt/sources.list.d/awkwardtv.list"),
               kUidMobile, kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/awkwardtv.gpg", resolveMiscPath("apt/awkwardtv.gpg"), 0,
+    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/awkwardtv.gpg", resolvePackagePath("etc/apt/trusted.gpg.d/awkwardtv.gpg"), 0,
               0, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/bigboss.list", resolveMiscPath("apt/bigboss.list"),
+    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/bigboss.list", resolvePackagePath("etc/apt/sources.list.d/bigboss.list"),
               kUidMobile, kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/bigboss.gpg", resolveMiscPath("apt/bigboss.gpg"), 0, 0,
+    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/bigboss.gpg", resolvePackagePath("etc/apt/trusted.gpg.d/bigboss.gpg"), 0, 0,
               0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/xbmc.list", resolveMiscPath("apt/xbmc.list"), kUidMobile,
+    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/xbmc.list", resolvePackagePath("etc/apt/sources.list.d/xbmc.list"), kUidMobile,
               kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/net.tihmstar.list",
-              resolveMiscPath("apt/net.tihmstar.list"), kUidMobile, kGidStaff, 0644);
+    // No net.tihmstar SOURCE LIST is staged, deliberately. Only
+    // apt/net.tihmstar.list.disabled exists -- there has never been an
+    // apt/net.tihmstar.list -- so the stageFile() call that used to be here
+    // warned and staged nothing on every single bake, and its return value
+    // was discarded (unlike every neighbouring call), so it never even showed
+    // up as a failure. That matches how etasonuntether actually reaches the
+    // device now: through the local file:// repo (Blackb0x/Misc/
+    // local_only_debs.txt), not a live one.
+    //
+    // The keyring below is still staged: harmless, and it keeps the .deb
+    // verifiable if the live repo is ever re-enabled by restoring the .list.
     stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/net.tihmstar.gpg", resolveMiscPath("apt/net.tihmstar.gpg"),
               0, 0, 0644);
     // Points at var/mobile/.blackb0x/local-debs, which stageDebcache()
@@ -2478,7 +2487,7 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
     // local-only entries — an always-present but sometimes-empty source
     // is harmless (apt just finds nothing there), unlike a source pointing
     // at a directory that doesn't exist at all.
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/local.list", resolveMiscPath("apt/local.list"),
+    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/local.list", resolvePackagePath("etc/apt/sources.list.d/local.list"),
               kUidMobile, kGidStaff, 0644);
 
     std::vector<std::string> resolvedPackages;

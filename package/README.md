@@ -53,22 +53,39 @@ subuid owning nothing on the host and `dm.pl` fails with a bare "Permission
 denied" that reads like a `dm.pl` bug rather than a uid-mapping one.
 `BLACKB0X_THEOS_UID` is the escape hatch for a rootful setup.
 
-## The payload is assembled at bake time, not checked in
+## Package lists
 
-Only `DEBIAN/` is static. The payload can't be, because:
+- `packages.txt` — the flat set of package names blackb0x installs. This is
+  the *request*; what apt can actually satisfy is the resolved closure.
+- `local_only_debs.txt` — which of those ship from the bundled local repo at
+  `/var/.blackb0x/local-debs` rather than a live one.
 
-- `postinstall.sh` is templated with the resolved package list
-  (`stagePostinstallScript()`'s `__BLACKB0X_PACKAGES__`).
-- The bundled local-repo `.deb`s depend on what that particular bake resolved.
+Both live here rather than in `Blackb0x/Misc/` because they describe what this
+package installs. `Blackb0x/Misc/prebake_package_blacklist.txt` deliberately
+does **not** move: it is baker policy about what may be unpacked at bake time,
+not a statement about package content.
 
-So `BakeRamdisk.cpp` assembles a complete staging tree — `layout/DEBIAN/` plus
-the payload at its final on-device paths — and then calls `build.sh`.
+## What's assembled at bake time
+
+`layout/` is static except for one file. `var/.blackb0x/postinstall.sh` ships
+as a template and `build.sh` substitutes `__BLACKB0X_PACKAGES__` with the
+resolved package list at package-build time, from the
+`<resolved-packages-file>` argument. The bundled local-repo `.deb`s are added
+to the staging tree by the baker for the same reason: both depend on what a
+particular bake actually resolved.
+
+So `BakeRamdisk.cpp` assembles a complete staging tree — `layout/` plus the
+resolved local-repo `.deb`s — and then calls `build.sh`.
 
 ## Usage
 
 ```
-package/build.sh <staging-dir> <output.deb> [version]
+package/build.sh <staging-dir> <output.deb> [version] [resolved-packages-file]
 ```
+
+`<resolved-packages-file>` is whitespace-separated package names (newline or
+space), so `resolved_packages.txt` can be handed over as-is. It is required
+whenever the staged `postinstall.sh` still contains the placeholder.
 
 `<staging-dir>` must contain `DEBIAN/control`; the payload sits alongside it at
 final on-device paths (e.g. `var/.blackb0x/...`).

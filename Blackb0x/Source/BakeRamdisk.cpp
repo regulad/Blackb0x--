@@ -2385,6 +2385,13 @@ static bool stageVersionBranch(const fs::path& blackb0xRoot, const std::string& 
 // Not a plain stageFile() copy like everything else staged here — this is
 // the one asset whose content actually depends on what this specific bake
 // resolved, not just a static checked-in file.
+//
+// INTERIM: package/build.sh now performs this same __BLACKB0X_PACKAGES__
+// substitution at package-build time, which is where it belongs -- it is the
+// package's own content. This function duplicates that only until the .deb
+// assembly is wired up (.claude/TODO.md item 11); at that point the baker
+// hands build.sh a resolved-packages file and this goes away entirely rather
+// than the two staying in sync by hand.
 static bool stagePostinstallScript(const fs::path& blackb0xRoot, const std::vector<std::string>& resolvedPackages) {
     std::string srcPath = resolvePackagePath("var/.blackb0x/postinstall.sh");
     std::ifstream in(srcPath, std::ios::binary);

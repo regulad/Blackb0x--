@@ -152,7 +152,7 @@ reference implementations rather than something inherited secondhand via
 libusb's Darwin backend.
 
 First cut was scoped to the `blackb0x`/`gaster` CLI path only — ramdisk
-baking (`bake-all-ramdisks`, `BakeRamdisk.cpp`) stayed Linux-only for a
+baking (`bake-firmware`, `BakeRamdisk.cpp`) stayed Linux-only for a
 while (real loop-mounted HFS+, `CAP_SYS_ADMIN`), with a macOS build of
 `blackb0x` consuming `dist/` output baked elsewhere in the meantime. macOS
 support for the ramdisk baker itself has since landed too — see 4a below,
@@ -283,7 +283,7 @@ what the twelve commits bought, and why deleting the code does not delete
 the one finding gaster contributed (the two-implementation control that
 disproved "Linux cannot do checkm8").
 
-### 4a. macOS support for the ramdisk baker (`bake-all-ramdisks`/`BakeRamdisk.cpp`) (resolved)
+### 4a. macOS support for the ramdisk baker (`bake-firmware`/`BakeRamdisk.cpp`) (resolved)
 
 Ported. As anticipated below, it ended up *simpler* on macOS than Linux's
 loop-mount flow, not harder: `bakeRamdisk()` now has a `#if
@@ -334,7 +334,7 @@ and `rtadvd`'s bare `Depends: firmware` needs the same synthetic
 `firmware` package declaration the podman script and
 `kPreinstallInnerScript` already had.
 
-`CMakeLists.txt`'s `add_executable(bake-all-ramdisks ...)` block no
+`CMakeLists.txt`'s `add_executable(bake-firmware ...)` block no
 longer wraps in `if(NOT APPLE)` — it builds unconditionally now, with no
 Apple frameworks linked pre-emptively (matching how `blackb0x`'s own
 `if(APPLE)` framework block was arrived at from a real link error, not a
@@ -342,7 +342,7 @@ guess).
 
 **Not yet real-hardware/real-macOS verified** — everything above was
 built and tested on Linux only (the experimental resolver's 18 tests
-pass there; both `blackb0x` and `bake-all-ramdisks` build clean with
+pass there; both `blackb0x` and `bake-firmware` build clean with
 every `#if defined(__APPLE__)` branch necessarily uncompiled). Two
 specific spots are flagged in `BakeRamdisk.cpp`'s own comments as
 unverified pending a real Mac: the exact `-fs "Case-sensitive HFS+"`
@@ -398,15 +398,24 @@ that's now happened.
 ## 5. Pre-patch firmware components ahead of time, instead of after device enumeration
 
 **Partly done** — the non-ramdisk half now has a tool:
-`bake-all-bootloaders` (`src/BakeAllBootloaders.cpp`) downloads
+`bake-firmware` (`src/BakeFirmware.cpp`) downloads
 and patches iBSS/iBEC/KernelCache/DeviceTree ahead of time for every
 `(device, buildID)` under `Blackb0x/ImageKeys/`, writing
 `dist/bootchain/<device>_<buildID>/`. It shares `Patcher.cpp` with
-`blackb0x` itself, so the two cannot drift, and it needs **no root** (every
-step is download/decrypt/file-patch, no loop mount, no `hdiutil`) — which
-also makes it the only way to exercise `patchiBSS()`/`patchiBEC()`/
-`patchKernel()`, and therefore the `iBoot32Patcher` binary they fork/exec,
-across every known firmware with no hardware attached.
+`blackb0x` itself, so the two cannot drift — which also makes it the only
+way to exercise `patchiBSS()`/`patchiBEC()`/`patchKernel()`, and therefore
+the `iBoot32Patcher` binary they fork/exec, across every known firmware
+with no hardware attached.
+
+This started life as `bake-all-bootloaders`, a deliberately separate binary
+from `bake-all-ramdisks` because it needed no root while the Linux ramdisk
+bake needed `CAP_SYS_ADMIN` for its loop mount. With the loop mount gone
+(the ramdisk bake is `hdiutil` now, also rootless) that reason went with it
+and the two were merged into the single `bake-firmware`, which had been
+carrying two verbatim copies of the target enumeration and the
+`--signed-only`/`--device`/`--build` filters. `--only bootchain` is the
+fast iteration loop the old split used to provide: it skips the podman
+entrypoint build and the debcache entirely.
 
 Still to do for this item: `blackb0x` itself does not yet *consume*
 `dist/bootchain/`. The live path still downloads and patches inside the
@@ -425,7 +434,7 @@ already run — i.e. network I/O and CPU-bound patching both happen inside
 the same window the device is expected to already be sitting in pwned DFU
 waiting for the next component. Since the target device model/firmware is
 knowable ahead of time in the common case (a specific device the user is
-about to plug in, or — for `bake-all-ramdisks`-style bulk runs — every
+about to plug in, or — for `bake-firmware`-style bulk runs — every
 firmware this project already knows about), there's no hard reason this
 has to be done live: downloading and patching components for the
 identified/likely firmware set could happen speculatively before (or
@@ -438,7 +447,7 @@ committing to the added complexity of a speculative/AOT patch cache.
 
 ## 6. Test building all possible ramdisk configurations
 
-Not started. `bake-all-ramdisks` now builds on both Linux and macOS (see
+Not started. `bake-firmware` now builds on both Linux and macOS (see
 item 4a above), but only ever a handful of individual `(device, buildID)`
 tuples have actually been baked and checked in either environment this
 session — never a full run across every one of the 95 known tuples under
@@ -460,12 +469,12 @@ model's dependency resolution without showing up anywhere else.
 Not started. Every patched component this project produces (`dist/*.dmg`
 ramdisks, and whatever else `Patcher`'s patch* functions touch) is built
 locally, on-demand, by whoever happens to be running `blackb0x`/
-`bake-all-ramdisks` at the time — there's no automated build producing and
+`bake-firmware` at the time — there's no automated build producing and
 publishing a versioned, prebuilt set of patched firmware components
 anyone could just download instead of baking their own. Worth scoping
 once item 6 above has actually exercised every known configuration
 end-to-end: what a CI pipeline would build (presumably the same full
-`bake-all-ramdisks` sweep), where prebuilt output would be published, how
+`bake-firmware` sweep), where prebuilt output would be published, how
 staleness/re-bakes get triggered when this project's own patches change
 without the underlying Apple firmware changing, and whether publishing
 prebuilt jailbreak components anywhere public raises different
@@ -509,11 +518,11 @@ not exist". The script sends a real one.
 
 Original note follows.
 
-Not started. `bake-all-ramdisks` currently resolves the version that
+Not started. `bake-firmware` currently resolves the version that
 drives persistence-payload selection (`stageVersionBranch()`) and the
 synthetic `firmware` dpkg package's pin via a live `newestVersionForDevice()`
 call per device model at bake time (`IPSW.cpp`, memoized per run in
-`BakeAllRamdisks.cpp` — see `docs/HISTORY.md`/this session's own fix for
+`BakeFirmware.cpp` — see `docs/HISTORY.md`/this session's own fix for
 why it has to be the newest-known-per-model version, not a given tuple's
 own `ProductVersion`). `Blackb0x/Misc/firmware_versions.txt` (one
 `<device> <buildID> <version>` line per known `Blackb0x/ImageKeys/` tuple)
@@ -557,7 +566,7 @@ distinct saurik dist branch — worth checking which do).
 **The hard-fail half is DONE.** A finished ramdisk over the limit now fails
 the bake instead of warning: `bakeRamdisk()` returns false and removes the
 oversized output, so no known-unusable entry is left in `dist/` for
-`bake-all-ramdisks` to silently reuse on the next run (it skips targets whose
+`bake-firmware` to silently reuse on the next run (it skips targets whose
 output already exists). Warning-and-succeeding only moved the failure to real
 hardware, where it costs a DFU cycle to find and looks like an exploit problem
 rather than a size problem.
@@ -582,7 +591,7 @@ short-write at exactly byte offset 0x4000000 (64MiB) on a 68.9MiB ramdisk,
 and `DeviceManager.cpp`'s `warnIfRamdiskExceedsDeviceLimit()` queries a
 given device/firmware's own real `ramdisk-size` getenv value right before
 upload as the authoritative per-device check. Exceeding `kMaxRamdiskSize`
-today only warns (`outSizeWarning`/`bake-all-ramdisks`' own "OK (with size
+today only warns (`outSizeWarning`/`bake-firmware`' own "OK (with size
 warning...)" summary line) rather than failing the bake, since some
 devices/firmwares may tolerate more or less — but a bake that's already
 over 64MiB has no margin left at all for whichever device's real limit

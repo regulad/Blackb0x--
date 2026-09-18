@@ -24,8 +24,9 @@ invisible to apt.
 
 `dm.pl` builds a correct `.deb` without root and without fakeroot, and it is
 the tool this ecosystem actually uses. Not needing root matters here:
-`bake-all-ramdisks` already needs it for the loop mount, and a second,
-different reason to need it is worth avoiding.
+nothing else in the bake needs root any more (the one thing that did, the
+Linux HFS+ loop mount, is gone), and reintroducing a reason to need it just
+to build a package would be a step backwards.
 
 We use **none** of Theos's compilation half. This package is pure data — apt
 sources, gpg keys, a plist, shell scripts, and the bundled `.deb`s. Nothing is

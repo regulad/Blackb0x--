@@ -42,7 +42,7 @@
 // valid for the ECID and nonce it was actually requested against.
 // deviceModel/buildID: IPSW.hpp's own AppleTVDevice::deviceModel/
 // ManifestInfo::realBuildID -- checked against IPSW.cpp's
-// signedBuildsForDevice() (the same ipsw.me API bake-all-ramdisks'
+// signedBuildsForDevice() (the same ipsw.me API bake-firmware's
 // --signed-only already uses) before ever sending a real TSS request, so
 // an already-known-hopeless request at least warns first instead of
 // just silently failing several seconds later. Not a hard gate -- this

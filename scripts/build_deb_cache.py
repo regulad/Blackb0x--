@@ -248,7 +248,7 @@ cp /work/sources.list /sandbox/etc/apt/sources.list
 # sandbox always claimed to be running 8.4.2 regardless of which real
 # firmware was actually being baked. Now filled in from --firmware-version
 # below, the real, per-tuple ProductVersion from that exact build's own
-# BuildManifest.plist (threaded down from BakeAllRamdisks.cpp's main loop
+# BuildManifest.plist (threaded down from BakeFirmware.cpp's main loop
 # through bakeRamdisk() -> stageBlackb0xTree() -> stageDebcache() ->
 # computeGlobalDebcacheOnce()), so this sandbox's synthetic firmware
 # declaration always matches the real device this run is actually baking

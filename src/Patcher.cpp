@@ -119,8 +119,8 @@ static std::string outputPathFor(const std::string& path) { return withoutExtens
 // See Patcher.hpp's own comment on why this is a free function, not a
 // Patcher method -- patchRamdisk() below is just its first caller.
 bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildID) {
-    // Matches bake-all-ramdisks' own naming convention exactly (see
-    // BakeAllRamdisks.cpp) -- both sides need to agree on this without a
+    // Matches bake-firmware's own naming convention exactly (see
+    // BakeFirmware.cpp) -- both sides need to agree on this without a
     // round trip, hence the plain, duplicated (not shared-header) format
     // string on each side.
     //
@@ -128,7 +128,7 @@ bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildI
     // carrying a content fingerprint of the ramdisk/ overlay, compared here
     // to catch "someone edited ramdisk/ and forgot to re-bake" -- that whole
     // system is gone (fragile, and it only ever guessed at staleness). Use
-    // bake-all-ramdisks --force to rebuild an output that already exists.
+    // bake-firmware --force to rebuild an output that already exists.
     const std::string patchedDMG = "dist/" + deviceModel + "_" + buildID + "-Ramdisk.dmg";
     return !fs::exists(patchedDMG);
 }
@@ -480,7 +480,7 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
     // infile") -- it returns void, and it still leaves a zero-byte output
     // file behind. CBPatcher then SEGVs on that empty input.
     //
-    // Found by bake-all-bootloaders' first full AppleTV3,2 sweep: 10B329a
+    // Found by bake-firmware's first full AppleTV3,2 sweep: 10B329a
     // patches fine, 10B144b dies here with exit 139 after iBSS and iBEC have
     // both already succeeded. The kernelcache downloads correctly (6006020
     // bytes) and the .keys file does have a Kernelcache entry, so this is a
@@ -564,16 +564,16 @@ bool Patcher::useStockKernel(const std::string& path, bool stockRecovery) {
 }
 
 // The actual mount/merge/decrypt logic (and the design-history comment
-// explaining why a real kernel loop-mount is unavoidable) lives in
+// explaining why an in-process, no-mount approach isn't viable) lives in
 // BakeRamdisk.cpp now — see bakeRamdisk()'s header comment there for the
 // full investigation. blackb0x never invokes it itself: baking is a
-// separate, manually-run, one-time-per-firmware step done in bulk by
-// bake-all-ramdisks (BakeAllRamdisks.cpp), not something this tool does on
-// every run. That's possible because the ramdisk/ overlay content is fully
-// static (no per-device secrets get baked in — see BakeRamdisk.cpp), so the
-// same patched output is valid for every device on a given firmware build.
-// This just checks whether bake-all-ramdisks has already produced the
-// dist/ entry this firmware needs, and tells the user to run it if not.
+// separate one-time-per-firmware step done in bulk by bake-firmware
+// (BakeFirmware.cpp), not something this tool does on every run. That's
+// possible because the overlay content is fully static (no per-device
+// secrets get baked in — see BakeRamdisk.cpp), so the same patched output
+// is valid for every device on a given firmware build. This just checks
+// whether bake-firmware has already produced the dist/ entry this firmware
+// needs, and tells the user to run it if not.
 bool Patcher::patchRamdisk() {
     const FirmwareKeyPair* k = keyFor("RestoreRamdisk");
     if (!k) {
@@ -587,7 +587,7 @@ bool Patcher::patchRamdisk() {
         // now self-bake on demand, may still be entirely empty at this
         // point) — either way, not this specific device+firmware, and
         // Cli.cpp's downloadAndPatchComponents() already tried a background
-        // bake-all-ramdisks run for exactly this combination.
+        // bake-firmware run for exactly this combination.
         // That's not a recoverable "try the next component" failure the way
         // a flaky download is: there is no ramdisk to send this device no
         // matter what else this run does, so stop hard here instead of
@@ -597,19 +597,19 @@ bool Patcher::patchRamdisk() {
         fprintf(stderr,
                 "blackb0x: PANIC: no baked ramdisk for %s %s (%s doesn't exist).\n"
                 "Either update the device to the latest firmware Apple currently signs (the\n"
-                "one bake-all-ramdisks --signed-only would have picked up), or bake every known\n"
+                "one bake-firmware --signed-only would have picked up), or bake every known\n"
                 "combination instead, including older/unsigned ones, by re-running:\n"
-                "  sudo ./bake-all-ramdisks\n"
+                "  ./bake-firmware --only ramdisk\n"
                 "(without --signed-only)\n",
                 deviceModel_.c_str(), buildID_.c_str(), patchedDMG.c_str());
         std::exit(1);
     }
 
     // There is no staleness check here any more. The .sum sidecar that used
-    // to carry a fingerprint of the ramdisk/ overlay -- compared here to
-    // catch "someone edited ramdisk/ and forgot to re-bake" -- is gone
-    // along with the rest of that system. Existence is the gate; if this
-    // dist/ entry is out of date, re-run `sudo ./bake-all-ramdisks --force`.
+    // to carry a fingerprint of the overlay content -- compared here to
+    // catch "someone edited it and forgot to re-bake" -- is gone along with
+    // the rest of that system. Existence is the gate; if this dist/ entry is
+    // out of date, re-run `./bake-firmware --only ramdisk --force`.
 
     outputs_.ramdisk = patchedDMG;
     checkPatching();
@@ -617,7 +617,7 @@ bool Patcher::patchRamdisk() {
 }
 
 // See Patcher.hpp's own comment on why this exists. Deliberately minimal
-// compared to patchRamdisk()/bake-all-ramdisks' own bakeRamdisk(): no
+// compared to patchRamdisk()/bake-firmware's own bakeRamdisk(): no
 // dist/ lookup, no HFS+/loop-mount work at all -- just
 // decrypt()'s the freshly-downloaded RestoreRamdisk exactly the way
 // patchiBSS()/patchiBEC() decrypt their own components, and sends that

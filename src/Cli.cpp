@@ -382,21 +382,29 @@ bool checkExploit(DeviceManager& deviceManager, const AppleTVDevice& device, boo
 // Firmware download + patch
 // ---------------------------------------------------------------------------
 
-// Non-blocking spawn of `bake-all-ramdisks --device <deviceModel> --build
-// <buildID>` for exactly the one (device, firmware) combination this run
-// needs — returns the child's pid immediately without waiting for it to
+// Non-blocking spawn of `bake-firmware --only ramdisk --device <deviceModel>
+// --build <buildID>` for exactly the one (device, firmware) combination this
+// run needs — returns the child's pid immediately without waiting for it to
 // exit. Unlike DeviceManager.cpp's runLineBufferedSubprocess() (blocking:
 // spawns, streams output, and waits for the child before returning), this
 // needs to let the rest of downloadAndPatchComponents() keep running
 // concurrently with the bake — see that function's own call site for why.
 // The caller waitpid()s the returned pid later, at the actual join point.
 // Returns -1 only if fork() itself failed (reported here); a bad exec
-// (e.g. bake-all-ramdisks not found alongside blackb0x) instead surfaces
+// (e.g. bake-firmware not found alongside blackb0x) instead surfaces
 // as an ordinary nonzero exit status once the caller waits on it, same as
 // any other missing-binary failure elsewhere in this codebase.
-static pid_t spawnBakeAllRamdisksBackground(const std::string& deviceModel, const std::string& buildID) {
-    std::string binPath = resolveBakeAllRamdisksPath();
-    std::vector<std::string> argvStrings = {binPath, "--device", deviceModel, "--build", buildID};
+//
+// --only ramdisk, not a full bake: this path exists solely because
+// patchRamdisk() needs a dist/ entry that isn't there. The bootchain half
+// would be pure waste here — this run patches iBSS/iBEC/kernel/DeviceTree
+// live itself (see below), and paying for a podman-free but still
+// download-and-patch-heavy second pass would only slow down the bake that is
+// actually blocking.
+static pid_t spawnBakeFirmwareBackground(const std::string& deviceModel, const std::string& buildID) {
+    std::string binPath = resolveBakeFirmwarePath();
+    std::vector<std::string> argvStrings = {binPath,     "--only",  "ramdisk", "--device",
+                                            deviceModel, "--build", buildID};
     std::vector<char*> cargv;
     cargv.reserve(argvStrings.size() + 1);
     for (auto& a : argvStrings) cargv.push_back(const_cast<char*>(a.c_str()));
@@ -404,7 +412,7 @@ static pid_t spawnBakeAllRamdisksBackground(const std::string& deviceModel, cons
 
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "Failed to fork() for a background bake-all-ramdisks run: %s\n", strerror(errno));
+        fprintf(stderr, "Failed to fork() for a background bake-firmware run: %s\n", strerror(errno));
         return -1;
     }
     if (pid == 0) {
@@ -418,7 +426,7 @@ static pid_t spawnBakeAllRamdisksBackground(const std::string& deviceModel, cons
 }
 
 // ManifestInfo / parseManifest() now live in IPSW.hpp/.cpp — shared with
-// bake-all-ramdisks (BakeAllRamdisks.cpp), which needs the exact same
+// bake-firmware (BakeFirmware.cpp), which needs the exact same
 // BuildManifest.plist parsing to locate RestoreRamDisk across every known
 // firmware, not just the one connected device this CLI flow targets.
 
@@ -500,7 +508,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
             "this run continues.\n",
             device.deviceModel.c_str(), manifest->realBuildID.c_str());
         fflush(stdout);
-        backgroundBakePid = spawnBakeAllRamdisksBackground(device.deviceModel, manifest->realBuildID);
+        backgroundBakePid = spawnBakeFirmwareBackground(device.deviceModel, manifest->realBuildID);
     }
 
     std::optional<PatchedComponents> result;
@@ -620,12 +628,12 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
         // pipeline as concurrent wall-clock time to finish, so this
         // wait is often brief or immediate.
         if (backgroundBakePid > 0) {
-            printf("Waiting for the background bake-all-ramdisks run (pid %d) to finish...\n",
+            printf("Waiting for the background bake-firmware run (pid %d) to finish...\n",
                    (int)backgroundBakePid);
             fflush(stdout);
             int status = 0;
             if (waitpid(backgroundBakePid, &status, 0) < 0) {
-                fprintf(stderr, "Failed to wait for background bake-all-ramdisks (pid %d): %s\n",
+                fprintf(stderr, "Failed to wait for background bake-firmware (pid %d): %s\n",
                         (int)backgroundBakePid, strerror(errno));
             } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
                 // Not necessarily fatal here -- patcher.patchRamdisk()
@@ -639,11 +647,11 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
                 std::string how = WIFEXITED(status) ? ("exit code " + std::to_string(WEXITSTATUS(status)))
                                                       : std::string("killed/crashed");
                 fprintf(stderr,
-                        "Background bake-all-ramdisks did not finish successfully (%s) -- continuing; the "
+                        "Background bake-firmware did not finish successfully (%s) -- continuing; the "
                         "next step will fail clearly if it genuinely didn't produce what this run needs.\n",
                         how.c_str());
             } else {
-                printf("Background bake-all-ramdisks finished successfully.\n");
+                printf("Background bake-firmware finished successfully.\n");
             }
         }
         patcher.patchRamdisk();
@@ -892,7 +900,7 @@ int runCli(const CliOptions& options) {
     // in dist/ for whichever specific device+firmware turns out to be
     // needed — patchRamdisk() (Patcher.cpp) checks for that specific entry
     // once a device is actually connected and its firmware is known. An
-    // entirely empty dist/ here used to always mean bake-all-ramdisks was
+    // entirely empty dist/ here used to always mean bake-firmware was
     // simply never run at all, worth failing on immediately rather than
     // waiting for a device to show up first — but that's no longer true:
     // this process can always bake one itself, so an empty dist/ is

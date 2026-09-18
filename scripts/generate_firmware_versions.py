@@ -83,8 +83,8 @@ APPLEDB_OS_STR = "Apple TV Software"
 def known_tuples():
     """Every (device, buildID) with a .keys file, read from the directory
     structure rather than any separate list -- same derivation
-    bake-all-ramdisks and bake-all-bootloaders use, so all three always
-    agree on what "every known firmware" means."""
+    bake-firmware uses, so both always agree on what "every known
+    firmware" means."""
     found = []
     for device in sorted(os.listdir(IMAGE_KEYS)):
         device_dir = os.path.join(IMAGE_KEYS, device)

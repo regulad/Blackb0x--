@@ -6,7 +6,7 @@
 //  operation — the only piece of this tool that needs CAP_SYS_ADMIN/
 //  CAP_CHOWN (loop-mounting a real HFS+ image; see BakeRamdisk.cpp's header
 //  comment for why an in-process, no-mount approach isn't viable). A
-//  library, not a binary of its own — bake-all-ramdisks (BakeAllRamdisks.cpp)
+//  library, not a binary of its own — bake-firmware (BakeFirmware.cpp)
 //  is the only thing that calls this, once per known firmware.
 //
 

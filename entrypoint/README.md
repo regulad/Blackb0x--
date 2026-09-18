@@ -95,12 +95,13 @@ gets spliced directly into a ramdisk rather than installed via dpkg.
 `buildEntrypointBinary()`) runs this automatically on every bake, using the
 one-time toolchain setup above — there's nothing to check in, since the
 build is cached in-process (see `buildEntrypointBinary()` — identical for
-every firmware target, so it only actually runs once per `bake-all-ramdisks`
+every firmware target, so it only actually runs once per `bake-firmware`
 invocation, not once per firmware) and spliced directly into
 `/sbin/launchd` on the mounted volume (`spliceFileContentInPlace()`),
 preserving that file's existing permissions from the pristine Apple
-ramdisk. `bake-all-ramdisks` runs privileged (needs `CAP_SYS_ADMIN` for the
-HFS+ loop mount), so it re-invokes podman as `$SUDO_USER` when set —
+ramdisk. `bake-firmware` does not need root any more (that was the Linux
+HFS+ loop mount), but it still re-invokes podman as `$SUDO_USER` when that
+is set, for anyone who does run it under sudo —
 root's own rootless podman storage isn't where the
 `blackb0x-entrypoint-toolchain` image / `blackb0x-cctools-target` volume
 from the setup above actually live.

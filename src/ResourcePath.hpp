@@ -39,15 +39,15 @@ std::string resolveImageKeyPath(const std::string& relativePath);
 // break as soon as someone runs it from outside the build tree.
 std::string resolvePwnPath();
 
-// Resolves the path to the `bake-all-ramdisks` binary (see CMakeLists.txt --
+// Resolves the path to the `bake-firmware` binary (see CMakeLists.txt --
 // built as its own executable, landing alongside blackb0x itself):
-// $BLACKB0X_BAKE_ALL_RAMDISKS
-// if set, otherwise "bake-all-ramdisks" alongside blackb0x's own executable,
-// same resolution strategy as resolvePwnPath() above.
-// Used by Cli.cpp to self-bake a missing/stale dist/ ramdisk on demand
-// instead of requiring a separate manual `sudo ./bake-all-ramdisks` step
-// first -- unconditionally, since baking needs neither root nor a mount.
-std::string resolveBakeAllRamdisksPath();
+// $BLACKB0X_BAKE_FIRMWARE if set, otherwise "bake-firmware" alongside
+// blackb0x's own executable, same resolution strategy as resolvePwnPath()
+// above. Used by Cli.cpp to self-bake a missing dist/ ramdisk on demand
+// (`bake-firmware --only ramdisk`) instead of requiring a separate manual
+// baking step first -- unconditionally, since baking needs neither root nor
+// a mount.
+std::string resolveBakeFirmwarePath();
 
 // Resolves the path to the `iBoot32Patcher` binary (see CMakeLists.txt --
 // built from the third_party/iBoot32Patcher submodule as its own executable,

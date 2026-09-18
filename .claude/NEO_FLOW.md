@@ -117,7 +117,7 @@ in the order it actually runs:
    own `apt-get install` to pick up later.
 5. **Cache all of this once per process, not once per firmware.**
    `computeGlobalDebcacheOnce()` runs steps 1–4 exactly once per
-   `bake-all-ramdisks` invocation (a static-local cache) — this whole
+   `bake-firmware` invocation (a static-local cache) — this whole
    pipeline is firmware-independent, and re-running it per target used to
    mean repeated identical network fetches and container work for no
    reason.
@@ -132,7 +132,7 @@ in the order it actually runs:
    apt-resolved package name set (minus `cydia`, which installs
    separately first); and exactly one of three per-firmware persistence
    payloads, picked by this firmware's own `ProductVersion` (see below).
-7. **Build the entrypoint binary once.** `BakeAllRamdisks.cpp`'s `main()`
+7. **Build the entrypoint binary once.** `BakeFirmware.cpp`'s `main()`
    calls `buildEntrypointBinary()` once, before its per-firmware loop
    (same pattern as the debcache cache), and passes the same built path
    into every `bakeRamdisk()` call.

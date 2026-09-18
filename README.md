@@ -135,17 +135,18 @@ required three separate manual system changes, and all three are gone with it:
 - **A udev rule** to grant a non-root user raw DFU/Recovery-mode USB access. macOS has
   no udev; `blackb0x` needs no special device permissions there.
 
-`bake-all-ramdisks` also no longer needs root. It used to loop-mount a real HFS+
-volume, which genuinely required `CAP_SYS_ADMIN`; `hdiutil` needs neither root nor a
-mount helper. (Bear in mind the caveat above: that hdiutil path has never been run on
-real macOS.)
+`bake-firmware` also no longer needs root. Its ramdisk half used to loop-mount a real
+HFS+ volume, which genuinely required `CAP_SYS_ADMIN`; `hdiutil` needs neither root nor
+a mount helper. (Bear in mind the caveat above: that hdiutil path has never been run on
+real macOS.) That privilege difference is also why the baker used to be two separate
+binaries; it is one now.
 
 If `blackb0x` still can't reach the device non-root after all of the above
 ## Steps to jailbreak
 
 0. (3,1 only) PWN with Arduino + [synackuk's fork of checkm8-A5](https://github.com/synackuk/checkm8-a5) first.
-1. Bake the ramdisks once, before ever running `blackb0x` itself:
-   `./build/bake-all-ramdisks --signed-only`. `--signed-only` restricts the run to firmware
+1. Bake the firmware once, before ever running `blackb0x` itself:
+   `./build/bake-firmware --signed-only`. `--signed-only` restricts the run to firmware
    Apple is currently signing, typically just the latest one or two per device —
    drop the flag to bake every known combination instead, including older/unsigned
    ones, if your

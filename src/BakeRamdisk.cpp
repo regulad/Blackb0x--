@@ -20,17 +20,17 @@
 //  stageVersionBranch(). Fully static either way (no per-device secrets
 //  get baked in — host key generation and authorized_keys delivery both
 //  happen elsewhere), so the same patched output is valid for every device
-//  on a given firmware build. bake-all-ramdisks (BakeAllRamdisks.cpp) calls
+//  on a given firmware build. bake-firmware (BakeFirmware.cpp) calls
 //  this once per known firmware and writes the results to dist/;
 //  Patcher::patchRamdisk() just checks whether the expected dist/ output
-//  already exists and tells the user to (re-)run bake-all-ramdisks if not.
+//  already exists and tells the user to (re-)run bake-firmware if not.
 //
 
 #include "BakeRamdisk.hpp"
 #include "ResourcePath.hpp"
 
 // Already a linked dependency of this target either way (see
-// CMakeLists.txt's bake-all-ramdisks target — same deps::plist IPSW.cpp
+// CMakeLists.txt's bake-firmware target — same deps::plist IPSW.cpp
 // already uses for its own plist parsing, same plist_* C API/calling
 // convention followed here). Not wrapped in `extern "C" {}` below, matching
 // IPSW.cpp's own include of the same header.
@@ -375,7 +375,7 @@ static bool runAsInvokingUser(const std::vector<std::string>& argv) {
         // variable is still whatever the original (root) shell had it as
         // (commonly /run/user/0), not the target user's own real runtime
         // directory, even though the command genuinely now runs as that
-        // user. Confirmed directly against a real bake-all-ramdisks run:
+        // user. Confirmed directly against a real bake-firmware run:
         // without this, podman failed with "mkdir /run/user/0/libpod:
         // permission denied" — trying to use root's runtime dir while
         // running as uid 1000. `env VAR=value` here is a real, separate
@@ -432,7 +432,7 @@ static bool runPodman(const std::vector<std::string>& podmanArgs) {
 // copyrighted material — see entrypoint/assets/README.md).
 //
 // The binary is identical for every firmware target (no per-firmware
-// customization at all), so BakeAllRamdisks.cpp's main() calls this exactly
+// customization at all), so BakeFirmware.cpp's main() calls this exactly
 // once, before its per-firmware loop, and hands the resulting path to every
 // bakeRamdisk() call.
 // Not this function's own job to guard against being called more than
@@ -1630,7 +1630,7 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
 // computed preinstall payload + dpkg state into `blackb0xRoot`. No
 // network, no container, no dpkg invocation — just local file copies —
 // which is exactly why the expensive computation above is worth caching
-// across every firmware a single bake-all-ramdisks run bakes (see
+// across every firmware a single bake-firmware run bakes (see
 // computeGlobalDebcacheOnce()) while this part still runs once per
 // firmware, into that firmware's own /blackb0x.
 static bool mergePreinstalledPackages(const fs::path& blackb0xRoot, const std::string& preinstallDir,
@@ -1686,7 +1686,7 @@ struct GlobalDebcacheResult {
 // with genuinely different firmware versions each get their own real,
 // independent resolution, which is the whole point of this fix. A
 // function-local `static` map is exactly the right lifetime here: entries
-// persist for as long as this one process runs (one bake-all-ramdisks
+// persist for as long as this one process runs (one bake-firmware
 // invocation), and a fresh process (the next run) correctly recomputes
 // from scratch. stageDebcache() calls this once per firmware and merges
 // the (per-version) cached result into each bake's own /blackb0x.
@@ -2846,7 +2846,7 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
                 "  .claude/TODO.md item 10), or set DEBUG_RAMDISK_LIMIT_MIB=-1 to bake it anyway for measurement.\n",
                 (unsigned long long)finalSize, (double)finalSize / (1024.0 * 1024.0), (long long)limitMiB);
         // Remove it rather than leaving a known-unusable dist/ entry behind:
-        // bake-all-ramdisks skips targets whose output already exists, so a
+        // bake-firmware skips targets whose output already exists, so a
         // leftover oversized file would be silently reused on the next run.
         std::error_code rmOversizeEc;
         fs::remove(patchedDMG, rmOversizeEc);

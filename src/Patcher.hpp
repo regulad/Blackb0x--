@@ -57,7 +57,7 @@
 // i.e. whether it exists at all. Factored out here so Cli.cpp's
 // downloadAndPatchComponents() can ask the same question up front (before a
 // device's own Patcher instance has even loaded keys for it) to decide
-// whether to kick off a background bake-all-ramdisks run.
+// whether to kick off a background bake-firmware run.
 bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildID);
 
 struct PatchedComponents {
@@ -115,7 +115,7 @@ public:
 
     // --stock-ramdisk (Cli.hpp's CliOptions): decrypts and sends the
     // RestoreRamdisk exactly as downloaded from Apple -- no /blackb0x
-    // merge, no entrypoint.c, none of bake-all-ramdisks' own work at all
+    // merge, no entrypoint.c, none of bake-firmware's own work at all
     // -- instead of patchRamdisk()'s usual dist/<device>_<buildID>-
     // Ramdisk.dmg lookup. A diagnostic: if the device boots this one fine,
     // the failure is somewhere in blackb0x's own ramdisk patching or
@@ -235,7 +235,7 @@ public:
     // Only meaningful for callers that deliberately produce an INCOMPLETE
     // suite: checkPatching() hands a complete set to onComponentsReady and
     // then clears outputs_, so a caller producing everything should use that
-    // callback instead. bake-all-bootloaders (BakeAllBootloaders.cpp) is the
+    // callback instead. bake-firmware (BakeFirmware.cpp) is the
     // one that needs this -- it patches the bootchain + kernel + devicetree
     // and never touches the ramdisk, so onComponentsReady can never fire for
     // it, and it still needs to know which individual outputs landed.
@@ -264,7 +264,7 @@ private:
     std::map<std::string, FirmwareKeyPair> keys_;
     PatchedComponents outputs_;
     // Set by loadKeysForDevice() — patchRamdisk() needs these to compute
-    // which dist/<device>_<buildID>-Ramdisk.dmg bake-all-ramdisks should
+    // which dist/<device>_<buildID>-Ramdisk.dmg bake-firmware should
     // already have produced.
     std::string deviceModel_;
     std::string buildID_;

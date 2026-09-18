@@ -442,7 +442,7 @@ foreach(_d ${_xpwn_subdirs})
                 # executable here rather than enumerating exactly which
                 # ones hit it, same reasoning as the bzip2_ext/libpng_ext
                 # dependency two lines up — none of these tools are
-                # actually used by blackb0x/bake-all-ramdisks at runtime
+                # actually used by blackb0x/bake-firmware at runtime
                 # (only the `xpwn` library and blackb0x_xpwntool are), so
                 # there's no harm in over-applying this.
                 #
@@ -1298,100 +1298,57 @@ add_test(NAME RamdiskOverlayTests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # ---------------------------------------------------------------------------
-# bake-all-ramdisks
+# bake-firmware
 #
-# The one piece of blackb0x that needs CAP_SYS_ADMIN/CAP_CHOWN on Linux (loop-
-# mounting a real HFS+ image) or root for `hdiutil`/`diskutil` on macOS —
-# split into its own binary, run as a separate manual step, not invoked by
-# blackb0x itself (see BakeRamdisk.hpp's header comment and
-# Patcher::patchRamdisk()). Batches bakeRamdisk() over every (device,
-# firmware) combination under Blackb0x/ImageKeys/ in one run, writing
-# results to dist/ — so it needs the HFS+/DMG patching stack AND the IPSW
-# download stack (IPSW.cpp/IPSWDownloader.cpp), but none of the
-# USB/device-communication libraries the main blackb0x binary needs.
+# The single ahead-of-time baker: downloads and patches the whole firmware
+# suite for every (device, firmware) combination under Blackb0x/ImageKeys/ —
+# iBSS/iBEC/KernelCache/DeviceTree into dist/bootchain/, and the jailbreak
+# ramdisk into dist/. Not invoked by blackb0x for the bootchain half (that is
+# .claude/TODO.md item 5, still done live); Cli.cpp does spawn it with
+# `--only ramdisk` when a live run finds the dist/ entry it needs missing.
 #
-# Was Linux-only for a while (.claude/TODO.md item 4/4a) because nobody had
-# scoped or started actually porting BakeRamdisk.cpp's HFS+ volume-build
-# sequence to macOS: third_party/xpwn's vendored hfsplus.h uses the
-# `register` storage-class specifier (removed from the language in C++17;
-# GCC still only warns, Clang on macOS hard-errors) and BakeRamdisk.cpp's own
-# st_atim/st_mtim struct stat fields are Linux/glibc-specific spellings
-# (Darwin's struct stat calls the same fields st_atimespec/st_mtimespec
-# instead). Both are now handled directly in BakeRamdisk.cpp (see its own
-# `#if defined(__APPLE__)` branches — an `hdiutil`-based volume build
-# replaces Linux's loop-mount sequence there, and the `register` keyword is
-# bracketed out around the one include that pulls it in), so this target now
-# builds on both platforms. No Apple frameworks are linked pre-emptively
-# here — this target doesn't link deps::wolfssl/deps::irecovery even on
-# Linux, so add whatever a real macOS link actually demands, the same way
-# blackb0x's own `if(APPLE)` framework block below was arrived at from a
-# real link error rather than a guess.
-# ---------------------------------------------------------------------------
-
-add_executable(bake-all-ramdisks
-    src/BakeAllRamdisks.cpp
-    src/BakeRamdisk.cpp
-    src/IPSW.cpp
-    src/IPSWDownloader.cpp
-    src/ResourcePath.cpp)
-
-target_include_directories(bake-all-ramdisks PRIVATE third_party/xpwn/includes)
-
-target_link_libraries(bake-all-ramdisks PRIVATE
-    blackb0x_xpwntool
-    xpwn
-    deps::plist
-    deps::fragmentzip
-    deps::general
-    deps::curl
-    ZLIB::ZLIB)
-
-add_dependencies(bake-all-ramdisks
-    libplist_ext libfragmentzip_ext libgeneral_ext
-    wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
-
-# ---------------------------------------------------------------------------
-# bake-all-bootloaders
+# This was two targets, bake-all-ramdisks and bake-all-bootloaders. The split
+# existed because the Linux ramdisk bake loop-mounted a real HFS+ image and
+# needed CAP_SYS_ADMIN/CAP_CHOWN, while the bootchain half needed no root at
+# all and wanted to stay re-runnable without sudo. The ramdisk bake is native
+# `hdiutil` now — no loop mount, no root — so that reason is gone and the two
+# duplicate target-enumeration/filter implementations collapse into one.
 #
-# The counterpart to bake-all-ramdisks for everything that ISN'T the ramdisk:
-# iBSS, iBEC, KernelCache and DeviceTree, downloaded and patched ahead of
-# time for every (device, firmware) combination under Blackb0x/ImageKeys/.
-# That is .claude/TODO.md item 5 for the non-ramdisk half of the suite.
+# Needs the union of what the two needed: the HFS+/DMG patching stack and the
+# IPSW download stack (IPSW.cpp/IPSWDownloader.cpp) for the ramdisk half, plus
+# Patcher.cpp for the bootchain half. None of the USB/device-communication
+# libraries the main blackb0x binary needs.
 #
-# Unlike bake-all-ramdisks this needs NO root at all — every step is
-# download, decrypt and byte-level file patching, with no loop mount and no
-# hdiutil. That is the whole reason it is a separate binary rather than a
-# flag on the other one: it can be run and re-run freely while iterating on
-# the patch logic itself, and it is the only way to exercise
-# Patcher::patchiBSS()/patchiBEC()/patchKernel() (and therefore the
-# iBoot32Patcher binary they fork/exec) across every known firmware with no
-# hardware attached.
+# Shares Patcher.cpp with blackb0x itself rather than reimplementing the patch
+# calls, so the two cannot drift: if this tool patches a build successfully,
+# blackb0x's live path runs the identical code on it. There is no recursion
+# risk from also linking BakeRamdisk.cpp here — Patcher::patchRamdisk() only
+# ever CHECKS for a dist/ entry and names this binary in its error message;
+# it never execs it, and bake-firmware never calls patchRamdisk().
 #
-# Shares Patcher.cpp with blackb0x itself rather than reimplementing the
-# patch calls, so the two cannot drift: if this tool patches a build
-# successfully, blackb0x's live path runs the identical code on it.
-# Deliberately does NOT link BakeRamdisk.cpp — Patcher::patchRamdisk()
-# shells out to the bake-all-ramdisks binary rather than linking it (see
-# resolveBakeAllRamdisksPath()), so the root-requiring code stays out of
-# this binary entirely.
-# ---------------------------------------------------------------------------
-
+# No Apple frameworks are linked pre-emptively — add whatever a real macOS
+# link actually demands, the same way blackb0x's own `if(APPLE)` framework
+# block below was arrived at from a real link error rather than a guess.
+#
 # No Personalize.cpp: that is TSS/SHSH personalization for the
 # --stock-securerom diagnostic route only, and Patcher itself never calls it
 # (it only mentions it in comments). Leaving it out keeps libtatsu and the
 # img3-stitching code out of this binary.
-add_executable(bake-all-bootloaders
-    src/BakeAllBootloaders.cpp
+# ---------------------------------------------------------------------------
+
+add_executable(bake-firmware
+    src/BakeFirmware.cpp
+    src/BakeRamdisk.cpp
     src/IPSW.cpp
     src/IPSWDownloader.cpp
     src/Patcher.cpp
     src/ResourcePath.cpp)
 
-target_include_directories(bake-all-bootloaders PRIVATE third_party/xpwn/includes)
+target_include_directories(bake-firmware PRIVATE third_party/xpwn/includes)
 
 # CBPatcher absent for the same GPLv3 reason as on blackb0x above; this target
 # fork/execs it through the same Patcher.cpp helper.
-target_link_libraries(bake-all-bootloaders PRIVATE
+target_link_libraries(bake-firmware PRIVATE
     blackb0x_xpwntool
     xpwn
     deps::plist
@@ -1405,7 +1362,7 @@ target_link_libraries(bake-all-bootloaders PRIVATE
 # IS fork/exec'd by Patcher.cpp at runtime, so it has to exist next to this
 # binary for the tool to do anything. A build dependency rather than a link
 # one.
-add_dependencies(bake-all-bootloaders
+add_dependencies(bake-firmware
     iBoot32Patcher
     libplist_ext libfragmentzip_ext libgeneral_ext
     wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)

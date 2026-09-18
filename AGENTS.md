@@ -60,8 +60,8 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
 - `src/` — first-party code, flat, and nothing else: `main.cpp`, `Cli.hpp`/`.cpp`,
   `Console.hpp`/`.cpp`, `DeviceManager.hpp`/`.cpp`, `IPSW.hpp`/`.cpp`,
   `IPSWDownloader.hpp`/`.cpp`, `Patcher.hpp`/`.cpp`, `Personalize.hpp`/`.cpp`,
-  `ResourcePath.hpp`/`.cpp`, `BakeRamdisk.hpp`/`.cpp`, `BakeAllRamdisks.cpp`,
-  `BakeAllBootloaders.cpp`. The original Objective-C (`AppDelegate`, `MainView`,
+  `ResourcePath.hpp`/`.cpp`, `BakeRamdisk.hpp`/`.cpp`, `BakeFirmware.cpp`.
+  The original Objective-C (`AppDelegate`, `MainView`,
   `Blackb0x.h`/`.m`, `TaskManager`, and the old `.h`/`.m`/`.mm` counterparts of the
   files above) has been fully ported and deleted — check `docs/HISTORY.md`/git
   history if you need to see what it looked like. `checkm8.h`/`SHAtter.h` are exploit
@@ -92,8 +92,10 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   package archives, not loose files mirroring a destination path. The eventual
   goal is to source these from real Cydia repos rather than checking in the
   `.deb` bytes.
-- `dist/` — bake-all-ramdisks' output (gitignored, not checked in): one
-  `<device>_<buildID>-Ramdisk.dmg` per known firmware. An entry that already
+- `dist/` — bake-firmware's output (gitignored, not checked in): one
+  `<device>_<buildID>-Ramdisk.dmg` per known firmware, plus
+  `bootchain/<device>_<buildID>/` holding that firmware's patched
+  iBSS/iBEC/kernelcache/devicetree. An entry that already
   exists is skipped; pass `--force` to rebuild. There is no staleness
   detection: a `.sum` sidecar holding a content hash of the bake inputs used
   to force re-bakes automatically, and it was removed as fragile, so **after
@@ -141,35 +143,52 @@ still `void`, so callers detect failure by checking for a zero-byte output.
 cmake -S . -B build && cmake --build build -j$(nproc)
 
 # Once, in bulk, for every known firmware — NOT run by blackb0x itself.
-# Writes dist/<device>_<buildID>-Ramdisk.dmg per firmware (gitignored):
-./build/bake-all-ramdisks [--signed-only]
-
-# Pre-patches iBSS/iBEC/KernelCache/DeviceTree for every known firmware.
-# Needs NO root, unlike bake-all-ramdisks. Writes dist/bootchain/<device>_<buildID>/:
-./build/bake-all-bootloaders [--signed-only] [--device <model>] [--build <buildID>]
+# Writes dist/<device>_<buildID>-Ramdisk.dmg and dist/bootchain/<device>_<buildID>/:
+./build/bake-firmware [--signed-only] [--device <model>] [--build <buildID>]
+                      [--only bootchain|ramdisk] [--force] [--stop-early]
 
 ./build/blackb0x [--ecid <id> | --udid <id>] [--dry-run]
 ```
 
-Three binaries. Nothing needs root any more: the privilege split existed for Linux's
-loop-mount and raw-USB device nodes, and neither applies on macOS.
+Two binaries (three counting `blackb0x-pwn`, which `blackb0x` spawns itself).
+Nothing needs root any more: the privilege split existed for Linux's loop-mount and
+raw-USB device nodes, and neither applies on macOS.
 
-- **`bake-all-ramdisks`** attaches an HFS+ image via `hdiutil` (no root, no mount
-  helper). **This path has never been run on real macOS** — written with no Mac
-  available; see `BakeRamdisk.cpp`'s caveat and `.claude/TODO.md` item 4a. For every
-  `.keys` file under `Blackb0x/ImageKeys/` (i.e. every known device/firmware
-  combination), it downloads that firmware's `RestoreRamDisk` component and merges
-  the overlay (the `xyz.regulad.blackb0x` package plus the debcache) into it,
-  writing each result to
-  `dist/<device>_<buildID>-Ramdisk.dmg`. `--signed-only` restricts this to builds
-  ipsw.me currently reports Apple as still signing (a small fraction of the total —
-  what most real devices are actually on). The overlay is fully static (no
-  per-device secrets get baked in), so each patched output is valid for every
-  device on that firmware; there's no reason to re-derive it on every `blackb0x`
-  run, so `blackb0x` itself never invokes this — `Patcher::patchRamdisk()` just
-  checks whether the `dist/` entry it needs already exists, and tells you to run
-  `bake-all-ramdisks` if not. Re-running is cheap: any `dist/` entry that already
-  exists is skipped.
+- **`bake-firmware`** is the single ahead-of-time baker. It was two binaries,
+  `bake-all-ramdisks` and `bake-all-bootloaders`, split because the Linux ramdisk
+  bake needed `CAP_SYS_ADMIN` for its loop mount while the bootchain half needed no
+  root at all; with the loop mount gone that reason went with it, and the duplicated
+  target-enumeration and filter code collapsed into one file. For every `.keys` file
+  under `Blackb0x/ImageKeys/` (i.e. every known device/firmware combination) it does
+  two things:
+  - **bootchain** — downloads and patches iBSS, iBEC, KernelCache and DeviceTree into
+    `dist/bootchain/<device>_<buildID>/`. This is the only way to exercise
+    `Patcher::patchiBSS()`/`patchiBEC()`/`patchKernel()` across every known firmware
+    with no hardware attached. Each target runs in a forked child, deliberately: the
+    vendored patch code does not survive being driven dozens of times in one process
+    (see `BakeFirmware.cpp`'s own comment).
+  - **ramdisk** — attaches an HFS+ image via `hdiutil` (no root, no mount helper),
+    merges the overlay (the `xyz.regulad.blackb0x` package plus the debcache) into
+    that firmware's `RestoreRamDisk`, and writes
+    `dist/<device>_<buildID>-Ramdisk.dmg`. **This path has never been run on real
+    macOS** — written with no Mac available; see `BakeRamdisk.cpp`'s caveat and
+    `.claude/TODO.md` item 4a. Stays in-process, unlike the bootchain half, because
+    the debcache and the podman entrypoint build are resolved once and shared across
+    every target.
+
+  `--signed-only` restricts the run to builds ipsw.me currently reports Apple as still
+  signing (a small fraction of the total — what most real devices are actually on);
+  `--device`/`--build` narrow it further. `--only bootchain` skips the podman and
+  debcache work entirely, which is the fast loop for iterating on patch logic.
+
+  The overlay is fully static (no per-device secrets get baked in), so each patched
+  output is valid for every device on that firmware; there's no reason to re-derive
+  it on every `blackb0x` run. `blackb0x` never invokes the bootchain half at all (it
+  still patches those four components live — `.claude/TODO.md` item 5), and for the
+  ramdisk `Patcher::patchRamdisk()` just checks whether the `dist/` entry it needs
+  already exists. If it doesn't, `Cli.cpp` spawns `bake-firmware --only ramdisk` for
+  that one tuple in the background. Re-running is cheap: any output that already
+  exists is skipped unless you pass `--force`.
 - **`blackb0x`** drives everything else (DFU discovery, the exploit, uploads, checking
   jailbreak status over AFC2). No `geteuid() != 0` gate in `Cli.cpp`, and none needed —
   a real permission failure surfaces clearly from `libirecovery`'s own
@@ -189,8 +208,8 @@ the build shells out to it any more.)
 
 **Runtime requirements beyond the build** (not just build-time deps):
 - `hdiutil`/`diskutil`/`cp`/`tar` (invoked directly as subprocesses, no shell) —
-  `bake-all-ramdisks` only, all built in to macOS.
-- `python3` and `podman` — `bake-all-ramdisks` shells out to
+  `bake-firmware`'s ramdisk half only, all built in to macOS.
+- `python3` and `podman` — `bake-firmware`'s ramdisk half shells out to
   `scripts/build_deb_cache.py` (via `python3`, which shells out to `podman`
   itself) to resolve the debcache picklist fresh on every bake; see
   `BakeRamdisk.cpp`'s `buildPicklist()`. Same `$SUDO_USER`/`runuser`

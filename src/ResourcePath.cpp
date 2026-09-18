@@ -34,7 +34,7 @@ std::string resolveImageKeyPath(const std::string& relativePath) {
     return "Blackb0x/ImageKeys/" + relativePath;
 }
 
-// Shared by resolvePwnPath()/resolveBakeAllRamdisksPath()/
+// Shared by resolvePwnPath()/resolveBakeFirmwarePath()/
 // resolveIBoot32PatcherPath() below: the directory blackb0x's own executable
 // lives in, or empty if it can't be determined (falls back to a bare
 // binaryName, resolved via PATH at exec time).
@@ -71,13 +71,13 @@ std::string resolvePwnPath() {
     return "blackb0x-pwn";
 }
 
-std::string resolveBakeAllRamdisksPath() {
-    if (const char* override_ = getenv("BLACKB0X_BAKE_ALL_RAMDISKS")) {
+std::string resolveBakeFirmwarePath() {
+    if (const char* override_ = getenv("BLACKB0X_BAKE_FIRMWARE")) {
         return std::string(override_);
     }
     std::string dir = resolveOwnExecutableDir();
-    if (!dir.empty()) return dir + "/bake-all-ramdisks";
-    return "bake-all-ramdisks";
+    if (!dir.empty()) return dir + "/bake-firmware";
+    return "bake-firmware";
 }
 
 std::string resolveIBoot32PatcherPath() {

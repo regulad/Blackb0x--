@@ -25,8 +25,8 @@ struct FirmwareKeyPair {
     std::string key;
 };
 
-// Everything downloadAndPatchComponents() (Cli.cpp) and bake-all-ramdisks
-// (BakeAllRamdisks.cpp) both need out of a BuildManifest.plist — pulled out
+// Everything downloadAndPatchComponents() (Cli.cpp) and bake-firmware
+// (BakeFirmware.cpp) both need out of a BuildManifest.plist — pulled out
 // of Cli.cpp so both can share one parser instead of drifting copies.
 struct ManifestInfo {
     std::string realBuildID;     // BuildManifest.plist's own ProductBuildVersion
@@ -90,7 +90,7 @@ public:
 
 // GET https://api.ipsw.me/v4/device/<deviceModel>?type=ipsw — returns every
 // build ID Apple is still actively signing for this device right now
-// (per ipsw.me's own "signed" flag), for bake-all-ramdisks' --signed-only.
+// (per ipsw.me's own "signed" flag), for bake-firmware's --signed-only.
 // Unlike firmwareURLForDevice()'s v2.1 endpoint, this response IS JSON —
 // deliberately hand-extracted here (regex over the known-flat, no-nested-
 // braces firmware-entry shape) rather than pulling in a real JSON parser:
@@ -103,7 +103,7 @@ std::set<std::string> signedBuildsForDevice(const std::string& deviceModel);
 
 // GET https://api.ipsw.me/v4/device/<deviceModel>?type=ipsw — returns the
 // "version" field of the newest firmware entry ipsw.me lists for this
-// device, or "" on failure/empty response. Used as bake-all-ramdisks' own
+// device, or "" on failure/empty response. Used as bake-firmware's own
 // fallback when a real BuildManifest.plist (the normal, authoritative
 // source of ProductVersion for a specific (device, buildID) tuple) somehow
 // fails to yield a productVersion — confirmed directly (`curl -s

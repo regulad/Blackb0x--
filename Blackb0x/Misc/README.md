@@ -692,7 +692,7 @@ chain, kept purely for archival reasons since the repo itself might not
 stay up).
 
 **None of this is wired into `packages.txt`** — these are a pure archival
-snapshot, not something `bake-all-ramdisks` installs. Curating which (if
+snapshot, not something `bake-firmware` installs. Curating which (if
 any) are worth actually shipping is a separate decision from preserving
 them before the repo disappears.
 

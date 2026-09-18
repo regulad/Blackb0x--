@@ -82,7 +82,7 @@ void decrypt(char *input_path, char *ouput_path, char *ip_key, char *ip_iv, char
      * detect it because this function returns void, and it did not survive
      * long enough for them to check its output either.
      *
-     * Found by bake-all-bootloaders sweeping every AppleTV3,2 firmware:
+     * Found by bake-firmware sweeping every AppleTV3,2 firmware:
      * 10B144b's kernelcache is 6MB and downloads fine, but openAbstractFile*()
      * refuses it, and the run died with exit 139 instead of skipping one
      * build. Bailing out leaves a zero-byte output file, which is exactly

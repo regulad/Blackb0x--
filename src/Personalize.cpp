@@ -48,7 +48,7 @@ plist_t requestTSS(std::shared_ptr<void> buildIdentity, uint64_t ecid, const uns
 
     // Best-effort, cheap check before ever bothering Apple's real TSS
     // server: ipsw.me's own crowd-sourced signing-status snapshot (the
-    // same one bake-all-ramdisks' --signed-only already relies on) can
+    // same one bake-firmware's --signed-only already relies on) can
     // at least warn upfront that this is very likely a wasted request --
     // it's not authoritative (can lag Apple's own signing-window changes
     // in either direction), so this only warns, never blocks.

@@ -19,8 +19,9 @@
 #
 # Why Theos and not plain dpkg-deb: dm.pl builds a correct .deb without root
 # and without fakeroot, and it is the tool this ecosystem actually uses. That
-# matters here because bake-all-ramdisks already needs root for its loop mount
-# and we do not want to add a second, different reason to need it.
+# matters here because nothing else in the bake needs root any more (the one
+# thing that did, the Linux HFS+ loop mount, is gone) and we do not want to
+# reintroduce a reason to need it.
 #
 # Notably we use NONE of Theos's compilation half. This package is pure data --
 # apt sources, gpg keys, a LaunchDaemon plist, shell scripts, and the bundled

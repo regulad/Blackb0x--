@@ -4,7 +4,7 @@
 /.scratch/
 __pycache__/
 
-# bake-all-ramdisks' output (see Blackb0x/Source/BakeAllRamdisks.cpp) —
+# bake-firmware's output (see src/BakeFirmware.cpp) —
 # locally-produced artifacts, not something to check in.
 /dist/
 

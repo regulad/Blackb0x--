@@ -1365,6 +1365,37 @@ cp -a /preinstall/var/lib/dpkg/info/. /out/dpkg-state/info/
 rm -rf /preinstall/var/lib/dpkg /preinstall/etc/apt
 )SCRIPT";
 
+// Result of extractDebAndBuildStanza() below.
+struct ExtractedDeb {
+    // Caller-owned either way — remove_all() this when done, whether `ok`
+    // came back true or false (mirrors makeTempDir()'s own contract: only
+    // empty if temp-dir creation itself failed, nothing to clean up then).
+    std::string tempDir;
+    // The dpkg status stanza built from the .deb's own control file — see
+    // buildStatusStanzaFromControl(). Empty if control.tar.* couldn't be
+    // found/extracted, or had no usable control file; this does NOT make
+    // `ok` false (see below), since the payload files under `tempDir` are
+    // still usable either way.
+    std::string stanza;
+    // True once data.tar.* has been located and extracted into `tempDir` —
+    // i.e. whether the caller has anything left to stage at all. False
+    // means the caller should give up immediately (no payload extracted);
+    // true does NOT mean `stanza` is non-empty — that's a separate,
+    // non-fatal-to-extraction failure the caller checks on its own, same as
+    // both callers already did before this was factored out.
+    bool ok = false;
+};
+
+// Defined further down, next to its other callers. Declared here because
+// computePreinstalledPackages() below is the earliest caller.
+//
+// NOTE: the default arguments deliberately do NOT appear here -- they are on
+// the definition, and C++ forbids repeating a default argument in a second
+// declaration of the same function.
+static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const std::string& tempDirPrefix,
+                                              const std::string& labelForLogging, bool hold,
+                                              bool dropRelationshipFields);
+
 // macOS has no container runtime at all (confirmed directly — not just
 // podman, no viable alternative either), so the real, containerized dpkg
 // bootstrap the #else branch below runs is off the table here. That real
@@ -1965,26 +1996,6 @@ static std::string buildStatusStanzaFromControl(const std::string& controlPath, 
     return out;
 }
 
-// Result of extractDebAndBuildStanza() below.
-struct ExtractedDeb {
-    // Caller-owned either way — remove_all() this when done, whether `ok`
-    // came back true or false (mirrors makeTempDir()'s own contract: only
-    // empty if temp-dir creation itself failed, nothing to clean up then).
-    std::string tempDir;
-    // The dpkg status stanza built from the .deb's own control file — see
-    // buildStatusStanzaFromControl(). Empty if control.tar.* couldn't be
-    // found/extracted, or had no usable control file; this does NOT make
-    // `ok` false (see below), since the payload files under `tempDir` are
-    // still usable either way.
-    std::string stanza;
-    // True once data.tar.* has been located and extracted into `tempDir` —
-    // i.e. whether the caller has anything left to stage at all. False
-    // means the caller should give up immediately (no payload extracted);
-    // true does NOT mean `stanza` is non-empty — that's a separate,
-    // non-fatal-to-extraction failure the caller checks on its own, same as
-    // both callers already did before this was factored out.
-    bool ok = false;
-};
 
 // Shared by stageEtasonatv()/stageP0sixspwn() below — both need the exact
 // same three-step dance against their own .deb: `ar x` it into a fresh temp

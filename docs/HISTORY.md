@@ -3382,3 +3382,75 @@ submodule line locally.
 The open question is unchanged and does not involve gaster: **what the overwrite
 transfer does on a working macOS run.** See the tcpdump instructions in the
 section above.
+
+## The macOS wire capture is a dead end: XHC20 needs SIP off, and is broken anyway
+
+The section above names "what that same transfer does on a working macOS run" as the
+decisive outstanding measurement, and prescribes
+`sudo ifconfig XHC20 up && sudo tcpdump -i XHC20 -w out.pcap` to get it. **That
+procedure is not available on this project's macOS test machine, and probably not on
+any current macOS.** Researched rather than assumed, because it was about to cost a
+recovery-mode reboot:
+
+- **SIP must be fully disabled.** Apple DTS (Quinn "The Eskimo!") on the Catalina USB
+  capture thread: *"It seems that this support is now disabled by default. To get it
+  back, you have to disable SIP."* The USB capture interfaces do not merely fail to
+  open without it — they do not appear in `ifconfig` at all, which is why the usual
+  symptom is "interface XHC20 does not exist" rather than a permission error. `sudo`
+  is not a substitute; SIP is disabled only from Recovery via `csrutil disable`, and
+  on Apple Silicon that additionally requires setting the boot policy to Reduced
+  Security first.
+- **And it appears broken even with SIP off.** A report on that same thread from
+  August 2025: *"The 'sudo ifconfig XHC20 up' method doesn't seem to work anymore in
+  macOS 15.6.1"*, posted with `System Integrity Protection status: disabled`. A
+  January 2026 follow-up asking whether USB capture is possible at all on 15.x/26.x
+  has no answer. Three Feedback requests for a narrower `csrutil` flag (FB7429319,
+  FB8326129, FB14365299) are open, the oldest unanswered since 2020.
+- **Apple Silicon has a separate, older defect** even when the interface does come up:
+  all-zero payloads, reproduced under plain `tcpdump` as well as Wireshark.
+
+Sources: Apple Developer Forums threads 124875 and 95380; Wireshark wiki
+`CaptureSetup/USB`; `ask.wireshark.org` question 30854.
+
+### Consequences for this project
+
+`scripts/analyze_usbmon_checkm8.py`'s `DLT_USB_DARWIN` support is now **unverified and
+unreachable**. It was written to read a capture nobody on this project can produce, and
+its own header comment already flags the Darwin pseudo-header layout as a guess scored
+against two candidates. Do not trust it, and do not spend time refining it, until
+someone actually has a Darwin capture in hand. The Linux `DLT_USB_LINUX_MMAPPED` path
+is unaffected and remains correct — that is the half that has produced every real
+measurement so far.
+
+The decisive question is unchanged: **does the overwrite transfer deliver its 1660
+bytes on a working macOS run?** What changes is how it gets answered. Since the wire is
+unavailable on the working side, the measurement has to come from inside the process,
+which means instrumenting `blackb0x-pwn` itself and diffing its output across the two
+platforms.
+
+One thing makes that genuinely viable rather than a consolation prize, though it is
+**not** the thing it first looked like. Checked against
+`third_party/libirecovery/src/libirecovery.c` rather than assumed:
+
+`iokit_usb_control_transfer()` (`:1420`) fills an `IOUSBDevRequestTO` whose `wLenDone`
+field the kernel populates with the bytes actually moved — but the switch on the result
+returns `req.wLenDone` **only** in the `kIOReturnSuccess` case, and collapses
+`kIOReturnTimeout`/`kIOUSBTransactionTimeout` to a bare `IRECV_E_TIMEOUT`. So the count
+is discarded on timeout on macOS too, exactly as it is on Linux, where the libusb branch
+(`:1448`) is a straight `libusb_control_transfer()` returning `LIBUSB_ERROR_TIMEOUT`.
+`Checkm8Pwn.c`'s comment that "how far this got is only visible on the wire" is
+therefore accurate **as the code stands on both platforms** — it is not a Linux-only
+limitation, and there is no free number waiting to be printed.
+
+What makes it recoverable is that the partial count exists just below each wrapper and
+**this project already forks libirecovery**. IOKit's `req.wLenDone` is a live struct
+field after a timed-out `DeviceRequestTO`, and libusb's own sync control wrapper
+likewise has `transfer->actual_length` before it throws the value away. Surfacing both
+is a small, additive change to a fork already carrying async-cancel fixes, and it yields
+the same measurement on both platforms rather than one privileged side — which is
+strictly better for the diff this is all for.
+
+The caveat to respect: on timeout `wLenDone` reflects what the host controller believes
+it sent, which is not automatically what the device accepted. That is the precise gap
+the usbmon capture closes on Linux, and it is why the Linux-side numbers stay the
+reference for anything the two disagree about.

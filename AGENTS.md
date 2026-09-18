@@ -287,9 +287,15 @@ groom size above 320 bytes, while fitting all 1660 payload bytes needs it at or 
 2048-byte DFU buffer. No cancel delay reconciles those. See `docs/HISTORY.md` for the
 full evidence trail, the measured tables, and the dead ends worth not re-trying.
 
-The decisive outstanding measurement is **what that same transfer does on a working
-macOS run** — see the tcpdump/`analyze_usbmon_checkm8.py` instructions in
-`docs/HISTORY.md`.
+The decisive outstanding measurement is still **what that same transfer does on a
+working macOS run** — but the way to get it has changed. The `XHC20`/tcpdump route
+`docs/HISTORY.md` originally prescribed is a **dead end**: macOS hides the USB capture
+interfaces unless SIP is fully disabled (confirmed by Apple DTS), and reports say the
+method fails on macOS 15.6.1+ even with SIP off. `analyze_usbmon_checkm8.py`'s
+`DLT_USB_DARWIN` path is consequently unverified *and* unreachable — don't invest in
+it. The measurement has to come from instrumenting `blackb0x-pwn` itself and diffing
+its output across platforms; see `docs/HISTORY.md` for what is and isn't recoverable
+that way.
 
 All investigation knobs are `DEBUG_`-prefixed and every default is the
 macOS-confirmed behaviour, so an unset environment is the original path byte for

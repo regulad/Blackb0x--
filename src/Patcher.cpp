@@ -40,8 +40,8 @@ namespace fs = std::filesystem;
 //
 // That is a licensing requirement, not a style choice -- do not replace
 // either with a direct iBootPatcher()/patch_kernel() call. CBPatcher in
-// particular WAS linked in until this was noticed: it sat in
-// Blackb0x/Libraries with no LICENSE file alongside it, which is how a GPLv3
+// particular WAS linked in until this was noticed: it sat in the in-tree
+// libraries directory with no LICENSE file alongside it, which is how a GPLv3
 // static library ended up on blackb0x's link line unexamined.
 //
 // Deliberately NOT reusing DeviceManager.cpp's runLineBufferedSubprocess():
@@ -587,8 +587,7 @@ bool Patcher::patchRamdisk() {
         // now self-bake on demand, may still be entirely empty at this
         // point) — either way, not this specific device+firmware, and
         // Cli.cpp's downloadAndPatchComponents() already tried a background
-        // bake-all-ramdisks run for exactly this combination if
-        // canSelfBakeRamdisk() said that was safe (see its own comment).
+        // bake-all-ramdisks run for exactly this combination.
         // That's not a recoverable "try the next component" failure the way
         // a flaky download is: there is no ramdisk to send this device no
         // matter what else this run does, so stop hard here instead of

@@ -103,7 +103,7 @@ Cflags: -I\${includedir} -include ${DEPS_INCLUDE}/wolfssl/options.h
 ")
 
 # ---------------------------------------------------------------------------
-# Already-portable C sources kept in-tree (Blackb0x/Libraries) — built as-is.
+# Already-portable C sources kept in-tree (src/libraries) — built as-is.
 # ---------------------------------------------------------------------------
 
 # CBPatch.c/CBPUtils.c (cbpatcher) and finders.c/functions.c/patchers.c
@@ -114,7 +114,7 @@ Cflags: -I\${includedir} -include ${DEPS_INCLUDE}/wolfssl/options.h
 # CBPatcher"/"updated iBoot32Patcher"), confirmed by exact/near-exact header
 # match.
 #
-# BOTH have since moved OUT of Blackb0x/Libraries entirely: each is a
+# BOTH have since moved OUT of src/libraries entirely: each is a
 # submodule built as its own executable and fork/exec'd, for the same
 # licensing reason — see their blocks below. Nothing recovered that way is
 # still an in-tree source.
@@ -199,10 +199,10 @@ target_compile_options(iBoot32Patcher PRIVATE
 # CMakeLists.txt already defines an executable target literally called
 # "xpwntool" (its CLI tool of the same name), which collides otherwise.
 add_library(blackb0x_xpwntool STATIC
-    Blackb0x/Libraries/xpwntool.c)
-# Blackb0x/Libraries for its own xpwntool.h; third_party/xpwn/includes for the
+    src/libraries/xpwntool.c)
+# src/libraries for its own xpwntool.h; third_party/xpwn/includes for the
 # real xpwn headers. There used to be a private copy of 22 xpwn headers at
-# Blackb0x/Libraries/libxpwntool/ and this compiled against those instead --
+# src/libraries/libxpwntool/ and this compiled against those instead --
 # a duplicate set that had quietly diverged from the submodule it links.
 # Deleted: this file only ever used <xpwn/libxpwn.h> and <xpwn/nor_files.h>,
 # and only AbstractFile-level calls (openAbstractFile/2/3,
@@ -216,7 +216,7 @@ add_library(blackb0x_xpwntool STATIC
 # `extern int Img3DecryptLast`, which nothing uses and nothing anywhere
 # defines.
 target_include_directories(blackb0x_xpwntool PUBLIC
-    Blackb0x/Libraries
+    src/libraries
     third_party/xpwn/includes)
 
 # idevicerestore's own img3.c/img3.h (src/img3.c, src/img3.h at
@@ -228,8 +228,8 @@ target_include_directories(blackb0x_xpwntool PUBLIC
 # own small static library rather than folded into blackb0x's own
 # sources, matching blackb0x_xpwntool above.
 add_library(idevicerestore_img3 STATIC
-    Blackb0x/Libraries/idevicerestore_img3.c)
-target_include_directories(idevicerestore_img3 PUBLIC Blackb0x/Libraries)
+    src/libraries/idevicerestore_img3.c)
+target_include_directories(idevicerestore_img3 PUBLIC src/libraries)
 
 # See deps::tatsu's own comment (near add_deps_imported_lib(tatsu ...)
 # below) for why this exists: a handful of libplist convenience functions
@@ -244,13 +244,13 @@ target_include_directories(idevicerestore_img3 PUBLIC Blackb0x/Libraries)
 # unchanged across this whole version range already, per
 # libimobiledevice_glue_ext's own comment above).
 add_library(plist_compat STATIC
-    Blackb0x/Libraries/libplist_compat.c)
+    src/libraries/libplist_compat.c)
 # target_link_libraries(plist_compat PUBLIC deps::plist)/add_dependencies
 # happen below, near add_deps_imported_lib(plist ...) -- same
 # "target must exist first" reason as blackb0x_xpwntool's own PUBLIC xpwn
 # link a few lines up.
 
-# NOTE on provenance: Blackb0x/Libraries/xpwntool.c was confirmed (by direct
+# NOTE on provenance: src/libraries/xpwntool.c was confirmed (by direct
 # content diff) to come from zzanehip/xpwntool-swift @
 # 58b69c595c (2020-09-13); its libxpwntool/*.h header copies came from the
 # same place and have since been deleted in favour of third_party/xpwn's own — decrypt()'s body is byte-identical, only include
@@ -989,7 +989,7 @@ add_dependencies(deps::tatsu libtatsu_ext)
 # Same shape as deps::curl above — libtatsu.a's own TSS-over-HTTPS
 # requests go through libcurl, so any consumer of deps::tatsu needs
 # deps::curl's own symbols (and transitively wolfssl/zlib) available too.
-# libplist_compat (see Blackb0x/Libraries/libplist_compat.c) supplies the
+# libplist_compat (see src/libraries/libplist_compat.c) supplies the
 # handful of newer libplist convenience functions tss.o itself calls that
 # the historically-pinned deps::plist doesn't implement — linking two
 # real copies of libplist (historical + libplist_modern_ext's -2.0
@@ -1112,7 +1112,7 @@ target_include_directories(xpwn BEFORE PRIVATE ${DEPS_INCLUDE}/wolfssl)
 # targets themselves, not these separate executables that merely link
 # against them, so each needs the identical treatment.
 #
-# blackb0x_xpwntool (our own target wrapping Blackb0x/Libraries/xpwntool.c,
+# blackb0x_xpwntool (our own target wrapping src/libraries/xpwntool.c,
 # declared far above — NOT the same target as xpwn's own "xpwntool" CLI
 # tool in this list) needs it too, for the exact same reason: its
 # transitively-included xpwn/img3.h has its own
@@ -1143,13 +1143,13 @@ add_dependencies(blackb0x_xpwntool wolfssl_ext)
 # blackb0x-pwn: Blackb0x's own original checkm8/SHAtter exploit, standalone.
 #
 # The ONLY pwntool this project has. It is built on every platform, and its
-# own sources (Blackb0x/Source/Pwn/) contain no Apple-specific code at all --
+# own sources (src/Pwn/) contain no Apple-specific code at all --
 # only backend-independent irecv_* calls, every one of which libirecovery
 # implements for libusb as well as IOKit -- so the Apple-only gate this
 # target used to sit behind was a packaging decision from the macOS effort,
 # not a source requirement. Ports DeviceManager.m's original
 # +SHAtter:/+checkm8: methods (deleted from the tree in 907b64b, recovered
-# from git history -- see Blackb0x/Source/Pwn/Checkm8Pwn.c's own header
+# from git history -- see src/Pwn/Checkm8Pwn.c's own header
 # comment) byte-for-byte.
 #
 # This target used to sit alongside a vendored `gaster`, selected by a
@@ -1166,9 +1166,9 @@ add_dependencies(blackb0x_xpwntool wolfssl_ext)
 # submodule source, all to compile the same source with the same flags.
 
 add_executable(blackb0x-pwn
-    Blackb0x/Source/Pwn/main.c
-    Blackb0x/Source/Pwn/Checkm8Pwn.c)
-target_include_directories(blackb0x-pwn PRIVATE Blackb0x/Source)
+    src/Pwn/main.c
+    src/Pwn/Checkm8Pwn.c)
+target_include_directories(blackb0x-pwn PRIVATE src)
 
 # deps::imobiledevice_glue/deps::plist: libirecovery-1.0.a's own real
 # (backend-independent) link dependencies -- confirmed via its installed
@@ -1197,15 +1197,15 @@ target_link_libraries(blackb0x-pwn PRIVATE
 # ---------------------------------------------------------------------------
 
 add_executable(blackb0x
-    Blackb0x/Source/main.cpp
-    Blackb0x/Source/Cli.cpp
-    Blackb0x/Source/Console.cpp
-    Blackb0x/Source/DeviceManager.cpp
-    Blackb0x/Source/IPSW.cpp
-    Blackb0x/Source/IPSWDownloader.cpp
-    Blackb0x/Source/Patcher.cpp
-    Blackb0x/Source/Personalize.cpp
-    Blackb0x/Source/ResourcePath.cpp)
+    src/main.cpp
+    src/Cli.cpp
+    src/Console.cpp
+    src/DeviceManager.cpp
+    src/IPSW.cpp
+    src/IPSWDownloader.cpp
+    src/Patcher.cpp
+    src/Personalize.cpp
+    src/ResourcePath.cpp)
 
 target_include_directories(blackb0x PRIVATE third_party/xpwn/includes)
 
@@ -1290,8 +1290,8 @@ add_dependencies(blackb0x
 # ---------------------------------------------------------------------------
 
 add_executable(blackb0x_tests
-    Blackb0x/Tests/RamdiskOverlayTests.cpp
-    Blackb0x/Source/ResourcePath.cpp)
+    src/tests/RamdiskOverlayTests.cpp
+    src/ResourcePath.cpp)
 
 add_test(NAME RamdiskOverlayTests
          COMMAND blackb0x_tests
@@ -1329,11 +1329,11 @@ add_test(NAME RamdiskOverlayTests
 # ---------------------------------------------------------------------------
 
 add_executable(bake-all-ramdisks
-    Blackb0x/Source/BakeAllRamdisks.cpp
-    Blackb0x/Source/BakeRamdisk.cpp
-    Blackb0x/Source/IPSW.cpp
-    Blackb0x/Source/IPSWDownloader.cpp
-    Blackb0x/Source/ResourcePath.cpp)
+    src/BakeAllRamdisks.cpp
+    src/BakeRamdisk.cpp
+    src/IPSW.cpp
+    src/IPSWDownloader.cpp
+    src/ResourcePath.cpp)
 
 target_include_directories(bake-all-ramdisks PRIVATE third_party/xpwn/includes)
 
@@ -1381,11 +1381,11 @@ add_dependencies(bake-all-ramdisks
 # (it only mentions it in comments). Leaving it out keeps libtatsu and the
 # img3-stitching code out of this binary.
 add_executable(bake-all-bootloaders
-    Blackb0x/Source/BakeAllBootloaders.cpp
-    Blackb0x/Source/IPSW.cpp
-    Blackb0x/Source/IPSWDownloader.cpp
-    Blackb0x/Source/Patcher.cpp
-    Blackb0x/Source/ResourcePath.cpp)
+    src/BakeAllBootloaders.cpp
+    src/IPSW.cpp
+    src/IPSWDownloader.cpp
+    src/Patcher.cpp
+    src/ResourcePath.cpp)
 
 target_include_directories(bake-all-bootloaders PRIVATE third_party/xpwn/includes)
 

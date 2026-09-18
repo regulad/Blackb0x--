@@ -91,7 +91,7 @@ gets spliced directly into a ramdisk rather than installed via dpkg.
 
 ## Building entrypoint itself
 
-`bakeRamdisk()` (`Blackb0x/Source/BakeRamdisk.cpp`, see
+`bakeRamdisk()` (`src/BakeRamdisk.cpp`, see
 `buildEntrypointBinary()`) runs this automatically on every bake, using the
 one-time toolchain setup above — there's nothing to check in, since the
 build is cached in-process (see `buildEntrypointBinary()` — identical for

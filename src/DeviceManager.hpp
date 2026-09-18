@@ -2,7 +2,7 @@
 //  DeviceManager.hpp
 //  Blackb0x
 //
-//  C++/Linux port of DeviceManager.h. The checkm8/SHAtter exploit logic and
+//  CLI port of DeviceManager.h. The checkm8/SHAtter exploit logic and
 //  the DFU/iRecovery upload helpers are ported verbatim from the original
 //  Objective-C (see DeviceManager.cpp) — this header only replaces the
 //  Cocoa/AppKit-facing surface (AppleTVIcon, NSDictionary plist handling,

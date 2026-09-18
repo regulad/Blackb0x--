@@ -2,7 +2,7 @@
 //  DeviceManager.cpp
 //  Blackb0x
 //
-//  C++/Linux port of DeviceManager.m. The checkm8/SHAtter exploit bodies and
+//  CLI port of DeviceManager.m. The checkm8/SHAtter exploit bodies and
 //  the iRecovery USB helpers are ported VERBATIM from the original — this is
 //  exploit-critical hardware-timing code and is not "improved" during
 //  conversion, only translated from Objective-C method syntax to C++ and
@@ -398,12 +398,11 @@ static bool commandExistsOnPath(const char* name) {
     return false;
 }
 
-// Resolves the real binary name for GNU coreutils' `stdbuf`. On Linux it's
-// always plain `stdbuf`. On Darwin, Homebrew's `coreutils` formula installs
-// it prefixed (`gstdbuf`) to avoid shadowing the BSD toolset, unless the
-// user has separately opted into coreutils' optional "gnubin" PATH shim
-// (which then exposes it unprefixed) — so try the unprefixed name first
-// either way, then fall back to the prefixed one.
+// Resolves the real binary name for GNU coreutils' `stdbuf`. Homebrew's
+// `coreutils` formula installs it prefixed (`gstdbuf`) to avoid shadowing the
+// BSD toolset, unless the user has separately opted into coreutils' optional
+// "gnubin" PATH shim, which exposes it unprefixed — so try the unprefixed
+// name first, then fall back to the prefixed one.
 static std::string resolveStdbufBinary() {
     if (commandExistsOnPath("stdbuf")) return "stdbuf";
     if (commandExistsOnPath("gstdbuf")) return "gstdbuf";
@@ -597,7 +596,7 @@ static int runBlackb0xPwn(const std::vector<std::string>& args, int timeoutSecon
 // The low-level USB request sequence/payload/timing that used to live
 // directly in this function (hand-ported from the original
 // DeviceManager.m) is gone from HERE, but not from the project: it now
-// lives in Blackb0x/Source/Pwn/ and runs as the standalone `blackb0x-pwn`
+// lives in src/Pwn/ and runs as the standalone `blackb0x-pwn`
 // binary, which this function shells out to for the actual pwn step.
 //
 // For a long stretch this shelled out to a vendored `gaster` instead, with
@@ -2083,9 +2082,8 @@ static int boot_client(irecv_client_t client, void* buf, size_t sz, bool allowUn
     // own trigger for "go run it."
     irecv_usb_control_transfer(client, 0xA1, 2, 0xFFFF, 0, (unsigned char*)buf, 0, 100);
 
-    // Whether a real USB reset (irecv_reset(), libusb_reset_device() on
-    // Linux) belongs here turned out to depend on the device's actual
-    // state, not be a flat yes/no:
+    // Whether a real USB reset (irecv_reset()) belongs here turned out to
+    // depend on the device's actual state, not be a flat yes/no:
     //  - Always resetting unconditionally (an earlier version of this
     //    function) worked at least once (reached Recovery Mode end to
     //    end), but was intermittently WORSE than not resetting at all: the

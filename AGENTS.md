@@ -9,8 +9,8 @@ need more justification than it gives, it's almost certainly explained there.
 
 A jailbreak tool for 2nd/3rd-gen Apple TV (A1378/A1427/A1469) via the checkm8/SHAtter
 DFU-mode boot exploit, which then side-loads Cydia + Kodi. A portable CLI port of an
-original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
-`Blackb0x/Source/` are that original — reference-only, not built).
+original macOS Cocoa/Objective-C app (fully ported and deleted — see
+`docs/HISTORY.md` or git history if you need to see what it looked like).
 
 ## Conventions (don't re-litigate without asking)
 
@@ -57,16 +57,19 @@ original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
 
 ## Repo layout
 
-- `Blackb0x/Source/` — the ported C++, and nothing else: `main.cpp`, `Cli.hpp`/`.cpp`,
-  `DeviceManager.hpp`/`.cpp`, `IPSW.hpp`/`.cpp`, `IPSWDownloader.hpp`/`.cpp`,
-  `Patcher.hpp`/`.cpp`, `ResourcePath.hpp`/`.cpp`, `BakeRamdisk.hpp`/`.cpp`,
-  `BakeAllRamdisks.cpp`. The original Objective-C (`AppDelegate`, `MainView`,
+- `src/` — first-party code, flat, and nothing else: `main.cpp`, `Cli.hpp`/`.cpp`,
+  `Console.hpp`/`.cpp`, `DeviceManager.hpp`/`.cpp`, `IPSW.hpp`/`.cpp`,
+  `IPSWDownloader.hpp`/`.cpp`, `Patcher.hpp`/`.cpp`, `Personalize.hpp`/`.cpp`,
+  `ResourcePath.hpp`/`.cpp`, `BakeRamdisk.hpp`/`.cpp`, `BakeAllRamdisks.cpp`,
+  `BakeAllBootloaders.cpp`. The original Objective-C (`AppDelegate`, `MainView`,
   `Blackb0x.h`/`.m`, `TaskManager`, and the old `.h`/`.m`/`.mm` counterparts of the
   files above) has been fully ported and deleted — check `docs/HISTORY.md`/git
   history if you need to see what it looked like. `checkm8.h`/`SHAtter.h` are exploit
   payload byte arrays, `#include`d directly by `DeviceManager.cpp` — not leftover
   Cocoa, keep these.
-- `Blackb0x/Libraries/` — already-portable C kept in-tree and built directly by the
+- `src/Pwn/` — the standalone `blackb0x-pwn` exploit binary's own C sources
+  (`main.c`, `Checkm8Pwn.c`), separate from the main CLI.
+- `src/libraries/` — already-portable C kept in-tree and built directly by the
   root `CMakeLists.txt`: `xpwntool.c` (compiled against `third_party/xpwn`'s own
   headers — its private `libxpwntool/` header copies are deleted),
   `idevicerestore_img3.c`, `libplist_compat.c`.
@@ -75,35 +78,31 @@ original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
   `CBPatcher` and `iBoot32Patcher`. `libbootkit/` and `libprerestore.h` used to
   sit here as dead code, linked into nothing and referenced by nothing; both are
   deleted.
-- `Blackb0x/ramdisk/` — the ramdisk overlay payload shipped to the jailbroken Apple TV
-  itself, checked in as loose files (no `.tar`/`.tgz`) mirroring their destination
-  paths, merged onto the mounted ramdisk via one `cp -a` (single unconditional
-  tree — no more SSH-only vs full-Cydia split, so no reason to split the tree
-  itself either; it used to be `common/`+`cydia/` subdirectories for exactly that
-  now-gone distinction). Host key generation and SSH access are no longer baked in
-  here at all — SSH access is granted post-boot, by hand, via
-  `scripts/push_authorized_keys.sh` (see "Build & run" below). A
-  large chunk of `ramdisk/files/cydia/` and `ramdisk/files/p0sixspwn/` is actually
-  pre-extracted content that originally came from real Cydia `.deb` packages
-  (identifiable via the dpkg `.list` manifests still present under
-  `private/var/lib/dpkg/info/` in each) — the eventual goal is to source those
-  packages for real and build this tree from them at bake time instead of
-  checking in the already-extracted result (unowned by `mobile`, permissions not
-  representative of a real device). Not done yet. Needs no porting.
-- `Blackb0x/Debs/` — loose `.deb` packages that `setup.sh` `dpkg -i`'s at first
-  boot, merged into `/files/` on the ramdisk alongside (but separately from) the
-  `ramdisk/` tree by `bakeRamdisk()` — kept apart because these are real package
-  archives, not loose files mirroring a destination path. Same eventual goal as
-  `ramdisk/files/cydia/` above: source these from real Cydia repos rather than
-  checking in the `.deb` bytes.
+- `src/tests/` — `RamdiskOverlayTests.cpp`, the one test target.
+- `package/` — the `xyz.regulad.blackb0x` Debian package: `build.sh` (builds the
+  `.deb` with Theos' `dm.pl` inside a container), `layout/` (its literal on-device
+  file tree plus `DEBIAN/control` and `DEBIAN/postinst`), `packages.txt` (the apt
+  package list templated into `postinstall.sh` at package-build time), and
+  `local_only_debs.txt` (the packages bundled as a local apt repo at
+  `/var/.blackb0x/local-debs`, for anything no live repo serves). The package
+  needs no state beyond this tree — `bakeRamdisk()` builds it and installs the
+  resulting `.deb` rather than hand-staging its contents.
+- `Blackb0x/Debs/` — loose `.deb` packages the bake consumes: the source for both
+  the bundled local repo and the apt debcache staged onto the ramdisk. Real
+  package archives, not loose files mirroring a destination path. The eventual
+  goal is to source these from real Cydia repos rather than checking in the
+  `.deb` bytes.
 - `dist/` — bake-all-ramdisks' output (gitignored, not checked in): one
   `<device>_<buildID>-Ramdisk.dmg` per known firmware. An entry that already
   exists is skipped; pass `--force` to rebuild. There is no staleness
-  detection: a `.sum` sidecar holding a `ramdisk/`+`Debs/` content hash used
+  detection: a `.sum` sidecar holding a content hash of the bake inputs used
   to force re-bakes automatically, and it was removed as fragile, so **after
   changing anything that affects baked output, pass `--force`**.
 - `Blackb0x/ImageKeys/` — per-firmware IPSW decryption `.keys` files, read locally by
   `IPSW.cpp` only; never shipped to the device.
+- `Blackb0x/Misc/` — bake-time data that is neither code nor a package:
+  `firmware_versions.txt`, `prebake_package_blacklist.txt`, the prebuilt `apt`
+  binaries, `dirhelper`, and `untether.bin` (see `Blackb0x/Misc/README.md`).
 - `third_party/` — every vendored dependency (see table below).
 - `docs/HISTORY.md` — the full debugging/decision log.
 
@@ -126,7 +125,7 @@ statically linked. **Forked** means: patched on our own branch, pushed, pointed 
 | `CBPatcher` | zzanehip/CBPatcher (upstream, pinned) | No — plain upstream. **Built as a separate EXECUTABLE and fork/exec'd, never linked**, same GPL-3.0 reason as `iBoot32Patcher` below: it was a static library on blackb0x's own link line until that was noticed, which the in-tree copy's missing LICENSE file helped hide. No fork needed — upstream already ships a `main()` whose CLI (`<infile> <outfile> <version> [--nosb]`, nukesb defaulting to 1) is a drop-in for the `patch_kernel()` call this used to link. The old local delta (an `#ifdef __APPLE__` around CBPatch.c's Apple-only Mach-O includes, plus `portable_macho.h` standing in for them) existed only to build on Linux and died with Linux support |
 | `iBoot32Patcher` | **regulad/iBoot32Patcher**@`blackb0x`, off zzanehip/iBoot32Patcher | Yes — two real bug fixes: `patch_kaslr()` fell off the end of a non-void function on every *successful* branch (garbage return read non-zero on x86_64, 0 on arm64, so a real macOS run treated a successful KASLR patch as a hard failure), and `iBootPatcher()` tested its `RSA` argument twice so the `debug` argument was dead and `patch_debug_enabled()` ran whenever the RSA patch was asked for. **Built as a separate EXECUTABLE and fork/exec'd, never linked** — it is GPL-3.0-or-later and blackb0x declares no license, so linking would make blackb0x a GPLv3 derivative. Do not "simplify" it back into a static library |
 
-`Blackb0x/Libraries/xpwntool.c` (in-tree, not a submodule) is sourced from
+`src/libraries/xpwntool.c` (in-tree, not a submodule) is sourced from
 `zzanehip/xpwntool-swift`, and compiles against `third_party/xpwn`'s headers
 rather than the private copies it shipped with, with one local fix: `decrypt()`'s three error paths
 (`cannot open infile` / `cannot open outfile` / `cannot duplicate file from provided
@@ -160,7 +159,8 @@ loop-mount and raw-USB device nodes, and neither applies on macOS.
   available; see `BakeRamdisk.cpp`'s caveat and `.claude/TODO.md` item 4a. For every
   `.keys` file under `Blackb0x/ImageKeys/` (i.e. every known device/firmware
   combination), it downloads that firmware's `RestoreRamDisk` component and merges
-  the `Blackb0x/ramdisk/` overlay into it, writing each result to
+  the overlay (the `xyz.regulad.blackb0x` package plus the debcache) into it,
+  writing each result to
   `dist/<device>_<buildID>-Ramdisk.dmg`. `--signed-only` restricts this to builds
   ipsw.me currently reports Apple as still signing (a small fraction of the total —
   what most real devices are actually on). The overlay is fully static (no

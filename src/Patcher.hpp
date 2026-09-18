@@ -2,14 +2,12 @@
 //  Patcher.hpp
 //  Blackb0x
 //
-//  C++/Linux port of Patcher.h/.mm. patchiBSS/patchiBEC/patchKernel are
-//  ported near-verbatim (thin wrappers around the already-portable
-//  decrypt()/iBootPatcher()/patch_kernel()). patchRamdisk is the one
-//  substantially rewritten method: the original shelled out to macOS's
-//  hdiutil (attach/detach/resize/create) and tar to build the ramdisk's
-//  filesystem contents. This port instead:
-//    1. decrypt()s the ramdisk exactly as before (Apple's own AES-CBC
-//       encryption, via the already-portable xpwntool.c).
+//  CLI port of Patcher.h/.mm. patchiBSS/patchiBEC/patchKernel are thin
+//  wrappers: decrypt() is linked, while the two GPL patch tools are
+//  fork/exec'd as separate binaries (see Patcher.cpp's own header comment).
+//  patchRamdisk is the substantial one:
+//    1. decrypt()s the ramdisk (Apple's own AES-CBC encryption, via
+//       xpwntool.c).
 //    2. Detects whether the decrypted image is UDIF-wrapped ("koly" trailer)
 //       or already a raw HFS+ partition — confirmed empirically that older
 //       (A4-era Apple TV 2/3) restore ramdisks decrypt straight to raw HFS+
@@ -17,28 +15,30 @@
 //       images third_party/xpwn's own ipsw-patch/main.c reference code
 //       assumes. Only genuinely UDIF-wrapped images go through xpwn's
 //       extractDmg() to unwrap to a raw HFS+ partition image first.
-//    3. Builds a brand-new HFS+ image at the final target size via the
-//       system `mkfs.hfsplus`, copies the ORIGINAL volume's entire tree and
-//       header identity fields (volume label, finderInfo, createDate,
-//       lastMountedVersion) into it, then loop-mounts it via the real Linux
-//       kernel `hfsplus` driver and injects every payload with ordinary
-//       `tar`/`cp`. This is the third design tried for this step — an
-//       in-memory xpwn Volume (add_hfs()/grow_hfs()) and a from-scratch
-//       userspace HFS+ writer (libhfsp) were both tried first and both hit
-//       real, reproducible data-corrupting bugs under real firmware
-//       payloads; growing the ORIGINAL volume in place (rather than
-//       building a right-sized replacement) was also tried and is
-//       genuinely unsupported on Linux — see the long comment on
-//       patchRamdisk() in Patcher.cpp for the full investigation, evidence,
-//       and why this is the design that actually survives real data.
+//    3. Builds the volume and injects every payload via `hdiutil`.
 //    4. Writes the modified image back out, overwriting the decrypted file
-//       in place (replaces `hdiutil detach`) — rewrapped via buildDmg() only
-//       if step 2 found it UDIF-wrapped to begin with; otherwise written as
-//       raw bytes, matching what decrypt() actually produced.
+//       in place — rewrapped via buildDmg() only if step 2 found it
+//       UDIF-wrapped to begin with; otherwise written as raw bytes, matching
+//       what decrypt() actually produced.
 //    5. decrypt()s (re-encrypts) exactly as before.
-//  Because step 3 loop-mounts a device node and preserves arbitrary file
-//  ownership (setuid binaries, etc.) via `cp -a`, this function needs
-//  CAP_SYS_ADMIN and CAP_CHOWN — the calling process must run as root.
+//  Needs root, because step 3 preserves arbitrary file ownership (setuid
+//  binaries, etc.).
+//
+//  HISTORY, because it explains a constraint that still applies: this step
+//  used to have a second, Linux implementation that built a fresh volume with
+//  `mkfs.hfsplus` and loop-mounted it via the kernel `hfsplus` driver. That
+//  was the third design tried there — an in-memory xpwn Volume
+//  (add_hfs()/grow_hfs()) and a from-scratch userspace HFS+ writer (libhfsp)
+//  were both tried first and both hit real, reproducible data-corrupting bugs
+//  under real firmware payloads, and growing the ORIGINAL volume in place was
+//  tried and abandoned too. It is gone with Linux support, but the finding
+//  that survives is that xpwn's and libhfsp's HFS+ WRITE paths are not
+//  trustworthy for this — don't reach for them here. See patchRamdisk()'s own
+//  comment in Patcher.cpp for the full investigation.
+//
+//  Note the loop-mount path was the VERIFIED one: it produced every dist/
+//  ramdisk and the 29/29 patch sweep. The hdiutil path above has never run
+//  against real hardware. See .claude/TODO.md item 4a.
 //
 
 #pragma once

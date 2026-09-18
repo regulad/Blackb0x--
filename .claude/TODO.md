@@ -359,7 +359,7 @@ answerable by running it there.
 ### 4b. `blackb0x-pwn`: Blackb0x's own original checkm8/SHAtter, standalone and IOKit-only
 
 Added: a new `if(APPLE)`-gated executable target (`CMakeLists.txt`,
-`Blackb0x/Source/Pwn/`), independent of both the main `blackb0x` binary's
+`src/Pwn/`), independent of both the main `blackb0x` binary's
 gaster-based `checkm8Attempt()` and of gaster itself. Ports
 `DeviceManager.m`'s original `+SHAtter:`/`+checkm8:` (deleted from the
 tree in `907b64b`, recovered from git history — see `Checkm8Pwn.c`'s own
@@ -398,7 +398,7 @@ that's now happened.
 ## 5. Pre-patch firmware components ahead of time, instead of after device enumeration
 
 **Partly done** — the non-ramdisk half now has a tool:
-`bake-all-bootloaders` (`Blackb0x/Source/BakeAllBootloaders.cpp`) downloads
+`bake-all-bootloaders` (`src/BakeAllBootloaders.cpp`) downloads
 and patches iBSS/iBEC/KernelCache/DeviceTree ahead of time for every
 `(device, buildID)` under `Blackb0x/ImageKeys/`, writing
 `dist/bootchain/<device>_<buildID>/`. It shares `Patcher.cpp` with

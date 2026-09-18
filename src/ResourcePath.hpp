@@ -30,23 +30,23 @@ std::string resolveRamdiskPath();
 std::string resolveImageKeyPath(const std::string& relativePath);
 
 // Resolves the path to the `blackb0x-pwn` binary — this project's one and
-// only pwntool, built on every platform (see CMakeLists.txt, and
-// docs/HISTORY.md for why the vendored `gaster` that used to sit beside it
-// is gone): $BLACKB0X_PWN if set, otherwise the "blackb0x-pwn" alongside
-// blackb0x's own executable (via /proc/self/exe), which is reliable
+// only pwntool (see CMakeLists.txt, and docs/HISTORY.md for why the vendored
+// `gaster` that used to sit beside it is gone): $BLACKB0X_PWN if set,
+// otherwise the "blackb0x-pwn" alongside
+// blackb0x's own executable, which is reliable
 // regardless of the current working directory the CLI happens to be invoked
 // from — unlike resolveRamdiskPath() above, a CWD-relative fallback would
 // break as soon as someone runs it from outside the build tree.
 std::string resolvePwnPath();
 
 // Resolves the path to the `bake-all-ramdisks` binary (see CMakeLists.txt --
-// built as its own executable, landing alongside blackb0x itself; Linux-only
-// for now, see that target's own comment there): $BLACKB0X_BAKE_ALL_RAMDISKS
+// built as its own executable, landing alongside blackb0x itself):
+// $BLACKB0X_BAKE_ALL_RAMDISKS
 // if set, otherwise "bake-all-ramdisks" alongside blackb0x's own executable,
 // same resolution strategy as resolvePwnPath() above.
 // Used by Cli.cpp to self-bake a missing/stale dist/ ramdisk on demand
 // instead of requiring a separate manual `sudo ./bake-all-ramdisks` step
-// first -- see canSelfBakeRamdisk() there for when that's actually attempted.
+// first -- unconditionally, since baking needs neither root nor a mount.
 std::string resolveBakeAllRamdisksPath();
 
 // Resolves the path to the `iBoot32Patcher` binary (see CMakeLists.txt --

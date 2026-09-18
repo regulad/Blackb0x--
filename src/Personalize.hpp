@@ -12,7 +12,7 @@
 //  requirement is back in full force. Implemented via libtatsu (the same
 //  TSS client library idevicerestore itself now uses, vendored as
 //  third_party/libtatsu) for the request/response, plus
-//  Blackb0x/Libraries/idevicerestore_img3.c (also lifted directly from
+//  src/libraries/idevicerestore_img3.c (also lifted directly from
 //  idevicerestore) for stitching the returned ticket into the
 //  already-downloaded, still-encrypted img3 file -- per AGENTS.md's own
 //  "prefer adapting an existing, battle-tested library over hand-rolling

@@ -12,7 +12,7 @@
 //  and nothing it doesn't.
 //
 
-#include "../Source/ResourcePath.hpp"
+#include "../ResourcePath.hpp"
 
 #include <cstdio>
 #include <cstdlib>

@@ -2,7 +2,7 @@
 //  libplist_compat.c
 //  Blackb0x
 //
-//  --stock-securerom's TSS personalization (Blackb0x/Source/Personalize.cpp)
+//  --stock-securerom's TSS personalization (src/Personalize.cpp)
 //  links libtatsu.a (third_party/libtatsu), whose own tss.c genuinely
 //  calls a handful of newer libplist convenience functions that this
 //  project's historically-pinned libplist (deps::plist,

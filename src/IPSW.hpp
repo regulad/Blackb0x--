@@ -2,7 +2,7 @@
 //  IPSW.hpp
 //  Blackb0x
 //
-//  C++/Linux port of IPSW.h/.mm. Replaces IPSW_Fetch's NSURLSession-based
+//  CLI port of IPSW.h/.mm. Replaces IPSW_Fetch's NSURLSession-based
 //  networking with libcurl, and its NSDictionary-based .keys file parsing
 //  with libplist's C API directly. The IPSW.me API call's response is a
 //  plain-text URL string (confirmed by how the original consumed it — not

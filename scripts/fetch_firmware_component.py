@@ -14,7 +14,7 @@ Consolidates everything learned doing this by hand once:
   - Blackb0x/ImageKeys/<device>/<device>_<buildID>.keys stores each
     component's [IV, KEY] in that ORDER (array index 0 = IV, index 1 = KEY)
     — this is easy to get backwards (we did, once) since both are just hex
-    strings with no label. Matches Blackb0x/Source/IPSW.cpp's own parsing.
+    strings with no label. Matches src/IPSW.cpp's own parsing.
   - Components are IMG3-wrapped: xpwntool needs two passes — one with
     -k/-iv/-decrypt to decrypt the IMG3 container in place, then a second
     plain pass (no flags) to unwrap the IMG3 envelope down to the raw
@@ -152,8 +152,8 @@ def find_component_path(manifest_bytes, component):
 
 def load_key_iv(device, build_id, component):
     """Blackb0x/ImageKeys/<device>/<device>_<buildID>.keys — each component
-    is a 2-element array: [IV, KEY], in that order (see Blackb0x/Source/
-    IPSW.cpp's keysForDevice(), which this mirrors exactly)."""
+    is a 2-element array: [IV, KEY], in that order (see src/IPSW.cpp's
+    keysForDevice(), which this mirrors exactly)."""
     path = os.path.join(IMAGEKEYS_DIR, device, f"{device}_{build_id}.keys")
     with open(path, "rb") as f:
         root = plistlib.load(f)

@@ -99,7 +99,7 @@ fresh clone + build, not just assumed):
 ### The pwntool: `blackb0x-pwn`
 
 `blackb0x` runs the checkm8 exploit by shelling out to `blackb0x-pwn` (see
-`Blackb0x/Source/Pwn/`), a second executable built on every platform. It runs
+`src/Pwn/`), a second executable built on every platform. It runs
 this project's own original checkm8/SHAtter exploit directly over
 libirecovery's native IOKit backend. There is no choice to make and no flag to
 pass.

@@ -40,9 +40,8 @@ std::string resolveImageKeyPath(const std::string& relativePath) {
 // binaryName, resolved via PATH at exec time).
 static std::string resolveOwnExecutableDir() {
     char exePath[PATH_MAX];
-    // No /proc on Darwin, so this is _NSGetExecutablePath() rather than a
-    // readlink("/proc/self/exe"). That call may hand back a path containing
-    // symlinks, hence the realpath() pass.
+    // _NSGetExecutablePath() may hand back a path containing symlinks,
+    // hence the realpath() pass.
     uint32_t size = sizeof(exePath);
     bool haveExePath = (_NSGetExecutablePath(exePath, &size) == 0);
     if (haveExePath) {

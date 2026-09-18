@@ -2,7 +2,7 @@
 //  IPSWDownloader.hpp
 //  Blackb0x
 //
-//  C++/Linux port of IPSWDownloader.h/.mm. Replaces FragmentDownloader's
+//  CLI port of IPSWDownloader.h/.mm. Replaces FragmentDownloader's
 //  fixed 5-slot design (dlone..dlfive), which only existed to drive 5
 //  parallel NSProgressIndicator widgets, with one FragmentDownloader
 //  instance per in-flight download whose progress is reported through a
@@ -48,5 +48,5 @@ private:
 
 // Default local storage root for downloaded IPSW components — replaces the
 // original's hardcoded "/Users/<name>/Documents/Blackb0x" with an
-// XDG-respecting Linux default.
+// XDG-respecting default.
 std::string ipswDataRoot();

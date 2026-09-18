@@ -3374,10 +3374,12 @@ transfer *delivers*; `blackb0x-pwn`'s is refused). That contrast is already
 measured and written down in the section above, so deleting the code does not
 delete the finding.
 
-Deleting the fork does mean `git submodule update --init` will fail for any commit
-before this one, since `.gitmodules` there still points at `regulad/gaster`. That
-is the accepted cost of the cleanup; anyone bisecting that far back can drop the
-submodule line locally.
+The fork was **archived, not deleted** (`regulad/gaster`, read-only as of
+2026-09-18). That matters more than it sounds: an archived GitHub repository is
+still public and still cloneable, so `git submodule update --init` keeps working
+for every commit before this one, and the twelve instrumentation commits stay
+readable. Deleting it would have broken both, since `.gitmodules` on those commits
+still points at that URL and no local copy of the fork survives on any dev machine.
 
 The open question is unchanged and does not involve gaster: **what the overwrite
 transfer does on a working macOS run.** See the tcpdump instructions in the

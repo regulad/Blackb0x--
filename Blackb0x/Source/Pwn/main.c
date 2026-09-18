@@ -47,7 +47,18 @@ static void printUsage(const char* argv0) {
         "      macOS original; lower it to fail fast while sweeping.\n"
         "  DEBUG_IGNORE_GROOM_ERRORS\n"
         "      Report heap-groom requests that answer unexpectedly instead of\n"
-        "      aborting the run. Unset by default (the macOS behaviour).\n",
+        "      aborting the run. Unset by default (the macOS behaviour).\n"
+        "  DEBUG_TRACE_TRANSFERS\n"
+        "      Print a table of every control transfer the run made, after it\n"
+        "      finishes: request fields, return value, how many bytes the host\n"
+        "      controller believes moved (kept even on a stall or timeout, which\n"
+        "      neither USB backend's ordinary wrapper does), and elapsed\n"
+        "      microseconds. Buffered -- nothing is printed while the exploit is\n"
+        "      running, since a write() between the bug setup and the overwrite\n"
+        "      would land inside the window being measured.\n"
+        "      This exists because macOS will not give up the wire: its USB\n"
+        "      capture interfaces need SIP fully disabled and are reported broken\n"
+        "      on 15.6.1+ regardless. Run this on both platforms and diff.\n",
         argv0);
 }
 

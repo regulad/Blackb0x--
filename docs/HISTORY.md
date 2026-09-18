@@ -3877,3 +3877,62 @@ each was one sample of a race, so that is weak evidence rather than a refutation
 If the target is never hit within the retry budget the run proceeds anyway and says so.
 There is no oracle to gate on, and silently not running the exploit would be worse than
 running it and reporting what happened.
+
+## Consumed-count matching is not sufficient either; and the grooming has never been verified on the wire
+
+`DEBUG_BUGSETUP_TARGET_CONSUMED=0` hit its target on the first attempt, proceeded, and
+failed exactly as before -- overwrite stalled with `moved 0`, device did not reappear
+after payload execution. So reproducing macOS's `consumed 0` is **not sufficient**, and
+that avenue is closed.
+
+Current state, stated plainly: **every observable matches between the working macOS run
+and the failing Linux run.** Consumed count, overwrite return and moved count, both
+grooming passes, per-stage timings. The only differing row, `payload-upload moved`, is
+downstream of the failure. Four proposed causes have now been refuted by later
+measurement (host-stack limitation, overwrite acceptance, SETUP delivery, consumed
+count). No fifth mechanism is proposed here.
+
+### The unexamined observable
+
+Everything measured so far is the *host API's* view: what `irecv_*` returned. Nobody has
+checked what the **626 grooming leaks actually do on the wire**, and there is specific
+reason to suspect them now.
+
+`usb_req_leak()` is `irecv_usb_control_transfer(..., 0x40 bytes, timeout 1ms)`, and the
+leak works precisely because the device allocates a buffer for that request and the host
+never completes it. But libusb implements a control-transfer timeout by **cancelling the
+URB** -- the same `USBDEVFS_DISCARDURB` mechanism whose behaviour at the bug setup turned
+out to be racy and non-deterministic. If some fraction of those 626 requests are
+discarded before their SETUP reaches the wire, the device allocates nothing for them and
+the heap groom is quietly incomplete. Every one of them would still report
+`LIBUSB_ERROR_TIMEOUT`, which is exactly what the trace shows, and exactly what the code
+checks for. The trace cannot tell a leak that happened from a leak that never left the
+host.
+
+IOKit's timeout path is a completion timeout on a request already submitted to the
+controller, which does not have this failure mode.
+
+This is **not** a proposed cause -- it is an observable nobody has looked at, which the
+existing instrumentation structurally cannot see, and which plausibly differs between
+the platforms for a now-demonstrated reason.
+
+### How to look
+
+`usbmon` works on Linux and `scripts/analyze_usbmon_checkm8.py`'s
+`DLT_USB_LINUX_MMAPPED` path is the half of that script that has produced every real
+measurement so far (the Darwin half remains unreachable, see above):
+
+```
+sudo tcpdump -i usbmon<BUS> -w /tmp/pwn.pcap        # bus from the kernel log: "usb 3-3" is bus 3
+DEBUG_TRACE_TRANSFERS=1 sudo -E ./build/blackb0x-pwn checkm8 --ecid <ecid>
+python3 scripts/analyze_usbmon_checkm8.py /tmp/pwn.pcap
+```
+
+The number to read is how many `0x80 0x06 wValue=0x0304 wIndex=0x040A` SETUPs actually
+appear on the bus. If it is 626, the groom is real and this is another dead end. If it is
+materially fewer, the heap was never groomed as intended and every downstream stage --
+including the overwrite that "stalls" identically on both platforms -- has been operating
+on a heap that does not match what the exploit assumes.
+
+Either answer is worth having, and unlike the macOS-side questions, this one is
+answerable on the hardware actually available.

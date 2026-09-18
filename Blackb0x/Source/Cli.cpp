@@ -71,14 +71,6 @@ void printCliUsage(const char* argv0) {
     printf("                            work on macOS no matter what has been\n");
     printf("                            tried; see README.md)\n");
 #endif
-    printf("  --dont-check-firmware-sums\n");
-    printf("                            Skip patchRamdisk()'s check that the baked\n");
-    printf("                            dist/ ramdisk still matches ramdisk/'s current\n");
-    printf("                            content (its .sum sidecar) — uses it as-is\n");
-    printf("                            even if stale. For iterating without\n");
-    printf("                            re-running bake-all-ramdisks every time; NOT\n");
-    printf("                            the default, since it can silently ship a\n");
-    printf("                            stale ramdisk.\n");
     printf("  --stock-ramdisk           DIAGNOSTIC: send the stock RestoreRamdisk exactly\n");
     printf("                            as downloaded from Apple, instead of the\n");
     printf("                            blackb0x-patched one -- to check whether a boot\n");
@@ -157,8 +149,6 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.dryRun = true;
         } else if (arg == "--no-pwn") {
             options.noPwn = true;
-        } else if (arg == "--dont-check-firmware-sums") {
-            options.dontCheckFirmwareSums = true;
         } else if (arg == "--stock-ramdisk") {
             options.stockRamdisk = true;
         } else if (arg == "--stock-recovery") {
@@ -480,10 +470,9 @@ static pid_t spawnBakeAllRamdisksBackground(const std::string& deviceModel, cons
 // the same patch* calls as a side effect of assignment).
 std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, const AppleTVDevice& device,
                                                               const std::string& buildToRequest,
-                                                              bool dontCheckFirmwareSums, bool stockRamdisk,
+                                                              bool stockRamdisk,
                                                               bool stockRecovery, bool stockFirmware,
                                                               bool stockSecurerom) {
-    patcher.dontCheckFirmwareSums = dontCheckFirmwareSums;
 
     printf("Downloading firmware for %s %s...\n", device.deviceModel.c_str(), buildToRequest.c_str());
     IpswFetch fetcher;
@@ -540,7 +529,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // wall-clock time to finish.
     bool needsRealRamdisk = !stockRamdisk && !stockFirmware;
     pid_t backgroundBakePid = -1;
-    if (needsRealRamdisk && ramdiskBakeNeeded(device.deviceModel, manifest->realBuildID, dontCheckFirmwareSums)) {
+    if (needsRealRamdisk && ramdiskBakeNeeded(device.deviceModel, manifest->realBuildID)) {
         if (canSelfBakeRamdisk()) {
             printf(
                 "No up-to-date baked ramdisk for %s %s -- building it now in the background while the rest of "
@@ -1210,7 +1199,7 @@ int runCli(const CliOptions& options) {
     }
 
     auto components = downloadAndPatchComponents(patcher, device, buildToRequest,
-                                                   options.dontCheckFirmwareSums, options.stockRamdisk,
+                                                   options.stockRamdisk,
                                                    options.stockRecovery, options.stockFirmware,
                                                    options.stockSecurerom);
     if (!components) {

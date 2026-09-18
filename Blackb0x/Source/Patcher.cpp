@@ -101,21 +101,19 @@ static std::string outputPathFor(const std::string& path) { return withoutExtens
 
 // See Patcher.hpp's own comment on why this is a free function, not a
 // Patcher method -- patchRamdisk() below is just its first caller.
-bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildID, bool dontCheckFirmwareSums) {
+bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildID) {
     // Matches bake-all-ramdisks' own naming convention exactly (see
     // BakeAllRamdisks.cpp) -- both sides need to agree on this without a
     // round trip, hence the plain, duplicated (not shared-header) format
     // string on each side.
+    //
+    // Existence is the whole check now. There used to be a .sum sidecar
+    // carrying a content fingerprint of the ramdisk/ overlay, compared here
+    // to catch "someone edited ramdisk/ and forgot to re-bake" -- that whole
+    // system is gone (fragile, and it only ever guessed at staleness). Use
+    // bake-all-ramdisks --force to rebuild an output that already exists.
     const std::string patchedDMG = "dist/" + deviceModel + "_" + buildID + "-Ramdisk.dmg";
-    if (!fs::exists(patchedDMG)) return true;
-    if (dontCheckFirmwareSums) return false;
-
-    std::string storedHash;
-    {
-        std::ifstream sumIn(sumFileFor(patchedDMG));
-        if (sumIn) std::getline(sumIn, storedHash);
-    }
-    return storedHash != ramdiskOverlayContentHash();
+    return !fs::exists(patchedDMG);
 }
 
 // ---------------------------------------------------------------------------
@@ -592,31 +590,11 @@ bool Patcher::patchRamdisk() {
         std::exit(1);
     }
 
-    // Refuse a stale artifact rather than silently uploading old content:
-    // if ramdisk/ has been edited since this was baked, its .sum sidecar
-    // (written by bake-all-ramdisks) won't match the overlay's current
-    // hash. --dont-check-firmware-sums bypasses this entirely (see
-    // dontCheckFirmwareSums's own comment in Patcher.hpp). Same check
-    // ramdiskBakeNeeded() above makes (Cli.cpp's downloadAndPatchComponents()
-    // already ran it once, before this dist/ entry may even have existed,
-    // to decide whether to kick off a background bake) -- re-run here rather
-    // than trusted from that earlier call, since this is the actual
-    // authoritative gate on using patchedDMG at all, and a background bake
-    // may have just changed the answer.
-    if (dontCheckFirmwareSums) {
-        fprintf(stderr,
-                "patchRamdisk: --dont-check-firmware-sums set — using %s as-is without checking "
-                "whether it still matches the current ramdisk/ overlay.\n",
-                patchedDMG.c_str());
-    } else if (ramdiskBakeNeeded(deviceModel_, buildID_, /*dontCheckFirmwareSums=*/false)) {
-        fprintf(stderr,
-                "patchRamdisk: %s is stale — the ramdisk/ overlay has changed since this was baked.\n"
-                "Re-run this (as root) before using blackb0x against this firmware:\n"
-                "  sudo ./bake-all-ramdisks\n"
-                "Or pass --dont-check-firmware-sums to use it anyway.\n",
-                patchedDMG.c_str());
-        return false;
-    }
+    // There is no staleness check here any more. The .sum sidecar that used
+    // to carry a fingerprint of the ramdisk/ overlay -- compared here to
+    // catch "someone edited ramdisk/ and forgot to re-bake" -- is gone
+    // along with the rest of that system. Existence is the gate; if this
+    // dist/ entry is out of date, re-run `sudo ./bake-all-ramdisks --force`.
 
     outputs_.ramdisk = patchedDMG;
     checkPatching();
@@ -625,7 +603,7 @@ bool Patcher::patchRamdisk() {
 
 // See Patcher.hpp's own comment on why this exists. Deliberately minimal
 // compared to patchRamdisk()/bake-all-ramdisks' own bakeRamdisk(): no
-// dist/ lookup, no .sum check, no HFS+/loop-mount work at all -- just
+// dist/ lookup, no HFS+/loop-mount work at all -- just
 // decrypt()'s the freshly-downloaded RestoreRamdisk exactly the way
 // patchiBSS()/patchiBEC() decrypt their own components, and sends that
 // straight through. This is byte-for-byte what a real, unmodified Apple

@@ -88,12 +88,11 @@ original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
   `ramdisk/files/cydia/` above: source these from real Cydia repos rather than
   checking in the `.deb` bytes.
 - `dist/` — bake-all-ramdisks' output (gitignored, not checked in): one
-  `<device>_<buildID>-Ramdisk.dmg` per known firmware, plus a `.sum` sidecar per
-  entry recording a `Blackb0x/ramdisk/` + `Blackb0x/Debs/` content hash at bake
-  time (see `ResourcePath`'s `ramdiskOverlayContentHash()`/`sumFileFor()`) —
-  re-running bake-all-ramdisks after editing either re-bakes anything whose
-  sidecar no longer matches, and `Patcher::patchRamdisk()` refuses a `dist/`
-  entry whose sidecar is stale rather than silently uploading old content.
+  `<device>_<buildID>-Ramdisk.dmg` per known firmware. An entry that already
+  exists is skipped; pass `--force` to rebuild. There is no staleness
+  detection: a `.sum` sidecar holding a `ramdisk/`+`Debs/` content hash used
+  to force re-bakes automatically, and it was removed as fragile, so **after
+  changing anything that affects baked output, pass `--force`**.
 - `Blackb0x/ImageKeys/` — per-firmware IPSW decryption `.keys` files, read locally by
   `IPSW.cpp` only; never shipped to the device.
 - `third_party/` — every vendored dependency (see table below).

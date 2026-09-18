@@ -48,10 +48,10 @@
 //
 //  --force re-patches targets whose output directory already exists.
 //  Without it, an already-complete target is skipped, which makes repeated
-//  runs cheap. There is no content-hash sidecar here (unlike the ramdisk's
-//  .sum): the inputs are Apple's immutable per-build components, so the
-//  only thing that changes output is this project's own patch code, and
-//  --force is the explicit way to say "I changed that".
+//  runs cheap. There is no staleness detection: the inputs are Apple's
+//  immutable per-build components, so the only thing that changes output is
+//  this project's own patch code, and --force is the explicit way to say
+//  "I changed that". bake-all-ramdisks works the same way.
 //
 //  --stop-early aborts on the first target that fails instead of working
 //  through the whole set. Off by default: a patch that fails on ONE build

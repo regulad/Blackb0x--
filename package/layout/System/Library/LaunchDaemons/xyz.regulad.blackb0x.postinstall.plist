@@ -7,12 +7,12 @@
     <key>ProgramArguments</key>
       <array>
 		<string>/bin/bash</string>
-		<string>/var/mobile/.blackb0x/postinstall.sh</string>
+		<string>/var/.blackb0x/postinstall.sh</string>
       </array>
     <key>StandardErrorPath</key>
-      <string>/var/mobile/.blackb0x/postinstall.err.log</string>
+      <string>/var/.blackb0x/postinstall.err.log</string>
     <key>StandardOutPath</key>
-      <string>/var/mobile/.blackb0x/postinstall.out.log</string>
+      <string>/var/.blackb0x/postinstall.out.log</string>
     <key>RunAtLoad</key>
       <true/>
     <key>UserName</key>

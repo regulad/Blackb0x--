@@ -74,7 +74,7 @@ in the order it actually runs:
    `picklist.txt` so their bytes get cached like anything else, and (b)
    adds their package name to `resolved_packages.txt` so `postinstall.sh`
    installs them by name too — through `Blackb0x/Misc/apt/local.list`
-   (`deb file:///var/mobile/.blackb0x/local-debs ./`, staged on-device by
+   (`deb file:///var/.blackb0x/local-debs ./`, staged on-device by
    `BakeRamdisk.cpp` at the exact same path `local-repo/` lands at), never
    through any of this project's own bake-time force-install machinery.
 3. **Decide what gets force-installed at bake time vs. left for real apt.**
@@ -188,8 +188,8 @@ if (sys_access("/mnt1/Applications/AppleTV.app/AppleTV", F_OK) != 0) {
     console_print("Not an AppleTV...\n");
     return 0;
 }
-if (sys_access("/mnt1/var/mobile/.blackb0x/install-done", F_OK) == 0) {
-    panic("/var/mobile/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
+if (sys_access("/mnt1/var/.blackb0x/install-done", F_OK) == 0) {
+    panic("/var/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
 }
 log_to_file("Merging blackb0x payload\n");
 merge_tree("/blackb0x", "/mnt1");
@@ -261,7 +261,7 @@ opportunistically instead of disabling it:
 
 Real sequence:
 
-1. Exit immediately if `/var/mobile/.blackb0x/install-done` already
+1. Exit immediately if `/var/.blackb0x/install-done` already
    exists (real signal, a UTC timestamp — not just an empty touch, and
    not the pre-rewrite tool's old `/var/mobile/Media/.blackb0x` marker).
 2. Wait at least 60 real seconds since boot before touching `apt-get` —
@@ -292,7 +292,7 @@ Real sequence:
    additions), and while `dist-upgrade` genuinely does exist in it, plain
    `upgrade` only touches packages already installed, never demanding
    more from the network than what's already staged.
-7. Write `/var/mobile/.blackb0x/install-done` as the last thing the
+7. Write `/var/.blackb0x/install-done` as the last thing the
    script does.
 
 ## Ramdisk sizing — not addressed in the original plan at all

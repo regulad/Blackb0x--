@@ -570,12 +570,12 @@ static void fixup_etasonuntether_rtbuddyd(void) {
  * itself has since written at those exact same paths (up to and including
  * dpkg's own binary, if apt ever replaces it) with this ramdisk's stale,
  * bake-time copies — silent, hard-to-diagnose corruption of a live package
- * database, not a merely-redundant no-op. /var/mobile/.blackb0x itself
+ * database, not a merely-redundant no-op. /var/.blackb0x itself
  * isn't the right signal for that, though — this merge is what CREATES
  * that directory in the first place (postinstall.sh lands inside it), so
  * it already exists after the very first ramdisk run, before
  * postinstall.sh has done any real apt work at all against a repeat boot
- * of this same ramdisk. /var/mobile/.blackb0x/install-done is the real
+ * of this same ramdisk. /var/.blackb0x/install-done is the real
  * signal: postinstall.sh itself only writes it, with a timestamp, at the
  * end of a genuinely successful apt-driven install (see Misc/postinstall.sh)
  * — its presence means real dpkg state now exists to protect, and the safe
@@ -586,8 +586,8 @@ static int do_install(void) {
         return 0;
     }
 
-    if (sys_access("/mnt1/var/mobile/.blackb0x/install-done", F_OK) == 0) {
-        panic("/var/mobile/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
+    if (sys_access("/mnt1/var/.blackb0x/install-done", F_OK) == 0) {
+        panic("/var/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
     }
 
     log_to_file("Merging blackb0x payload\n");

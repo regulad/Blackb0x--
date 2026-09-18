@@ -451,7 +451,7 @@ static bool runPodman(const std::vector<std::string>& podmanArgs) {
 // The binary is identical for every firmware target (no per-firmware
 // customization at all), so BakeAllRamdisks.cpp's main() calls this exactly
 // once, before its per-firmware loop, and hands the resulting path to every
-// bakeRamdisk() call — same as it already does for ramdiskOverlayContentHash().
+// bakeRamdisk() call.
 // Not this function's own job to guard against being called more than
 // once; it just builds, every time it's asked to.
 std::string buildEntrypointBinary() {
@@ -1927,11 +1927,17 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
     allOk &= stageAptListsCache(blackb0xRoot, result.aptListsDir);
 
     // local_only_debs.txt's real apt repo (Packages index + the .debs it
-    // describes) — staged at the exact path Blackb0x/Misc/apt/local.list's
-    // `deb file:///var/mobile/.blackb0x/local-debs ./` source expects, so
-    // the real device's own apt-get can resolve these by name too.
+    // describes) — staged at the exact path package/layout's local.list
+    // (`deb file:///var/.blackb0x/local-debs ./`) expects, so the real
+    // device's own apt-get can resolve these by name too.
+    //
+    // This is xyz.regulad.blackb0x PACKAGE content, not debcache: the local
+    // repo ships with the package, while the debcache
+    // (private/var/cache/apt/archives + apt-lists, staged above) is the
+    // native apt cache the baker fills with whatever it could not usefully
+    // pre-bake. Two different things that both happen to be .debs.
     if (!result.localRepoDir.empty()) {
-        allOk &= stageDirectoryTree(blackb0xRoot, "var/mobile/.blackb0x/local-debs", result.localRepoDir, kUidMobile,
+        allOk &= stageDirectoryTree(blackb0xRoot, "var/.blackb0x/local-debs", result.localRepoDir, kUidMobile,
                                      kGidStaff, 0644);
     }
 
@@ -2380,7 +2386,7 @@ static bool stageVersionBranch(const fs::path& blackb0xRoot, const std::string& 
 // the one asset whose content actually depends on what this specific bake
 // resolved, not just a static checked-in file.
 static bool stagePostinstallScript(const fs::path& blackb0xRoot, const std::vector<std::string>& resolvedPackages) {
-    std::string srcPath = resolveMiscPath("postinstall.sh");
+    std::string srcPath = resolvePackagePath("var/.blackb0x/postinstall.sh");
     std::ifstream in(srcPath, std::ios::binary);
     if (!in) {
         fprintf(stderr, "bakeRamdisk: WARNING: missing source %s — not staging postinstall.sh\n", srcPath.c_str());
@@ -2405,7 +2411,7 @@ static bool stagePostinstallScript(const fs::path& blackb0xRoot, const std::vect
     }
     content.replace(pos, placeholder.size(), packagesLiteral);
 
-    fs::path destPath = blackb0xRoot / "var/mobile/.blackb0x/postinstall.sh";
+    fs::path destPath = blackb0xRoot / "var/.blackb0x/postinstall.sh";
     ensureParentDirs(blackb0xRoot, destPath);
     std::ofstream out(destPath, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -2482,7 +2488,7 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
     // verifiable if the live repo is ever re-enabled by restoring the .list.
     stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/net.tihmstar.gpg", resolveMiscPath("apt/net.tihmstar.gpg"),
               0, 0, 0644);
-    // Points at var/mobile/.blackb0x/local-debs, which stageDebcache()
+    // Points at var/.blackb0x/local-debs, which stageDebcache()
     // below only actually populates if this bake's debcache run had
     // local-only entries — an always-present but sometimes-empty source
     // is harmless (apt just finds nothing there), unlike a source pointing

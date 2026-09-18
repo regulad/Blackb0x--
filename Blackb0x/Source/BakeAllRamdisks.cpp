@@ -13,15 +13,14 @@
 //  at a time — blackb0x itself never runs this; Patcher::patchRamdisk()
 //  just checks whether the dist/ entry it needs already exists.
 //
-//  Each dist/ entry gets a sidecar dist/<...>-Ramdisk.dmg.sum (see
-//  ResourcePath's sumFileFor()/ramdiskOverlayContentHash()) recording a
-//  fingerprint of Blackb0x/ramdisk/ at bake time — re-running this after
-//  editing ramdisk/ re-bakes anything whose sidecar no longer matches,
-//  instead of trusting a stale already-baked file. Patcher::patchRamdisk()
-//  checks the same sidecar before trusting a dist/ entry for the same
-//  reason.
+//  An already-existing dist/ entry is skipped; pass --force to rebuild it.
+//  There used to be a .sum sidecar per output holding a fingerprint of
+//  Blackb0x/ramdisk/, so that editing the overlay automatically forced a
+//  re-bake. That whole system is gone — it was fragile and only ever
+//  approximated staleness — so after changing anything that affects baked
+//  output, pass --force.
 //
-//  Usage: sudo ./bake-all-ramdisks [--signed-only] [--device <model>] [--build <buildID>]
+//  Usage: sudo ./bake-all-ramdisks [--signed-only] [--device <model>] [--build <buildID>] [--force]
 //  (needs CAP_SYS_ADMIN/CAP_CHOWN, same as bakeRamdisk() itself — see its
 //  header comment for why)
 //
@@ -94,11 +93,14 @@ static std::vector<std::pair<std::string, std::string>> knownFirmwareTargets() {
 
 int main(int argc, char** argv) {
     bool signedOnly = false;
+    bool force = false;
     std::string deviceFilter;
     std::string buildFilter;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--signed-only") == 0) {
             signedOnly = true;
+        } else if (strcmp(argv[i], "--force") == 0) {
+            force = true;
         } else if (strcmp(argv[i], "--device") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "bake-all-ramdisks: --device requires a value (e.g. --device AppleTV3,2)\n");
@@ -113,7 +115,9 @@ int main(int argc, char** argv) {
             buildFilter = argv[++i];
         } else {
             fprintf(stderr, "bake-all-ramdisks: unrecognized argument %s\n", argv[i]);
-            fprintf(stderr, "usage: bake-all-ramdisks [--signed-only] [--device <model>] [--build <buildID>]\n");
+            fprintf(stderr,
+                    "usage: bake-all-ramdisks [--signed-only] [--device <model>] [--build <buildID>]\n"
+                    "                         [--force]\n");
             return 2;
         }
     }
@@ -181,11 +185,6 @@ int main(int argc, char** argv) {
     fs::create_directories("dist");
     printf("Found %zu known (device, firmware) combinations.\n", targets.size());
 
-    // Computed once — identical for every firmware in this run. Compared
-    // against each dist/ entry's .sum sidecar (see ResourcePath.hpp) so
-    // editing ramdisk/ and re-running this picks up the change instead of
-    // trusting a stale already-baked file.
-    std::string overlayHash = ramdiskOverlayContentHash();
 
     // Built once — same binary gets spliced into every firmware's ramdisk
     // (see BakeRamdisk.hpp's bakeRamdisk() comment), so there's no reason
@@ -225,21 +224,19 @@ int main(int argc, char** argv) {
         const std::string& buildID = targets[i].second;
         std::string label = device + " " + buildID;
         std::string outputPath = "dist/" + device + "_" + buildID + "-Ramdisk.dmg";
-        std::string sumPath = sumFileFor(outputPath);
 
         printf("[%zu/%zu] %s: ", i + 1, targets.size(), label.c_str());
         fflush(stdout);
 
-        if (fs::exists(outputPath)) {
-            std::string storedHash;
-            std::ifstream sumIn(sumPath);
-            if (sumIn) std::getline(sumIn, storedHash);
-            if (storedHash == overlayHash) {
-                printf("already baked, overlay unchanged, skipping\n");
-                succeeded++;
-                continue;
-            }
-            printf("overlay changed since last bake, re-bakeing...\n");
+        // Existence is the whole check. There used to be a .sum sidecar
+        // holding a content fingerprint of the ramdisk/ overlay, compared
+        // here so an edit to ramdisk/ forced a re-bake -- that system is gone
+        // (fragile, and only ever an approximation of staleness). --force is
+        // the explicit way to say "I changed something, rebuild it".
+        if (!force && fs::exists(outputPath)) {
+            printf("already baked, skipping (use --force to rebuild)\n");
+            succeeded++;
+            continue;
         }
 
         IpswFetch fetcher;
@@ -353,9 +350,6 @@ int main(int argc, char** argv) {
             fprintf(stderr, "bake-all-ramdisks: %s: bakeRamdisk() failed — see stderr above\n", label.c_str());
             return 1;
         }
-
-        std::ofstream sumOut(sumPath, std::ios::trunc);
-        sumOut << overlayHash << "\n";
 
         if (sizeWarning) {
             printf("OK (with size warning, see stderr) -> %s\n", outputPath.c_str());

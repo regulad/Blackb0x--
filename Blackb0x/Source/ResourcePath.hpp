@@ -71,7 +71,7 @@ std::string resolveIBoot32PatcherPath();
 // "Blackb0x/Debs" relative to the current working directory. bakeRamdisk()'s
 // stageDebcache() (BakeRamdisk.cpp) copies exactly the subset
 // scripts/build_deb_cache.py resolved from here into
-// /blackb0x/var/mobile/.blackb0x/debs/ at bake time — not the whole
+// /blackb0x/var/.blackb0x/debs/ at bake time — not the whole
 // (append-only, never-pruned) directory. The eventual goal is to source
 // these from real Cydia repos directly rather than checking them in at all.
 std::string resolveDebsPath();
@@ -110,20 +110,3 @@ std::string resolveEntrypointPath();
 // input path (BakeRamdisk.cpp's own internal working file — the final
 // output path is a caller-supplied parameter, not derived from this).
 std::string decryptedDMGFor(const std::string& path);
-
-// A stable content fingerprint of everything bakeRamdisk() merges in — the
-// ramdisk/ overlay tree and the Debs/ .deb files — covering every regular
-// file's relative path + content and every symlink's relative path +
-// target, folded together (order-independent of directory traversal order:
-// entries are sorted first). Not a cryptographic hash — this is purely a
-// change-detection signal (see sumFileFor() below), not a security
-// control, so a simple non-cryptographic hash is enough and avoids pulling
-// in a crypto library just for this.
-std::string ramdiskOverlayContentHash();
-
-// The sidecar path bake-all-ramdisks writes ramdiskOverlayContentHash()'s
-// value to after a successful bake, and Patcher::patchRamdisk() reads back
-// to confirm a dist/ entry still matches the current ramdisk/ overlay
-// before trusting it — catches "someone edited ramdisk/ and forgot to
-// re-run bake-all-ramdisks" instead of silently shipping stale content.
-std::string sumFileFor(const std::string& outputPath);

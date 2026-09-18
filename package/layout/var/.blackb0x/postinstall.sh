@@ -5,23 +5,23 @@
 # target design is .claude/NEO_FLOW.md.
 #
 # Run directly by xyz.regulad.blackb0x's LaunchDaemon plist as
-# `/bin/bash /var/mobile/.blackb0x/postinstall.sh` — bash, not sh. `set -ex`
+# `/bin/bash /var/.blackb0x/postinstall.sh` — bash, not sh. `set -ex`
 # below is the only logging this script does itself: the plist's own
 # StandardOutPath/StandardErrorPath redirect this whole script's stdout and
 # stderr (every traced command plus every command's own output) straight to
-# /var/mobile/.blackb0x/postinstall.out.log and postinstall.err.log
+# /var/.blackb0x/postinstall.out.log and postinstall.err.log
 # respectively — two separate files, not one shared between both, since
 # launchd has a real, long-documented bug where pointing both keys at the
 # same path can silently drop or interleave one stream. No need to
 # hand-echo progress messages to a log file line by line either way.
 set -ex
 
-# One-shot: /var/mobile/.blackb0x/install-done is written at the very end
+# One-shot: /var/.blackb0x/install-done is written at the very end
 # of a successful run, with a timestamp. Its presence means the real,
 # apt-driven install already completed — not just that this LaunchDaemon
 # fired (it runs on every boot, RunAtLoad), so skip straight out rather
 # than re-running the whole install pass for nothing.
-if [ -f /var/mobile/.blackb0x/install-done ]; then
+if [ -f /var/.blackb0x/install-done ]; then
 	exit 0
 fi
 
@@ -155,6 +155,6 @@ apt-get autoremove -y --allow-unauthenticated
 # convention onto another's, which is exactly the mistake an earlier pass
 # here made for nitoTV. Nothing to do here at all.
 
-# /var/mobile/.blackb0x already exists — entrypoint.c creates it on first
+# /var/.blackb0x already exists — entrypoint.c creates it on first
 # install, and this script only ever runs after that.
-date -u "+%Y-%m-%dT%H:%M:%SZ" > /var/mobile/.blackb0x/install-done
+date -u "+%Y-%m-%dT%H:%M:%SZ" > /var/.blackb0x/install-done

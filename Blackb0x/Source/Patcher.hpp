@@ -53,16 +53,12 @@
 
 #include "IPSW.hpp"
 
-// Whether dist/<deviceModel>_<buildID>-Ramdisk.dmg needs a fresh bake:
-// either it doesn't exist at all yet, or (unless dontCheckFirmwareSums
-// bypasses this) its .sum sidecar doesn't match ramdiskOverlayContentHash()
-// -- the exact same two checks Patcher::patchRamdisk() itself makes before
-// trusting that file, factored out here so Cli.cpp's
+// Whether dist/<deviceModel>_<buildID>-Ramdisk.dmg needs a fresh bake --
+// i.e. whether it exists at all. Factored out here so Cli.cpp's
 // downloadAndPatchComponents() can ask the same question up front (before a
 // device's own Patcher instance has even loaded keys for it) to decide
-// whether to kick off a background bake-all-ramdisks run. See either call
-// site's own comment for how the answer is used.
-bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildID, bool dontCheckFirmwareSums);
+// whether to kick off a background bake-all-ramdisks run.
+bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildID);
 
 struct PatchedComponents {
     std::optional<std::string> iBSS;
@@ -245,14 +241,6 @@ public:
     // it, and it still needs to know which individual outputs landed.
     const PatchedComponents& components() const { return outputs_; }
 
-    // --dont-check-firmware-sums (Cli.hpp's CliOptions): skip
-    // patchRamdisk()'s own .sum sidecar staleness check (see that
-    // function's comment) and use dist/<device>_<buildID>-Ramdisk.dmg as-
-    // is even if it doesn't match ramdisk/'s current content. For
-    // iterating without re-running bake-all-ramdisks every time — not a
-    // default, since it reintroduces exactly the "silently ship a stale
-    // ramdisk" failure mode the check exists to catch.
-    bool dontCheckFirmwareSums = false;
 
     // Called once every component checkPatching() requires is available
     // (replaces MainView's componentsReady:). Fired synchronously from

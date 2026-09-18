@@ -29,7 +29,6 @@ struct CliOptions {
     // spawning a pwntool again. (Was named --no-checkm8; renamed once
     // "pwntool" became the general term for gaster/blackb0x-pwn both.)
     bool noPwn = false;
-    bool dontCheckFirmwareSums = false;
     // Sends the stock RestoreRamdisk exactly as downloaded from Apple
     // instead of the blackb0x-patched dist/ one -- a diagnostic for
     // narrowing down whether a boot failure is in blackb0x's own ramdisk

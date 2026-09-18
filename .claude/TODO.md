@@ -602,7 +602,7 @@ installs, which goes through the real dpkg/apt mechanism
 at this project's own apt source, staged the exact same way as
 saurik/awkwardtv/bigboss/xbmc/net.tihmstar's — see item 9's saurik.list
 entry above for that same list/gpg pairing pattern), `postinstall.sh`
-itself (templated into `var/mobile/.blackb0x/postinstall.sh` by
+itself (templated into `var/.blackb0x/postinstall.sh` by
 `stagePostinstallScript()`), and
 `System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist` (the
 LaunchDaemon that actually runs it — already named in this project's own

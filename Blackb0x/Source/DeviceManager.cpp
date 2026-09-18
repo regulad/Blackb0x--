@@ -1461,52 +1461,56 @@ static int sendFileThenCommand(irecv_client_t client, const char* what, const st
     return 0;
 }
 
-// A real run against an AppleTV3,2 once failed mid-Ramdisk-upload with a
-// bulk short-write ("wrote 0 of 32768 bytes") at exactly packet 2049/2204
-// -- byte offset 0x4000000 (64MiB) on the nose, on a 68.9MiB ramdisk. Real
-// idevicerestore's own recovery_send_ramdisk() (recovery.c) sends a
-// "getenv ramdisk-size" (irecv_getenv(), a full command-then-read-response
-// round trip, same shape as this) right before uploading the ramdisk
-// component -- this was briefly removed on a mistaken belief that
-// idevicerestore didn't do this at all (it does, in this exact spot),
-// then re-added to match it once that was corrected.
-static void warnIfRamdiskExceedsDeviceLimit(irecv_client_t client, const std::string& path) {
-    if (!client) return;
-
-    std::error_code ec;
-    uint64_t fileSize = std::filesystem::file_size(path, ec);
-    if (ec) return;
-
-    char* value = nullptr;
-    irecv_error_t err = irecv_getenv(client, "ramdisk-size", &value);
-    if (err != IRECV_E_SUCCESS || !value || !value[0]) {
-        free(value);
-        fprintf(stderr, "warnIfRamdiskExceedsDeviceLimit: device did not report a ramdisk-size (or getenv "
-                        "unsupported on this device/firmware) -- skipping the size check\n");
-        return;
-    }
-
-    char* end = nullptr;
-    uint64_t deviceLimit = strtoull(value, &end, 0);
-    bool parsed = end != value && deviceLimit != 0;
-    if (parsed && fileSize > deviceLimit) {
-        fprintf(stderr,
-                "warnIfRamdiskExceedsDeviceLimit: %s is %llu bytes, but the device reports a ramdisk-size "
-                "limit of %llu bytes (%s) -- the upload is very likely to fail partway through once it hits "
-                "that boundary. A smaller baked ramdisk is the real fix.\n",
-                path.c_str(), (unsigned long long)fileSize, (unsigned long long)deviceLimit, value);
-    } else if (!parsed) {
-        fprintf(stderr, "warnIfRamdiskExceedsDeviceLimit: device reported ramdisk-size=\"%s\", not parseable "
-                        "as a number -- skipping the size check\n", value);
-    }
-    free(value);
-}
+// warnIfRamdiskExceedsDeviceLimit() USED TO LIVE HERE. It queried
+// `getenv ramdisk-size` right before the ramdisk upload and warned if the
+// baked ramdisk was bigger than the device's reported limit. It is gone
+// because **that variable does not exist on any device this project
+// supports**, so the check could never fire -- it took its
+// "device did not report a ramdisk-size" branch on every single run, on
+// every device, and read as a protective guard while doing nothing.
+//
+// Measured, not assumed. Both iBECs for build 10B329a were decrypted with
+// the checked-in ImageKeys and unwrapped with xpwntool, then searched:
+//
+//   AppleTV2,1 (A4, iBoot-1537.9.55)   `ramdisk-size` occurrences: 0
+//   AppleTV3,2 (A5, iBoot-1458.2)      `ramdisk-size` occurrences: 0
+//
+// That matches The Apple Wiki's own note that 32-bit iBoot has no such
+// variable: the limit there was a compiled-in kRamdiskMaxSize (0x2000000 on
+// iPhone 3GS iBoot-636.66) whose over-size path prints "Ramdisk too large".
+// Neither of our iBECs contains that string either, so even that older
+// mechanism is absent -- their only size-check strings are for Combo image,
+// Device Tree, Kernelcache, and a generic `image_load: image too large`.
+// The 256MB/512MB ramdisk-size values seen in the wild are all 64-bit
+// devices.
+//
+// Note this is NOT the reason it was removed once before. That earlier
+// removal rested on a belief that idevicerestore doesn't query the variable;
+// it does, in recovery_send_ramdisk(), and it was correctly re-added then.
+// idevicerestore only READS and LOGS the value -- it never sets it -- so on
+// 32-bit iBoot it is logging a variable that isn't there, which is harmless
+// for it and equally uninformative for us.
+//
+// Removing the check also removed the `getenv ramdisk-size` round trip from
+// the wire sequence. That is a real, if small, divergence from
+// idevicerestore's traffic, and this project has been bitten by wire-level
+// differences before (the bReq=1 `bootx`, the zero-length DFU_DNLOAD). If a
+// ramdisk upload ever regresses in a way that traffic shape could explain,
+// restoring a bare round trip here is the first thing to try.
+//
+// What replaced it: a real size limit enforced at BAKE time in
+// BakeRamdisk.cpp, where the number is knowable and the failure is cheap.
+// See that limit's own comment (and DEBUG_RAMDISK_LIMIT_MIB) for why 64MiB
+// is an empirically observed ceiling rather than anything the device tells
+// us -- a real AppleTV3,2 short-writes mid-upload at exactly 0x4000000.
 
 int DeviceManager::sendRamdisk(const std::string& Ramdisk_Path, uint64_t ecid) {
     // get_tv_patient(): same reasoning as sendiBEC() above -- this reconnect
     // follows DeviceTree's own NOTIFY_FINISH-triggered reset.
     irecv_client_t client = get_tv_patient(ecid);
-    warnIfRamdiskExceedsDeviceLimit(client, Ramdisk_Path);
+    // No ramdisk-size check here any more -- see the block comment above
+    // sendFileThenCommand() for why it could never fire on this hardware.
+    // The size limit is enforced at bake time now (BakeRamdisk.cpp).
     int result = sendFileThenCommand(client, "sendRamdisk", Ramdisk_Path, "ramdisk", false, 0, false,
                                       "getenv ramdisk-delay");
     sleep(2);
@@ -1840,7 +1844,7 @@ int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& 
         irecv_close(client);
         return -1;
     }
-    warnIfRamdiskExceedsDeviceLimit(client, *components.ramdisk);
+    // No ramdisk-size check here either -- see sendRamdisk() above.
     if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(Ramdisk)", *components.ramdisk, "ramdisk",
                                            /*bReq=*/0, "getenv ramdisk-delay")) {
         if (client) irecv_close(client);

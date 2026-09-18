@@ -341,13 +341,11 @@ static irecv_client_t get_tv_patient(uint64_t ecid, int attempts = 30) {
     return client;
 }
 
-#if defined(__APPLE__)
 // No /proc on Darwin, and proc_pidinfo()'s TASK_BASIC_INFO exposes no
-// equivalent third "genuinely uninterruptible" distinction the way Linux's
-// /proc/<pid>/status "State:" line does. `ps -o state=` is the standard
-// diagnostic here instead — BSD ps reports 'U' for uninterruptible wait,
-// same meaning as Linux's D-state. Shelled out via fork/exec+pipe (no
-// popen()/system()) to match this file's no-shell convention elsewhere.
+// equivalent "genuinely uninterruptible" distinction. `ps -o state=` is the
+// standard diagnostic here instead — BSD ps reports 'U' for uninterruptible
+// wait. Shelled out via fork/exec+pipe (no popen()/system()) to match this
+// file's no-shell convention elsewhere.
 static bool isUninterruptible(pid_t pid) {
     int outPipe[2];
     if (pipe(outPipe) != 0) return false;
@@ -377,29 +375,6 @@ static bool isUninterruptible(pid_t pid) {
     if (n <= 0) return false;
     return strchr(buf, 'U') != nullptr;
 }
-#else
-// Checks /proc/<pid>/status for "D (disk sleep)" — uninterruptible sleep,
-// the one process state SIGKILL cannot terminate; the kernel only wakes a
-// D-state task when whatever blocking call it's in returns on its own.
-// Used to give a specific, actionable diagnostic instead of a generic
-// "still running" message when a kill attempt has no visible effect.
-static bool isUninterruptible(pid_t pid) {
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
-    FILE* f = fopen(path, "r");
-    if (!f) return false;
-    char line[256];
-    bool result = false;
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "State:", 6) == 0) {
-            result = strstr(line, "(disk sleep)") != nullptr;
-            break;
-        }
-    }
-    fclose(f);
-    return result;
-}
-#endif
 
 // Manual PATH search (no shell/system() — matches this file's own
 // no-shell convention elsewhere) for whether a bare command name resolves
@@ -427,13 +402,11 @@ static bool commandExistsOnPath(const char* name) {
 // always plain `stdbuf`. On Darwin, Homebrew's `coreutils` formula installs
 // it prefixed (`gstdbuf`) to avoid shadowing the BSD toolset, unless the
 // user has separately opted into coreutils' optional "gnubin" PATH shim
-// (which then exposes it unprefixed, same as Linux) — so try the
-// unprefixed name first either way, then fall back to the prefixed one.
+// (which then exposes it unprefixed) — so try the unprefixed name first
+// either way, then fall back to the prefixed one.
 static std::string resolveStdbufBinary() {
     if (commandExistsOnPath("stdbuf")) return "stdbuf";
-#if defined(__APPLE__)
     if (commandExistsOnPath("gstdbuf")) return "gstdbuf";
-#endif
     return "";
 }
 
@@ -499,12 +472,8 @@ static int runLineBufferedSubprocess(const std::string& binaryPath, const std::v
                 "checkm8: `stdbuf` (GNU coreutils) is required but not found on PATH -- "
                 "without it, %s's exploit progress can't be streamed live, which makes "
                 "a stuck/hanging run indistinguishable from a silently-working one. "
-#if defined(__APPLE__)
                 "Install it with `brew install coreutils` (this program looks for both the "
                 "unprefixed `stdbuf` and Homebrew's default `gstdbuf` name) and try again.\n"
-#else
-                "Install coreutils and try again.\n"
-#endif
                 , toolName);
         return -1;
     }

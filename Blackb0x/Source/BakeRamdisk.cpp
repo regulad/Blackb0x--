@@ -187,27 +187,22 @@ static uint64_t directoryContentSize(const std::string& dir) {
     return total;
 }
 
-// Reads the original ramdisk's volume label, so the freshly-mkfs'd
-// replacement can be given the same name. mkfs.hfsplus can only set this
-// at creation time — the volume name lives in the catalog (the root
-// folder's own record), not in the fixed-size volume header, so there's
-// no header-byte-copy shortcut for it the way there is for the fields in
-// copyVolumeHeaderMetadata() below.
-static std::string readVolumeLabel(const std::string& imagePath) {
-    std::string label = runCommandCapture({"blkid", "-o", "value", "-s", "LABEL", imagePath});
-    while (!label.empty() && (label.back() == '\n' || label.back() == '\r')) label.pop_back();
-    return label.empty() ? "ramdisk" : label;
-}
-
-#if defined(__APPLE__)
-// macOS equivalent of readVolumeLabel() above — there's no blkid on
-// Darwin, and unlike blkid's read of the raw image file directly,
-// `diskutil info` only works against an attached (mounted) device, not a
-// bare image file, so bakeRamdisk()'s __APPLE__ branch calls this AFTER
-// `hdiutil attach` rather than before mounting, the way the Linux path
-// does. Parsed via libplist's C API — same plist_* calling convention
-// IPSW.cpp's own plistDictString() already established project-wide.
-static std::string readVolumeLabelMac(const std::string& mountpoint) {
+// Reads the original ramdisk's volume label, so the freshly-created
+// replacement can be given the same name. The volume name lives in the
+// catalog (the root folder's own record), not in the fixed-size volume
+// header, so there's no header-byte-copy shortcut for it the way there is
+// for the fields in copyVolumeHeaderMetadata() below.
+//
+// `diskutil info` only works against an attached (mounted) device, not a bare
+// image file, so bakeRamdisk() calls this AFTER `hdiutil attach` rather than
+// before mounting. Parsed via libplist's C API — same plist_* calling
+// convention IPSW.cpp's own plistDictString() already established
+// project-wide.
+//
+// (There used to be a second, blkid-based reader for the Linux path that read
+// the raw image file directly and so could run before mounting. Gone with the
+// rest of Linux support.)
+static std::string readVolumeLabel(const std::string& mountpoint) {
     std::string plistXml = runCommandCapture({"diskutil", "info", "-plist", mountpoint});
     if (plistXml.empty()) return "ramdisk";
 
@@ -228,7 +223,6 @@ static std::string readVolumeLabelMac(const std::string& mountpoint) {
     plist_free(root);
     return label.empty() ? "ramdisk" : label;
 }
-#endif
 
 // Copies a deliberately narrow set of "identity" fields from the original
 // volume's fixed-size HFS+ header into the freshly-mkfs'd replacement:
@@ -290,7 +284,6 @@ static void copyVolumeHeaderMetadata(const std::string& origPath, const std::str
     }
 }
 
-#if defined(__APPLE__)
 // Detects a UDIF ("koly" trailer) wrapper on `path` and, if present,
 // rewrites `path` in place with the unwrapped raw partition bytes — the
 // same probe-then-extractDmg() technique bakeRamdisk() already runs on the
@@ -339,7 +332,6 @@ static bool unwrapUDIFIfPresent(const std::string& path) {
     free(rawBuffer);
     return true;
 }
-#endif
 
 static std::string makeTempDir(const std::string& prefix) {
     std::string tmpl = (fs::temp_directory_path() / (prefix + "XXXXXX")).string();
@@ -358,14 +350,10 @@ struct MountGuard {
     bool mounted = false;
     ~MountGuard() {
         if (mounted) {
-#if defined(__APPLE__)
             // hdiutil, not umount — this mountpoint was attached via
             // `hdiutil attach` (see bakeRamdisk()'s __APPLE__ branch), and
             // `hdiutil detach` is its own matching unmount command.
             runCommand({"hdiutil", "detach", mountpoint});
-#else
-            runCommand({"umount", mountpoint});
-#endif
         }
         if (!mountpoint.empty()) {
             std::error_code ec;
@@ -529,15 +517,11 @@ static bool spliceFileContentInPlace(const std::string& targetPath, const std::s
 
     chmod(targetPath.c_str(), st.st_mode & 07777);
     chown(targetPath.c_str(), st.st_uid, st.st_gid);
-#if defined(__APPLE__)
     // Darwin's struct stat spells these fields st_atimespec/st_mtimespec
     // instead of Linux/glibc's st_atim/st_mtim — same fields, different
     // names (see ResourcePath.cpp's own #if defined(__APPLE__) branches
     // for this project's established house style).
     struct timespec times[2] = {st.st_atimespec, st.st_mtimespec};
-#else
-    struct timespec times[2] = {st.st_atim, st.st_mtim};
-#endif
     utimensat(AT_FDCWD, targetPath.c_str(), times, 0);
     return true;
 }
@@ -1381,7 +1365,6 @@ cp -a /preinstall/var/lib/dpkg/info/. /out/dpkg-state/info/
 rm -rf /preinstall/var/lib/dpkg /preinstall/etc/apt
 )SCRIPT";
 
-#if defined(__APPLE__)
 // macOS has no container runtime at all (confirmed directly — not just
 // podman, no viable alternative either), so the real, containerized dpkg
 // bootstrap the #else branch below runs is off the table here. That real
@@ -1616,109 +1599,6 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
 
     return true;
 }
-#else
-// Runs the real dpkg preinstall for `eligibleFilenames` into fresh temp
-// directories and leaves them in place (caller owns cleanup — or, in
-// practice, never cleans them up at all: see computeGlobalDebcacheOnce(),
-// which keeps these alive for the whole process so every firmware this
-// run bakes can merge from the same result). Deliberately invoked via
-// plain runCommand(), NOT runAsInvokingUser() like every other podman call
-// in this file: bakeRamdisk() itself already runs as real root (needed
-// for the HFS+ mount anyway), and this specific step needs that — rootless
-// podman running AS the invoking user maps container-root to that user's
-// own host uid, not real root (confirmed directly: an unpack test through
-// that path came back host-side owned by the invoking user, not root),
-// which would make every ownership value this function reads back from
-// the bind-mounted output wrong. Root's own podman storage pulling
-// debian:stretch fresh on first use is a one-time cost, same category as
-// every other one-time podman setup step this project already has.
-static bool computePreinstalledPackages(const std::set<std::string>& eligibleFilenames,
-                                         const std::set<std::string>& stripPostinstPackages,
-                                         const std::set<std::string>& stripPreinstFilenames,
-                                         const std::string& firmwareVersion,
-                                         std::string& outPreinstallDir, std::string& outDpkgStateDir) {
-    std::string preinstallDir = makeTempDir("blackb0x-preinstall-root-");
-    std::string outDir = makeTempDir("blackb0x-preinstall-out-");
-    if (preinstallDir.empty() || outDir.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create preinstall temp dirs\n");
-        return false;
-    }
-    std::error_code mkEc;
-    fs::create_directories(fs::path(outDir) / "dpkg-state" / "info", mkEc);
-    outPreinstallDir = preinstallDir;
-    outDpkgStateDir = outDir + "/dpkg-state";
-
-    if (eligibleFilenames.empty()) {
-        fprintf(stderr, "bakeRamdisk: no packages eligible for bake-time preinstall this run\n");
-        return true;
-    }
-
-    std::string workDir = makeTempDir("blackb0x-preinstall-work-");
-    std::string debsOverrideDir = makeTempDir("blackb0x-preinstall-debs-override-");
-    if (workDir.empty() || debsOverrideDir.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create preinstall work dir\n");
-        return false;
-    }
-    fs::create_directories(fs::path(workDir) / "out", mkEc);
-    {
-        std::ofstream f(workDir + "/preinstall_filenames.txt");
-        for (const auto& fn : eligibleFilenames) f << fn << "\n";
-    }
-    {
-        std::ofstream f(workDir + "/strip_postinst_packages.txt");
-        for (const auto& name : stripPostinstPackages) f << name << "\n";
-    }
-    {
-        // kPreinstallInnerScript is a plain shell script template using its
-        // own real `$`/`{}` syntax throughout, so this is a targeted literal
-        // substitution rather than treating it as an f-string-style
-        // template (see this constant's own comment) — matches
-        // scripts/build_deb_cache.py's identical INNER_SCRIPT.replace()
-        // technique for the same placeholder. Replace EVERY occurrence, not
-        // just the first: the constant's own explanatory comment right
-        // above the real "Version:" line also mentions the placeholder by
-        // name (to explain what it is), so a find()-once/replace-once pass
-        // hit that comment instead of the real line, leaving the literal
-        // token in the dpkg status stanza and making dpkg reject it
-        // ("version number does not start with digit") — confirmed on a
-        // real run, not hypothetical. Python's str.replace() already
-        // replaces every occurrence by default, so build_deb_cache.py's
-        // own identical substitution never had this bug.
-        std::string innerScript = kPreinstallInnerScript;
-        const std::string placeholder = "__FIRMWARE_VERSION__";
-        for (size_t pos = innerScript.find(placeholder); pos != std::string::npos;
-             pos = innerScript.find(placeholder, pos + firmwareVersion.size())) {
-            innerScript.replace(pos, placeholder.size(), firmwareVersion);
-        }
-        std::ofstream f(workDir + "/inner.sh");
-        f << innerScript;
-    }
-    std::string debsRoot = resolveDebsPath();
-    bool stripOk = true;
-    for (const auto& filename : stripPreinstFilenames) {
-        stripOk &= stripPreinstFromDeb(debsRoot + "/" + filename, debsOverrideDir + "/" + filename);
-    }
-    if (!stripOk) {
-        fprintf(stderr, "bakeRamdisk: failed to rebuild a preinst-stripped .deb\n");
-        return false;
-    }
-
-    bool ok = runCommand({
-        "/usr/bin/podman", "run", "--rm", "--security-opt", "label=disable",
-        "-v", workDir + ":/work",
-        "-v", fs::absolute(resolveDebsPath()).string() + ":/debs:ro",
-        "-v", debsOverrideDir + ":/debs-override:ro",
-        "-v", preinstallDir + ":/preinstall",
-        "-v", outDir + ":/out",
-        "debian:stretch", "sh", "/work/inner.sh",
-    });
-    if (!ok) {
-        fprintf(stderr, "bakeRamdisk: bake-time dpkg preinstall failed (see podman output above)\n");
-        return false;
-    }
-    return true;
-}
-#endif
 
 // The fast, per-bake half of the mechanism above: merges an already-
 // computed preinstall payload + dpkg state into `blackb0xRoot`. No
@@ -1804,7 +1684,6 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
         return false;
     }
     chownToInvokingUserIfSudo(tempDir);
-#if defined(__APPLE__)
     // No container runtime on macOS (see computePreinstalledPackages()'s
     // own macOS branch above for the full story) — build_deb_cache.py
     // itself shells out to real apt-get inside a podman sandbox, so it
@@ -1822,13 +1701,6 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
     if (!ok) {
         fprintf(stderr, "bakeRamdisk: scripts/build_deb_cache_experimental_no_container.py failed\n");
         outResult = cached;
-#else
-    bool ok = runAsInvokingUser(
-        {"python3", "scripts/build_deb_cache.py", "--output-dir", tempDir, "--firmware-version", firmwareVersion});
-    if (!ok) {
-        fprintf(stderr, "bakeRamdisk: scripts/build_deb_cache.py failed\n");
-        outResult = cached;
-#endif
         return false;
     }
     std::ifstream picklist(tempDir + "/picklist.txt");
@@ -2619,14 +2491,10 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // ramdisk with the wrong ownership instead of failing — worse than
     // just requiring root outright.
     if (geteuid() != 0) {
-#if defined(__APPLE__)
         fprintf(stderr,
                 "bakeRamdisk: must run as root — chown() to root:wheel/mobile:staff (and to preserve the "
                 "original ramdisk's own file ownership) requires real root on macOS too, even though hdiutil "
                 "itself doesn't\n");
-#else
-        fprintf(stderr, "bakeRamdisk: must run as root — loop-mounting a real HFS+ image needs CAP_SYS_ADMIN\n");
-#endif
         return false;
     }
 
@@ -2731,7 +2599,6 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // real, already-existing file on it — no guessing involved). That real
     // number is what actually sizes the final volume; the scratch one is
     // discarded immediately after.
-#if defined(__APPLE__)
     // macOS build sequence — see this function's own header comment above
     // for the full "three designs tried" history behind Linux's three-
     // mount dance. That history doesn't apply here: those were all real,
@@ -2768,10 +2635,9 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
 
     // No blkid equivalent on Darwin — read back via `diskutil info -plist`
     // instead, which only works against an attached device, so (unlike
-    // Linux's readVolumeLabel(), which reads the raw image file directly
     // and so can run before mounting) this has to run after the attach
     // above.
-    std::string label = readVolumeLabelMac(origMount.mountpoint);
+    std::string label = readVolumeLabel(origMount.mountpoint);
 
     // A plain host directory — no second mounted HFS+ volume needed here,
     // see this branch's own header comment above. Reuses this file's own
@@ -2866,186 +2732,6 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
 
     std::error_code stagingDirRmEc;
     fs::remove_all(stagingDir, stagingDirRmEc);
-#else
-    MountGuard origMount;
-    origMount.mountpoint = makeTempDir("blackb0x-origmnt-");
-    if (origMount.mountpoint.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create a temp mountpoint\n");
-        return false;
-    }
-    if (!runCommand({"mount", "-t", "hfsplus", "-o", "loop,ro", rawImgPath, origMount.mountpoint})) {
-        fprintf(stderr, "bakeRamdisk: failed to mount original ramdisk (are we running as root?)\n");
-        return false;
-    }
-    origMount.mounted = true;
-
-    std::string label = readVolumeLabel(rawImgPath);
-
-    std::string blackb0xStagingDir = makeTempDir("blackb0x-payload-");
-    if (blackb0xStagingDir.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create /blackb0x staging dir\n");
-        return false;
-    }
-    if (!stageBlackb0xTree(blackb0xStagingDir, productVersion)) {
-        fprintf(stderr, "bakeRamdisk: failed to stage /blackb0x\n");
-        return false;
-    }
-
-    // Comfortably larger than kMaxRamdiskSize below on purpose — this
-    // volume is never shipped, just measured and thrown away, so it only
-    // needs enough headroom that real content never fails to fit here
-    // regardless of how big /blackb0x turns out to be. If it doesn't fit
-    // even in this, the `cp -a` calls below fail loudly on their own.
-    constexpr uint64_t kScratchWorkingSize = 256ull * 1024 * 1024;
-    std::string scratchRawImgPath = decDMG + ".scratch-raw.hfs";
-    {
-        std::ofstream create(scratchRawImgPath, std::ios::binary | std::ios::trunc);
-        if (!create) {
-            fprintf(stderr, "bakeRamdisk: cannot create %s\n", scratchRawImgPath.c_str());
-            return false;
-        }
-    }
-    std::error_code scratchSizeEc;
-    fs::resize_file(scratchRawImgPath, kScratchWorkingSize, scratchSizeEc);
-    if (scratchSizeEc) {
-        fprintf(stderr, "bakeRamdisk: cannot size scratch volume (%s)\n", scratchSizeEc.message().c_str());
-        return false;
-    }
-    // -s: case-sensitive filenames, matching the real iOS/tvOS root
-    // filesystem (HFSX, not plain case-insensitive HFS+) — without it,
-    // mkfs.hfsplus defaults to case-insensitive, which broke a real cp -a
-    // here: ncurses' real terminfo database ships sibling first-letter
-    // buckets like `e`/`E` and `a`/`A` (genuinely distinct terminal names
-    // differing only in case), which collide under case-insensitive
-    // lookup ("cannot create directory: File exists") but are exactly what
-    // a case-sensitive volume is required to keep apart.
-    if (!runCommand({"mkfs.hfsplus", "-s", "-v", label, scratchRawImgPath})) {
-        fprintf(stderr, "bakeRamdisk: mkfs.hfsplus failed on %s\n", scratchRawImgPath.c_str());
-        return false;
-    }
-    copyVolumeHeaderMetadata(rawImgPath, scratchRawImgPath);
-
-    MountGuard scratchMount;
-    scratchMount.mountpoint = makeTempDir("blackb0x-scratchmnt-");
-    if (scratchMount.mountpoint.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create a temp mountpoint\n");
-        return false;
-    }
-    if (!runCommand({"mount", "-t", "hfsplus", "-o", "loop", scratchRawImgPath, scratchMount.mountpoint})) {
-        fprintf(stderr, "bakeRamdisk: failed to mount scratch ramdisk\n");
-        return false;
-    }
-    scratchMount.mounted = true;
-
-    // -a preserves permissions/ownership (including setuid bits — this is
-    // a real Unix root filesystem, not just data files) and symlinks-as-
-    // symlinks rather than following them.
-    if (!runCommand({"cp", "-a", origMount.mountpoint + "/.", scratchMount.mountpoint + "/"})) {
-        fprintf(stderr, "bakeRamdisk: failed to copy original ramdisk contents\n");
-        return false;
-    }
-    if (!runCommand({"umount", origMount.mountpoint})) {
-        fprintf(stderr, "bakeRamdisk: failed to unmount original ramdisk\n");
-        return false;
-    }
-    origMount.mounted = false;
-
-    // The one and only content change to anything the pristine ramdisk
-    // already shipped: /sbin/launchd's bytes become the built entrypoint
-    // binary, everything else about that catalog entry (mode/owner/group/
-    // mtime) preserved as-is by spliceFileContentInPlace() — see its own
-    // comment for why a blind overwrite isn't good enough. The `cp -a`
-    // above already carried over launchd's real permissions onto this
-    // scratch volume's copy, so splicing here works exactly the same as
-    // splicing in place on the original would have.
-    if (!spliceFileContentInPlace(scratchMount.mountpoint + "/sbin/launchd", entrypointBinaryPath)) {
-        return false;
-    }
-    if (!runCommand({"cp", "-a", blackb0xStagingDir + "/blackb0x", scratchMount.mountpoint + "/blackb0x"})) {
-        fprintf(stderr, "bakeRamdisk: failed to move staged /blackb0x into place\n");
-        return false;
-    }
-    std::error_code stagingRmEc;
-    fs::remove_all(blackb0xStagingDir, stagingRmEc);
-
-    sync();
-    // The real number: how much space the assembled content actually uses
-    // on an actual HFS+ filesystem, not an estimate.
-    uint64_t realContentSize = directoryContentSize(scratchMount.mountpoint);
-
-    // A flat 2MB margin here (covering just fixed per-volume overhead —
-    // volume header, alternate header, boot blocks, allocation bitmap) was
-    // tried and measured short in practice, real bakes still hit "No space
-    // left on device" partway through the final `cp -a` below. The likely
-    // reason: `realContentSize` is measured on a spacious 256MB scratch
-    // volume with plenty of contiguous free space to allocate into, but
-    // the same files packed onto a destination volume with very little
-    // slack left have much less room to lay out contiguously, so they
-    // fragment into more extents — and each extra extent costs additional
-    // catalog/extents-overflow B-tree records that don't show up in any
-    // per-file byte count. A percentage-of-content margin (not just a
-    // flat one) leaves proportionally more breathing room for that as
-    // content grows. kMaxRamdiskSize below is only a warning, not a hard
-    // ceiling, so there's no reason to cut this margin close.
-    constexpr uint64_t kFlatSizeMargin = 4ull * 1024 * 1024;
-    uint64_t percentSizeMargin = realContentSize / 10;
-    uint64_t newVolumeSize = realContentSize + std::max(kFlatSizeMargin, percentSizeMargin);
-
-    std::string newRawImgPath = decDMG + ".new-raw.hfs";
-    {
-        std::ofstream create(newRawImgPath, std::ios::binary | std::ios::trunc);
-        if (!create) {
-            fprintf(stderr, "bakeRamdisk: cannot create %s\n", newRawImgPath.c_str());
-            return false;
-        }
-    }
-    std::error_code volSizeEc;
-    fs::resize_file(newRawImgPath, newVolumeSize, volSizeEc);
-    if (volSizeEc) {
-        fprintf(stderr, "bakeRamdisk: cannot size new volume (%s)\n", volSizeEc.message().c_str());
-        return false;
-    }
-    // -s: see the scratch volume's mkfs.hfsplus call above for why.
-    if (!runCommand({"mkfs.hfsplus", "-s", "-v", label, newRawImgPath})) {
-        fprintf(stderr, "bakeRamdisk: mkfs.hfsplus failed on %s\n", newRawImgPath.c_str());
-        return false;
-    }
-    copyVolumeHeaderMetadata(rawImgPath, newRawImgPath);
-
-    MountGuard newMount;
-    newMount.mountpoint = makeTempDir("blackb0x-newmnt-");
-    if (newMount.mountpoint.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create a temp mountpoint\n");
-        return false;
-    }
-    if (!runCommand({"mount", "-t", "hfsplus", "-o", "loop", newRawImgPath, newMount.mountpoint})) {
-        fprintf(stderr, "bakeRamdisk: failed to mount new ramdisk\n");
-        return false;
-    }
-    newMount.mounted = true;
-
-    // Single copy of the already-fully-assembled scratch content (original
-    // + spliced launchd + /blackb0x, all in one tree) onto the correctly-
-    // sized final volume — nothing left to splice or merge separately here.
-    if (!runCommand({"cp", "-a", scratchMount.mountpoint + "/.", newMount.mountpoint + "/"})) {
-        fprintf(stderr, "bakeRamdisk: failed to copy assembled content onto the final volume\n");
-        return false;
-    }
-    if (!runCommand({"umount", scratchMount.mountpoint})) {
-        fprintf(stderr, "bakeRamdisk: failed to unmount scratch ramdisk\n");
-        return false;
-    }
-    scratchMount.mounted = false;
-    std::error_code scratchRmEc;
-    fs::remove(scratchRawImgPath, scratchRmEc);
-
-    sync();
-    if (!runCommand({"umount", newMount.mountpoint})) {
-        fprintf(stderr, "bakeRamdisk: failed to unmount ramdisk\n");
-        return false;
-    }
-    newMount.mounted = false;
-#endif
 
     std::error_code oldRawRmEc;
     fs::remove(rawImgPath, oldRawRmEc);

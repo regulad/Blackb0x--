@@ -1,6 +1,28 @@
 cmake_minimum_required(VERSION 3.16)
 project(blackb0x CXX C)
 
+# ---------------------------------------------------------------------------
+# Apple-only. This is a hard requirement, not a preference.
+#
+# Linux support was removed outright. checkm8 never worked there: the exploit
+# runs to completion and the task-struct overwrite simply never lands, and four
+# separate proposed causes were each refuted by measurement (host-stack
+# limitation, overwrite acceptance, SETUP delivery, consumed-byte count) --
+# docs/HISTORY.md carries the full trail. Every observable matched a working
+# macOS run and the outcome still differed, so there was nothing left to fix
+# from the host side.
+#
+# Fail here rather than deeper in: without this, a Linux configure gets a long
+# way before dying inside a vendored ExternalProject, where the error has
+# nothing to do with the actual reason.
+# ---------------------------------------------------------------------------
+if(NOT APPLE)
+    message(FATAL_ERROR
+        "blackb0x is macOS-only. Linux support was removed -- checkm8 does not "
+        "work there (see docs/HISTORY.md). Build on macOS; Apple Silicon is the "
+        "tested host.")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
@@ -810,10 +832,11 @@ set(AUTOTOOLS_ENV_WITH_MODERN ${CMAKE_COMMAND} -E env
 # exactly that guarantee (libirecovery_iokit_ext, a separate prefix and a
 # separate source copy). One explicit flag here gives the same guarantee
 # without a duplicate build of the same source at a second version.
-set(LIBIRECOVERY_BACKEND_ARGS "")
-if(APPLE)
-    set(LIBIRECOVERY_BACKEND_ARGS --with-iokit)
-endif()
+# --with-iokit unconditionally: the libusb backend is gone along with Linux
+# support, and IOKit is the backend blackb0x-pwn is confirmed working against on
+# real AppleTV3,2 hardware. Passing it explicitly rather than relying on
+# configure's default keeps the failure loud if IOKit ever goes missing.
+set(LIBIRECOVERY_BACKEND_ARGS --with-iokit)
 
 ExternalProject_Add(libirecovery_ext
     DEPENDS         libplist_ext libimobiledevice_glue_ext
@@ -1121,10 +1144,10 @@ target_include_directories(xpwn BEFORE PRIVATE ${DEPS_INCLUDE}/wolfssl)
 # dmg/CMakeLists.txt skips it there — it duplicates macOS's native
 # `hdiutil`, see that file's own comment) — omit it from this list there,
 # referencing a nonexistent target name is a hard CMake error.
+# dmg-bin is deliberately absent: third_party/xpwn's own dmg/CMakeLists.txt
+# skips that target on Apple entirely (it duplicates macOS's native hdiutil),
+# and naming a nonexistent target here is a hard CMake error.
 set(_wolfssl_include_targets ipsw xpwntool imagetool dripwn blackb0x_xpwntool)
-if(NOT APPLE)
-    list(APPEND _wolfssl_include_targets dmg-bin)
-endif()
 foreach(t ${_wolfssl_include_targets})
     target_include_directories(${t} PRIVATE ${DEPS_INCLUDE})
     target_include_directories(${t} BEFORE PRIVATE ${DEPS_INCLUDE}/wolfssl)
@@ -1174,19 +1197,13 @@ target_link_libraries(blackb0x-pwn PRIVATE
     Threads::Threads)
 add_dependencies(blackb0x-pwn libirecovery_ext libimobiledevice_glue_ext libplist_ext)
 
-# The backend's own dependencies, and the only part of this target that
-# differs per platform. With --with-iokit, libirecovery's Makefile.am never
-# populates $(libusb_CFLAGS)/$(libusb_LIBS) at all (confirmed by reading
-# configure.ac's AS_IF branching), so an Apple build has nothing
-# libusb-related to link and needs the two frameworks instead.
-if(APPLE)
-    target_link_libraries(blackb0x-pwn PRIVATE
-        "-framework CoreFoundation"
-        "-framework IOKit")
-else()
-    target_link_libraries(blackb0x-pwn PRIVATE deps::usb)
-    add_dependencies(blackb0x-pwn libusb_ext)
-endif()
+# The IOKit backend's own dependencies. With --with-iokit, libirecovery's
+# Makefile.am never populates $(libusb_CFLAGS)/$(libusb_LIBS) at all (confirmed
+# by reading configure.ac's AS_IF branching), so there is nothing
+# libusb-related to link and these two frameworks are what it needs instead.
+target_link_libraries(blackb0x-pwn PRIVATE
+    "-framework CoreFoundation"
+    "-framework IOKit")
 
 # ---------------------------------------------------------------------------
 # blackb0x CLI executable
@@ -1245,13 +1262,11 @@ target_link_libraries(blackb0x PRIVATE
 # confirmed against the real link error, not guessed. blackb0x-pwn's own
 # Apple link line doesn't need Security/SystemConfiguration since it links
 # neither wolfSSL nor curl at all.
-if(APPLE)
-    target_link_libraries(blackb0x PRIVATE
-        "-framework CoreFoundation"
-        "-framework IOKit"
-        "-framework Security"
-        "-framework SystemConfiguration")
-endif()
+target_link_libraries(blackb0x PRIVATE
+    "-framework CoreFoundation"
+    "-framework IOKit"
+    "-framework Security"
+    "-framework SystemConfiguration")
 
 # libusbmuxd.a (needed by common/userpref.c's usbmuxd_read_buid/
 # usbmuxd_read_pair_record/etc, its own daemon-side pairing-record cache
@@ -1267,7 +1282,7 @@ endif()
 # survives to link time, which fixes the duplicate-symbol conflict itself
 # rather than papering over it here with the GNU-ld-only
 # -Wl,--allow-multiple-definition (no equivalent on Apple's ld64 as of
-# Xcode 15+ — this project needs to link on Darwin too, not just Linux).
+# Xcode 15+, which is the only linker this project targets now).
 
 # The Unix Makefiles generator does not reliably serialize a real target's
 # link step behind ExternalProject-installed IMPORTED libraries via

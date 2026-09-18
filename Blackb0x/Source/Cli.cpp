@@ -387,17 +387,11 @@ bool checkExploit(DeviceManager& deviceManager, const AppleTVDevice& device, boo
 // baked (or is stale) yet — used both by runCli()'s upfront dist/
 // emptiness check and by downloadAndPatchComponents() below to decide
 // whether to spawn a background bake at all. On Linux, self-baking loop-
-// mounts a real HFS+ image (BakeRamdisk.cpp), which genuinely needs
-// CAP_SYS_ADMIN — real root, not just a udev-granted device permission the
-// way ordinary DFU/Recovery USB access can be (see runCli()'s own comment
-// on that). On macOS, a parallel work stream is dropping that requirement
-// entirely (native hdiutil, no loop-mount, no root) — self-baking is
-// unconditionally available there once that lands.
-#if defined(__APPLE__)
+// mounts an HFS+ image (BakeRamdisk.cpp). On macOS that is native `hdiutil`,
+// which needs no loop-mount and no root, so self-baking is unconditionally
+// available. (The root requirement this used to gate on belonged to the Linux
+// loop-mount path, which is gone along with the rest of Linux support.)
 static bool canSelfBakeRamdisk() { return true; }
-#else
-static bool canSelfBakeRamdisk() { return geteuid() == 0; }
-#endif
 
 // Non-blocking spawn of `bake-all-ramdisks --device <deviceModel> --build
 // <buildID>` for exactly the one (device, firmware) combination this run

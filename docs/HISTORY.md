@@ -3936,3 +3936,58 @@ on a heap that does not match what the exploit assumes.
 
 Either answer is worth having, and unlike the macOS-side questions, this one is
 answerable on the hardware actually available.
+
+## Linux support removed
+
+Called by the user after the investigation above ran out of leads. Everything non-Apple
+is gone: `CMakeLists.txt` now hard-fails off Apple rather than dying deeper inside a
+vendored ExternalProject, and the Linux branches are deleted from `BakeRamdisk.cpp`
+(the whole loop-mount path), `DeviceManager.cpp` (`/proc/<pid>/status` D-state probe,
+the unprefixed-only `stdbuf` search), `ResourcePath.cpp` (`/proc/self/exe`), and
+`Cli.cpp` (the `geteuid()` self-bake gate). `libirecovery` is configured
+`--with-iokit` unconditionally.
+
+**Why:** checkm8 never worked on Linux. The exploit sequence runs to completion and the
+task-struct overwrite never lands. Four explanations were proposed and each refuted by
+later measurement, and by the end every observable matched a working macOS run while the
+outcome still differed. The sections above carry each dead end and why it died; the
+detail exists so nobody repeats those experiments.
+
+### What was deliberately kept
+
+- **The 64 MiB ramdisk hard-fail** (`DEBUG_RAMDISK_LIMIT_MIB`). Not platform-specific:
+  the ceiling was confirmed against the live AppleTV3,2, and it is *unenforceable at
+  runtime* because `ramdisk-size` does not exist on 32-bit iBoot at all (zero
+  occurrences in the decrypted iBECs of AppleTV2,1/iBoot-1537.9.55 and
+  AppleTV3,2/iBoot-1458.2, neither of which carries the older
+  `kRamdiskMaxSize`/"Ramdisk too large" mechanism). The bake-time check is the only
+  guard that exists.
+- **`DEBUG_TRACE_TRANSFERS` and `DEBUG_DFU_STATUS`.** Platform-neutral, off by default,
+  and the only reason any of this was measurable. Deleting them would make resuming
+  expensive.
+- **`libusb`**, still vendored. It is cross-platform, builds fine on macOS, and
+  unpicking it from the link graph is an unverifiable change (see below).
+
+### What was removed beyond the platform branches
+
+`scripts/analyze_usbmon_checkm8.py` and `scripts/sweep_pwn_cancel_delay.py` (both
+Linux-only investigation tools for a closed investigation), and
+`DEBUG_BUGSETUP_RETRIES`/`DEBUG_BUGSETUP_TARGET_CONSUMED` with their `readDfuState()`
+helper — built to chase the consumed-count avenue, which closed.
+
+### Two consequences to be honest about
+
+1. **Ramdisk baking is now unverified end to end.** The Linux loop-mount path was the
+   one that worked — it produced every `dist/` ramdisk and the 29/29 patch sweep. The
+   surviving `hdiutil` path has never been run on real macOS; it was written with no Mac
+   available. This was raised before the removal and the decision was reaffirmed, so it
+   is accepted cost, not oversight. `BakeRamdisk.cpp`'s own caveat and `.claude/TODO.md`
+   item 4a still flag it.
+2. **None of this was build-verified.** The removal was performed on a Linux host, which
+   the change itself makes unable to configure the project. Verification was structural
+   only: preprocessor nesting balance re-checked to depth 0, no orphaned `static`
+   functions, no remaining invocations of `blkid`/`mkfs.hfsplus`/`mount`/`losetup`, and
+   `-fsyntax-only` on the two platform-independent `Pwn/` translation units. **The first
+   real macOS build is the actual test.** The most likely failure sites are
+   `BakeRamdisk.cpp`, where 309 lines were removed mechanically, and the `hdiutil`
+   codepath that has never run anywhere.

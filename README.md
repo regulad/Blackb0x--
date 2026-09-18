@@ -23,21 +23,22 @@ firmware combination listed above is implemented from protocol analysis and
 disassembly, not confirmed on real hardware. Platform status, from real
 hardware testing:
 
-- **macOS: known-good.** `blackb0x-pwn` has been run successfully against
-  real AppleTV3,2 hardware.
-- **Linux: should work per the code/design, but has not worked reliably on
-  any Linux machine tested.** Confirmed on two different real PCs — one
-  Intel 11th-gen, one AMD Zen 2 — both showing the same class of
-  non-deterministic USB behavior during the checkm8/DFU exploit sequence
-  (see `docs/HISTORY.md`'s "Reopening macOS support" entry for the
-  specific symptoms this was chased through). This may be a property of
-  Linux's USB stack/timing on the specific controllers tested rather than
-  something fixable in this project's own code — not resolved as of this
-  writing.
-- **Apple Silicon tip:** a plain (non-Thunderbolt) USB hub between the Mac
-  and the Apple TV, rather than a direct connection, has been reported to
-  make `blackb0x-pwn` reliable — worth trying first if a direct connection
-  is flaky.
+**macOS only.** Apple Silicon is the tested host. `blackb0x-pwn` has been run
+successfully against real AppleTV3,2 hardware there.
+
+> **Linux is no longer supported.** It used to be the primary target, and the
+> build now refuses to configure off Apple outright. checkm8 never worked on
+> Linux: the exploit sequence runs to completion and the task-struct overwrite
+> simply never lands. Four separate explanations were each proposed and then
+> refuted by measurement, and by the end every observable matched a working
+> macOS run while the outcome still differed. `docs/HISTORY.md` carries the
+> whole trail, including what was ruled out, so nobody has to repeat it. If you
+> were relying on the Linux path, the last commit that supports it is tagged in
+> the history below.
+
+**Apple Silicon tip:** a plain (non-Thunderbolt) USB hub between the Mac and the
+Apple TV, rather than a direct connection, has been reported to make
+`blackb0x-pwn` reliable — worth trying first if a direct connection is flaky.
 
 IMPORTANT: make sure your device is connected to the internet for the first boot. Do
 not turn it off during first boot until Kodi appears.
@@ -67,25 +68,20 @@ fresh clone + build, not just assumed):
   generator you use for the top-level build.
 - **CMake ≥3.16.**
 - **autoconf, automake, libtool, pkg-config** — for the autotools-based dependencies'
-  own `./configure`/`autoreconf` steps. On Linux these mostly come along for free —
-  most distros' base/`build-essential`-style GCC toolchain package pulls in `libtool`
-  transitively as a dependency of something else in that group. **macOS/Homebrew
-  doesn't bundle any of the four with anything** — install them explicitly:
+  own `./configure`/`autoreconf` steps. **Homebrew doesn't bundle any of the four
+  with anything** — install them explicitly:
   `brew install cmake autoconf automake libtool pkg-config`. Confirmed on a real
   macOS build attempt: without an explicit `brew install libtool`, `autoreconf`/
-  `autogen.sh` steps in the vendored dependencies fail outright, the same way a
-  from-scratch Linux distro missing that package would.
+  `autogen.sh` steps in the vendored dependencies fail outright.
 ### Runtime system dependencies
 
-- **`hfsprogs`** (`mkfs.hfsplus`/`fsck.hfsplus`) and a kernel built with
-  `CONFIG_HFSPLUS_FS` (built-in or loadable module) — `patchRamdisk()` builds and
-  loop-mounts a real HFS+ volume.
-- **`mount`/`umount`/`blkid`/`cp`/`tar`** — used directly (as subprocesses, no shell)
-  by `patchRamdisk()`. Present on any mainstream Linux distro as a matter of course.
-- **`usbmuxd` itself must be installed** (most distros ship it as its own package,
-  e.g. `usbmuxd`), separately from it needing to run with `--no-preflight` — see
-  below. Without the daemon present at all, Normal-mode device discovery has nothing
-  to talk to, full stop.
+- **`hdiutil`/`diskutil`** (built in) — the ramdisk baker attaches and resizes a
+  real HFS+ image through them. No root, no loop-mount, no `hfsprogs`. **This path
+  has never been run on real macOS** — it was written with no Mac available; see
+  `BakeRamdisk.cpp`'s own caveat and `.claude/TODO.md` item 4a before trusting it.
+- **`cp`/`tar`** — used directly (as subprocesses, no shell) by the baker.
+- **`usbmuxd`** — macOS's own built-in daemon. Normal-mode device discovery has
+  nothing to talk to without it.
 - **`ssh-keygen`** — you need a real SSH keypair of your own (see "Steps to
   jailbreak" below); this tool doesn't generate one for you.
 - **`ssh`** — used by `scripts/push_authorized_keys.sh` to grant yourself SSH access
@@ -123,104 +119,33 @@ what was measured.
 USB-C connection, try a plain (non-Thunderbolt) USB hub between the Mac and
 the Apple TV instead — this has been reported to make it reliable.
 
-### One-time system setup: blacklist `apple_mfi_fastcharge`
+### No one-time system setup
 
-The in-tree `apple_mfi_fastcharge` driver (Apple Lightning fast-charge support) binds
-to *any* USB device with Apple's vendor ID whose product ID falls in `0x1200`-`0x12ff`
-— a range that includes the Apple TV's real DFU-mode PID (`0x1227`), so this driver
-attaches to it even in DFU mode. It stays attached and independently resets the device
-while the pwntool's own
-exploit-timing-sensitive USB transfers are in flight — two things resetting the same
-device at once, which corrupts USB enumeration and can hang the exploit (sometimes
-taking the whole USB stack down with it) in a way that reproduces across different
-Linux machines, not just one host's controller. Removing the module once isn't
-enough either — it reloads itself automatically the moment the device reconnects
-(which the exploit does several times per run) — so it needs to be
-blacklisted, not just unloaded:
+macOS needs none. This is a real simplification, not an omission — the Linux path
+required three separate manual system changes, and all three are gone with it:
 
-```sh
-sudo mkdir -p /etc/modprobe.d
-sudo tee /etc/modprobe.d/blacklist-apple-mfi-fastcharge.conf <<'EOF'
-blacklist apple_mfi_fastcharge
-EOF
-sudo modprobe -r apple_mfi_fastcharge   # only if currently loaded
-```
+- **Blacklisting `apple_mfi_fastcharge`.** That in-tree Linux driver binds to any
+  Apple-vendor USB device whose product ID falls in `0x1200`-`0x12ff`, which includes
+  the Apple TV's DFU-mode PID `0x1227`, and independently reset the device mid-exploit.
+  It needed a `/etc/modprobe.d` drop-in, since `modprobe -r` alone was confirmed
+  insufficient (the kernel reloaded it on every stage reconnect). No equivalent on
+  macOS.
+- **`usbmuxd --no-preflight`** via a systemd drop-in, or Normal-mode discovery silently
+  never fired. macOS's own built-in `usbmuxd` needs no such change.
+- **A udev rule** to grant a non-root user raw DFU/Recovery-mode USB access. macOS has
+  no udev; `blackb0x` needs no special device permissions there.
 
-(If you actually use this same PC to fast-charge a real Apple device over USB,
-removing this blacklist afterward — `sudo rm /etc/modprobe.d/
-blacklist-apple-mfi-fastcharge.conf` — restores that.)
-
-### One-time system setup: `usbmuxd --no-preflight`
-
-The system `usbmuxd` daemon needs to run with `--no-preflight`, or this hardware's
-Normal-mode discovery will silently never work. Add a systemd drop-in:
-
-```sh
-sudo mkdir -p /etc/systemd/system/usbmuxd.service.d
-sudo tee /etc/systemd/system/usbmuxd.service.d/override.conf <<'EOF'
-[Service]
-ExecStart=
-ExecStart=/usr/bin/usbmuxd --user usbmuxd --systemd --no-preflight
-EOF
-sudo systemctl daemon-reload
-sudo systemctl restart usbmuxd
-```
-
-(Adjust the `ExecStart=` path/args to match your distro's existing unit —
-`systemctl cat usbmuxd` shows the original.)
-
-### One-time system setup (optional): run `blackb0x` without root
-
-`blackb0x` itself only ever needs root for one thing: opening a raw USB handle to
-the Apple TV while it's in DFU, Recovery, or WTF mode (vendor `05ac`, product
-`1222`/`1227`/`1280`-`1283` — the exact set of modes `libirecovery` ever opens a
-handle for). The kernel's default device-node permissions restrict that to root;
-a udev rule can hand it to your own user instead, via a real group rather than
-a desktop-session ACL (`TAG+="uaccess"` only covers whoever's logged in at the
-active graphical seat — this also needs to work headless/over SSH, which a
-group membership doesn't care about):
-
-```sh
-# 1. Create the plugdev group if your distro doesn't already ship one
-#    (Debian/Ubuntu do by default; Fedora, Arch, and others don't).
-getent group plugdev >/dev/null || sudo groupadd --system plugdev
-
-# 2. Add yourself to it.
-sudo usermod -aG plugdev "$USER"
-
-# 3. Grant that group access to the Apple TV's DFU/Recovery/WTF-mode USB device.
-sudo tee /etc/udev/rules.d/70-blackb0x.rules <<'EOF'
-SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", ATTR{idProduct}=="1222", GROUP="plugdev", MODE="0660"
-SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", ATTR{idProduct}=="1227", GROUP="plugdev", MODE="0660"
-SUBSYSTEM=="usb", ATTR{idVendor}=="05ac", ATTR{idProduct}=="128[0-3]", GROUP="plugdev", MODE="0660"
-EOF
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-```
-
-Then **log out and back in** (or run `newgrp plugdev` in your current shell) —
-group membership changes don't apply to sessions that already exist — and
-**unplug/replug the Apple TV** so the device node gets re-created under the new
-rule. After that, `./build/blackb0x` runs directly, no `sudo`.
-
-This only affects `blackb0x` itself. `sudo ./build/bake-all-ramdisks` still
-needs root regardless (it loop-mounts a real HFS+ image, which genuinely needs
-`CAP_SYS_ADMIN`) — this setup doesn't change that.
+`bake-all-ramdisks` also no longer needs root. It used to loop-mount a real HFS+
+volume, which genuinely required `CAP_SYS_ADMIN`; `hdiutil` needs neither root nor a
+mount helper. (Bear in mind the caveat above: that hdiutil path has never been run on
+real macOS.)
 
 If `blackb0x` still can't reach the device non-root after all of the above
-(commonly: "ERROR: Unable to connect to device" appearing immediately, even
-with the Apple TV visibly in DFU mode), check `lsusb -d 05ac:` shows the
-device and that the matching `/dev/bus/usb/*/*` node's group is actually
-`plugdev` (`ls -l`) — if it's still `root`, the rule didn't match or didn't
-reload; skip straight to `sudo ./build/blackb0x` rather than debug it further.
-
 ## Steps to jailbreak
 
 0. (3,1 only) PWN with Arduino + [synackuk's fork of checkm8-A5](https://github.com/synackuk/checkm8-a5) first.
 1. Bake the ramdisks once, before ever running `blackb0x` itself:
-   `sudo ./build/bake-all-ramdisks --signed-only` (root is required here too — this
-   step loop-mounts a real HFS+ volume to patch it, the same raw-mount access
-   `blackb0x` itself needs for USB). `--signed-only` restricts the run to firmware
+   `./build/bake-all-ramdisks --signed-only`. `--signed-only` restricts the run to firmware
    Apple is currently signing, typically just the latest one or two per device —
    drop the flag to bake every known combination instead, including older/unsigned
    ones, if your
@@ -230,9 +155,7 @@ reload; skip straight to `sudo ./build/blackb0x` rather than debug it further.
    `--signed-only`, if your device needs an older build) rather than trying to work
    around either check.
 2. Plug in your Apple TV via micro-USB **and** plug in the power cable.
-3. Run `sudo ./build/blackb0x` (root is required by default — raw DFU/Recovery-mode
-   USB access needs it; run `./build/blackb0x` without `sudo` instead if you've set
-   up the udev rule above). Add `--dry-run` to preview the exploit/firmware steps
+3. Run `./build/blackb0x`. Add `--dry-run` to preview the exploit/firmware steps
    without actually running the exploit or uploading anything to the device.
 4. Follow the on-screen instructions to enter DFU mode.
 5. Once the jailbreak finishes installing, connect to your TV and wait 5–10 minutes

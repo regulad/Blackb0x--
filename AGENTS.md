@@ -14,10 +14,10 @@ original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
 
 ## Conventions (don't re-litigate without asking)
 
-- **CLI-only.** No GUI — dropped, not dual-maintained. Primary target is Linux;
-  macOS support (`blackb0x`/`blackb0x-pwn` only, not the ramdisk baker yet) is actively
-  being brought up — see `.claude/TODO.md` item 4 for exactly what's done vs. still
-  needs real macOS hardware to verify.
+- **CLI-only, macOS-only.** No GUI — dropped, not dual-maintained. Linux support was
+  removed outright (checkm8 never worked there; see "Current status" below and
+  `docs/HISTORY.md`), and `CMakeLists.txt` hard-fails off Apple. Apple Silicon is the
+  tested host.
 - **Every third-party dependency is a git submodule under `third_party/`, built from
   source, statically linked.** Not FetchContent, not system packages, no exceptions —
   see the "vendored dependencies" table below and `CMakeLists.txt`'s
@@ -137,22 +137,21 @@ cmake -S . -B build && cmake --build build -j$(nproc)
 
 # Once, in bulk, for every known firmware — NOT run by blackb0x itself.
 # Writes dist/<device>_<buildID>-Ramdisk.dmg per firmware (gitignored):
-sudo ./build/bake-all-ramdisks [--signed-only]
+./build/bake-all-ramdisks [--signed-only]
 
 # Pre-patches iBSS/iBEC/KernelCache/DeviceTree for every known firmware.
 # Needs NO root, unlike bake-all-ramdisks. Writes dist/bootchain/<device>_<buildID>/:
 ./build/bake-all-bootloaders [--signed-only] [--device <model>] [--build <buildID>]
 
 ./build/blackb0x [--ecid <id> | --udid <id>] [--dry-run]
-# (needs sudo instead, unless a udev rule already grants your own user raw
-# USB access to the device in DFU/Recovery/WTF mode — see README)
 ```
 
-Two binaries, deliberately separated by privilege:
+Three binaries. Nothing needs root any more: the privilege split existed for Linux's
+loop-mount and raw-USB device nodes, and neither applies on macOS.
 
-- **`bake-all-ramdisks`** is the only piece of this tool that needs `CAP_SYS_ADMIN`/
-  `CAP_CHOWN` (loop-mounting a real HFS+ image — see `BakeRamdisk.hpp`'s header
-  comment for why an in-process, no-mount approach isn't viable). For every
+- **`bake-all-ramdisks`** attaches an HFS+ image via `hdiutil` (no root, no mount
+  helper). **This path has never been run on real macOS** — written with no Mac
+  available; see `BakeRamdisk.cpp`'s caveat and `.claude/TODO.md` item 4a. For every
   `.keys` file under `Blackb0x/ImageKeys/` (i.e. every known device/firmware
   combination), it downloads that firmware's `RestoreRamDisk` component and merges
   the `Blackb0x/ramdisk/` overlay into it, writing each result to
@@ -166,13 +165,10 @@ Two binaries, deliberately separated by privilege:
   `bake-all-ramdisks` if not. Re-running is cheap: any `dist/` entry that already
   exists is skipped.
 - **`blackb0x`** drives everything else (DFU discovery, the exploit, uploads, checking
-  jailbreak status over AFC2) and needs root *by default* only for raw DFU/
-  Recovery/WTF-mode USB access — there's no hard `geteuid() != 0` gate in
-  `Cli.cpp` (there used to be; removed as a genuine correctness fix, not a
-  relaxation for its own sake — a udev rule can hand a normal user that same
-  access, see README's own setup section, and a real permission failure surfaces
-  clearly from `libirecovery`'s own `irecv_open_with_ecid()` either way). No
-  install step — both binaries run from wherever they're built.
+  jailbreak status over AFC2). No `geteuid() != 0` gate in `Cli.cpp`, and none needed —
+  a real permission failure surfaces clearly from `libirecovery`'s own
+  `irecv_open_with_ecid()`. No install step; the binaries run from wherever they're
+  built.
 - **`scripts/push_authorized_keys.sh`** is separate from both: a standalone,
   no-root-needed script you run by hand, after `blackb0x` reports the jailbreak is
   running, to grant yourself SSH access (see "Runtime requirements" below for what
@@ -180,16 +176,14 @@ Two binaries, deliberately separated by privilege:
 
 **Build-time system dependencies, verified against a real fresh clone + build (see
 README for the full list)**: a C/C++ toolchain, GNU make, CMake ≥3.16,
-autoconf/automake/libtool/pkg-config (most of the tree is autotools-based).
-(`xxd` used to be required too, solely to embed `gaster`'s payload binaries as C
-arrays; with gaster gone, nothing in the build shells out to it any more.)
+autoconf/automake/libtool/pkg-config (most of the tree is autotools-based) — Homebrew
+bundles none of the four, so install them explicitly. (`xxd` used to be required too,
+solely to embed `gaster`'s payload binaries as C arrays; with gaster gone, nothing in
+the build shells out to it any more.)
 
 **Runtime requirements beyond the build** (not just build-time deps):
-- `mkfs.hfsplus`/`fsck.hfsplus` (`hfsprogs` package) and a kernel with `hfsplus`
-  support (`CONFIG_HFSPLUS_FS`) — needed by `bake-ramdisk`, not `blackb0x` itself.
-- `mount`/`umount`/`blkid`/`cp` (invoked directly as subprocesses, no shell) — also
-  `bake-ramdisk` only. Assumed present on any mainstream distro, not called out as a
-  separate install step.
+- `hdiutil`/`diskutil`/`cp`/`tar` (invoked directly as subprocesses, no shell) —
+  `bake-all-ramdisks` only, all built in to macOS.
 - `python3` and `podman` — `bake-all-ramdisks` shells out to
   `scripts/build_deb_cache.py` (via `python3`, which shells out to `podman`
   itself) to resolve the debcache picklist fresh on every bake; see
@@ -197,12 +191,9 @@ arrays; with gaster gone, nothing in the build shells out to it any more.)
   re-invocation as the existing `entrypoint/` podman calls, for the same
   reason (podman's own rootless storage belongs to the real invoking user,
   not root's).
-- `usbmuxd` itself must be installed (a separate requirement from the point below —
-  most distros package it separately, e.g. `usbmuxd`), and **must run with
-  `--no-preflight`** (a systemd drop-in — `/etc/systemd/system/usbmuxd.service.d/
-  override.conf` — is the documented way; see `docs/HISTORY.md` for exactly why) or
-  Normal-mode device discovery silently never fires. Both of these have to ship in
-  the end-user README.
+- `usbmuxd` — macOS's own built-in daemon; Normal-mode discovery has nothing to talk
+  to without it. (Linux additionally needed it run with `--no-preflight` via a systemd
+  drop-in or discovery silently never fired; that requirement is gone with Linux.)
 - The invoking user's own `~/.ssh/authorized_keys`, if SSH access is wanted —
   `blackb0x` itself no longer touches this at all; run
   `scripts/push_authorized_keys.sh` by hand once the jailbreak is confirmed running
@@ -217,11 +208,8 @@ arrays; with gaster gone, nothing in the build shells out to it any more.)
   back to unbuffered output. An earlier version of this code did fall back silently
   — that's exactly the "blind the whole time" bug documented in `docs/HISTORY.md`,
   reintroduced by treating this as optional. Don't re-add that fallback.
-- The in-tree `apple_mfi_fastcharge` kernel driver **must be blacklisted** (a
-  `/etc/modprobe.d` drop-in — see the README's own setup section) or it fights
-  the pwntool for the DFU-mode device mid-exploit; see `docs/HISTORY.md` for exactly
-  why. Same pattern as `usbmuxd --no-preflight` above: a documented one-time manual
-  step, not something `blackb0x` checks or fixes for you at runtime.
+- No kernel-module blacklisting, no udev rule, no systemd drop-in. All three were
+  Linux-only requirements and are gone; see the README's "No one-time system setup".
 
 ## External references
 
@@ -239,76 +227,47 @@ re-encrypt pipeline, and `--dry-run` are all verified working against real hardw
 **Only one physical unit has ever been available to test against: an AppleTV3,2** —
 `AppleTV2,1`(SHAtter)/`AppleTV3,1` (external-hardware checkm8) paths are implemented
 from protocol analysis only, unverified.
-The `checkm8` exploit run itself is **the open problem**, and it is the reason this
-branch exists. It has never succeeded on Linux. Two independent implementations have
-been tried against the one physical AppleTV3,2 available:
+## Current status: macOS only
 
-- **`gaster`** (verygenericname/gaster, the tool palera1n's `legacy` branch shells
-  out to) — vendored, then forked to `regulad/gaster@linux-reset-race` for a long
-  instrumentation and bug-fixing campaign. **Never pwned the device on either Linux
-  7.1.x or macOS 26.** It is now removed from the tree entirely, fork included.
-- **`blackb0x-pwn`** — this project's own original hand-ported checkm8, recovered
-  from git history and built as a standalone binary on every platform. This is the
-  implementation confirmed working on real AppleTV3,2 hardware **on macOS**, and it
-  is now the only pwntool. On Linux it fails at a specific, well-characterised point
-  (see below).
+**Linux support is removed.** The build refuses to configure off Apple (`CMakeLists.txt`
+fails fast rather than dying deeper in a vendored ExternalProject). Apple Silicon is the
+tested host.
 
-Along the way three real, independent software causes were each found, fixed, and
-ruled out as *the* cause — all three fixes are genuine improvements worth keeping
-regardless:
+`checkm8` never worked on Linux, and that is why. The exploit sequence runs to
+completion and the task-struct overwrite simply never lands. Four explanations were
+proposed and each refuted by later measurement — a host-stack limitation, the overwrite
+being refused, the bug-setup SETUP never arriving, and the consumed-byte count — and by
+the end **every observable matched a working macOS run while the outcome still
+differed**. `docs/HISTORY.md` records each dead end and why it died; the point of that
+detail is that nobody re-runs those experiments.
 
-1. **`apple_mfi_fastcharge`** auto-binds to the Apple TV even in DFU mode (its
-   product-ID match range `0x1200`-`0x12ff` covers this device's DFU PID `0x1227`)
-   and issues its own `usb_reset_device()` calls mid-exploit. Must be blacklisted via
-   `/etc/modprobe.d` — a bare `modprobe -r` is confirmed insufficient, since the
-   kernel reloads it via `request_module()` on every stage-transition reconnect. Real
-   conflict, **not** the root cause: with it genuinely unloaded the hang was identical.
-2. **Unclaimed interfaces.** DFU class requests were being sent without claiming
-   interface 0, which is what the kernel's "did not claim interface 0 before use"
-   warning was about. Fixed — and a second bug inside that very fix turned up: it
-   *gated* success on the claim succeeding, but with a device-side truncated config
-   descriptor (`bNumInterfaces 0`, confirmed stable for minutes via `lsusb -v`) the
-   claim fails forever, turning a possibly-transient state into an unconditional
-   "device not found."
-3. **The reset-skip theory** — skipping the post-`SETUP`/`SPRAY` USB reset, on the
-   reasoning that unlike `RESET`/`PATCH` those stages never enter
-   `DFU_STATE_MANIFEST_WAIT_RESET`. **Disproved on real hardware**: the device wedged
-   in true `D` state inside `usb_reset_configuration`/`usb_control_msg`. The reset is
-   load-bearing, not precautionary. Reverted.
+Two findings from it are worth carrying forward regardless of platform:
 
-**Two successive conclusions here have now been retracted; read `docs/HISTORY.md`
-before trusting any summary of this problem.** First the "Linux host-stack limitation"
-verdict fell to a `usbmon` capture. Then its replacement — "the device refuses the
-overwrite transfer, and the acceptance window is structurally impossible to hit" — fell
-to a `DEBUG_TRACE_TRANSFERS` trace of a **working macOS run**, which stalls the overwrite
-having moved **zero bytes**, exactly like the failing Linux run. A stalled overwrite
-moving nothing is what success looks like, so the 320/388 acceptance arithmetic was
-describing a non-symptom. The in-code assertion `want 0 < n <= 1632` is likewise
-backwards: macOS succeeds at n = 0.
+- **The bug setup is non-deterministic.** The same cancel delay produced 0 and 64
+  consumed bytes on identical hardware, and 32 of 35 attempts consumed bytes within a
+  single run. Any measurement taking one sample per configuration is measuring noise.
+- **`DFU_GETSTATUS` is not an oracle for the exploit precondition.** checkm8 *is* a bug
+  in that state machine: the aborted `DFU_DNLOAD` leaks a buffer the state machine stops
+  tracking, so a device reporting `dfuIDLE` while holding a dangling pointer is the
+  vulnerability, not evidence against it.
 
-Also ruled out, in both directions and on the correct (PWND) success criterion: **the
-cancel delay**. Sweeping 0–90 µs on Linux reproduced macOS's `consumed = 0` at every
-step and failed nine for nine.
+What still works and is verified: normal-mode discovery (real `usbmuxd`, wolfSSL/SSLv3
+lockdownd handshake, AFC), the full firmware download/decrypt/patch/re-encrypt pipeline,
+`--dry-run`, and `blackb0x-pwn` against real AppleTV3,2 hardware on macOS.
+**Only one physical unit has ever been available: an AppleTV3,2** — the `AppleTV2,1`
+(SHAtter) and `AppleTV3,1` (external-hardware checkm8) paths are implemented from
+protocol analysis only.
 
-What actually differs is one row: **`payload-upload moved` is 0 on the successful run
-and 678 on the failing one** — a success/failure oracle available before the final
-reset. Linux dies at `device did not reappear after payload execution` with the device
-**wedged off the bus entirely**, which points at the post-payload reset, where
-`irecv_reset()` (`libirecovery.c:2548`) differs per backend: IOKit does `ResetDevice()`
-*plus* an unconditional `USBDeviceReEnumerate()`, tolerating `kIOReturnNotResponding`
-from both, while libusb does a bare `libusb_reset_device()`. Note this is a **lead, not
-a diagnosis** — `libusb_reset_device()` *does* re-enumerate when descriptors change
-(which they do here), so the difference is narrower than "one re-enumerates and the
-other doesn't"; see `docs/HISTORY.md` for the correction.
+**The ramdisk baker's macOS path has never been run on real macOS.** It was written with
+no Mac available (see `BakeRamdisk.cpp`'s own caveat and `.claude/TODO.md` item 4a). The
+Linux loop-mount path that *was* verified is gone, so ramdisk baking is currently
+unverified end to end. This is a known, accepted consequence of dropping Linux, not an
+oversight.
 
-Getting that trace needed `blackb0x-pwn`'s own instrumentation, because the `XHC20`/
-tcpdump route is a **dead end**: macOS hides the USB capture interfaces unless SIP is
-fully disabled (confirmed by Apple DTS), and reports say the method fails on macOS
-15.6.1+ even with SIP off. `analyze_usbmon_checkm8.py`'s `DLT_USB_DARWIN` path is
-consequently unverified *and* unreachable — don't invest in it.
-
-All investigation knobs are `DEBUG_`-prefixed and every default is the
-macOS-confirmed behaviour, so an unset environment is the original path byte for
-byte: `DEBUG_CANCEL_DELAY_US` (100), `DEBUG_OVERWRITE_TIMEOUT_MS` (100),
-`DEBUG_RECONNECT_ATTEMPTS` (30), `DEBUG_KEEP_CONNECTION` (unset),
-`DEBUG_IGNORE_GROOM_ERRORS` (unset).
+The `DEBUG_`-prefixed knobs in `blackb0x-pwn` (`DEBUG_CANCEL_DELAY_US`,
+`DEBUG_OVERWRITE_TIMEOUT_MS`, `DEBUG_RECONNECT_ATTEMPTS`, `DEBUG_KEEP_CONNECTION`,
+`DEBUG_IGNORE_GROOM_ERRORS`, `DEBUG_TRACE_TRANSFERS`, `DEBUG_DFU_STATUS`) are kept.
+Every default is the behaviour confirmed working on real hardware, so an unset
+environment is the original path byte for byte. `DEBUG_DFU_STATUS` is the exception that
+deliberately perturbs: `GETSTATUS` advances the DFU state machine, so a run with it set
+is not evidence about a run without it.

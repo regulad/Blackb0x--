@@ -15,11 +15,8 @@
 #include <cstdlib>
 #include <cstring>
 
-#if defined(__APPLE__)
 #include <mach-o/dyld.h>
-#else
 #include <unistd.h>
-#endif
 
 namespace fs = std::filesystem;
 
@@ -43,10 +40,9 @@ std::string resolveImageKeyPath(const std::string& relativePath) {
 // binaryName, resolved via PATH at exec time).
 static std::string resolveOwnExecutableDir() {
     char exePath[PATH_MAX];
-#if defined(__APPLE__)
-    // No /proc on Darwin; _NSGetExecutablePath() may return a path
-    // containing symlinks, so resolve it the same way readlink's result
-    // already is on Linux.
+    // No /proc on Darwin, so this is _NSGetExecutablePath() rather than a
+    // readlink("/proc/self/exe"). That call may hand back a path containing
+    // symlinks, hence the realpath() pass.
     uint32_t size = sizeof(exePath);
     bool haveExePath = (_NSGetExecutablePath(exePath, &size) == 0);
     if (haveExePath) {
@@ -57,10 +53,6 @@ static std::string resolveOwnExecutableDir() {
         }
     }
     ssize_t len = haveExePath ? static_cast<ssize_t>(strlen(exePath)) : -1;
-#else
-    ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
-    if (len > 0) exePath[len] = '\0';
-#endif
     if (len > 0) {
         std::string dir(exePath);
         size_t slash = dir.find_last_of('/');

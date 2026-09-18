@@ -3763,3 +3763,43 @@ spec-compliant DFU host does, so it is unlikely to destroy the dangling buffer -
 that is **unverified**, and it is why this is opt-in rather than the default. If a run
 reports the buffer established and then still fails at the overwrite, this probe is the
 first thing to suspect.
+
+### The race is confirmed non-deterministic, and the first retry loop had two bugs
+
+First run of `DEBUG_BUGSETUP_RETRIES=500`:
+
+```
+bug setup: attempt 3 established device state -1 (status request failed) -- proceeding
+bug setup: cancel delay 100 us -> device consumed 0 of 2048 bytes, call took 332 us, attempts 3
+Failed to send abort.
+```
+
+**The headline is the consumed count.** At `DEBUG_CANCEL_DELAY_US=100` this run consumed
+**0** bytes; the earlier single-shot run at exactly the same 100us consumed **64**. Same
+delay, same host, same device, different outcome. The bug setup is genuinely
+non-deterministic, which is direct evidence for the frame-boundary race rather than a
+timing threshold, and it retires the implicit assumption behind every sweep run so far:
+that a given delay produces a repeatable result. It does not. Any future sweep needs
+repeats per delay, not one sample.
+
+Two real bugs in the loop, both now fixed:
+
+- **`-1` was treated as success.** `readDfuState()` returns -1 when the `GETSTATUS`
+  request itself fails, which means EP0 has degraded and the device state is unknown --
+  emphatically not "a buffer exists". The loop proceeded on it, which is the single
+  condition where proceeding is least defensible. It now stops and reports, leaving the
+  destructive stages unrun.
+- **The inter-attempt `DFU_ABORT` was harmful.** It was sent to "keep the device in a
+  known-clean idle", but the loop only retries when the device is *already* `dfuIDLE` --
+  that being the condition it retries on -- so the abort was redundant by construction.
+  SecureROM's DFU is a minimal implementation and need not handle an ABORT from
+  `dfuIDLE` the way the spec describes; EP0 died within three iterations. Removed, plus
+  a settle pause between attempts (`DEBUG_BUGSETUP_RETRY_DELAY_US`, default 2000us).
+
+Note the run did **not** wedge the device in the destructive sense: `Failed to send
+abort.` aborts before the second groom, the overwrite and the payload upload, so nothing
+ran against the ungroomed heap. The degradation was EP0-level from the retry loop
+itself, not the exploit's own corruption.
+
+The loop now also reports how many attempts got the device to consume anything, which
+turns each run into a sample of the race's hit rate rather than a single pass/fail.

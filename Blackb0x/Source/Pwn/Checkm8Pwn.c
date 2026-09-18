@@ -469,6 +469,28 @@ static int readDfuState(irecv_client_t client) {
 // why this is opt-in rather than the default.
 #define kDefaultBugSetupRetries 1
 
+// Pause between bug-setup retries. Exists because back-to-back attempts
+// degraded the device's EP0 within three iterations in the first version of
+// this loop (DFU status requests started failing outright). Some of that was
+// a redundant DFU_ABORT, since removed; this gives the endpoint a moment to
+// settle regardless.
+#define kDefaultRetryDelayUs 2000u
+
+static unsigned retryDelayUs(void) {
+    static int resolved = 0;
+    static unsigned value = kDefaultRetryDelayUs;
+
+    if (!resolved) {
+        const char* env = getenv("DEBUG_BUGSETUP_RETRY_DELAY_US");
+        if (env && *env) {
+            long parsed = strtol(env, NULL, 10);
+            if (parsed >= 0 && parsed <= 1000000) value = (unsigned)parsed;
+        }
+        resolved = 1;
+    }
+    return value;
+}
+
 static int bugSetupRetries(void) {
     static int resolved = 0;
     static int value = kDefaultBugSetupRetries;
@@ -963,6 +985,7 @@ static int runCheckm8Inner(uint64_t ecid) {
     int maxAttempts = bugSetupRetries();
     int sent = 0;
     int bugSetupAttempts = 0;
+    int sawNonzeroConsumed = 0;
     int finalDfuState = -2;   // -2 = never checked (single-shot default)
     unsigned long bugSetupElapsed = 0;
 
@@ -975,29 +998,54 @@ static int runCheckm8Inner(uint64_t ecid) {
         // Single-shot: behave exactly as before, no GETSTATUS, no decisions.
         if (maxAttempts == 1) break;
 
+        if (sent > 0) sawNonzeroConsumed++;
+
         finalDfuState = readDfuState(client);
-        if (finalDfuState != kDfuStateIdle) {
-            // Either the device is holding a buffer (the precondition exists,
-            // which is the point), or the status request itself failed, in
-            // which case guessing is worse than proceeding and letting the
-            // later stages report what they see.
-            printf("bug setup: attempt %d established device state %d (%s) -- proceeding\n",
-                   attempt, finalDfuState,
-                   finalDfuState < 0 ? "status request failed"
-                                     : dfuStateName((unsigned char)finalDfuState));
+
+        if (finalDfuState < 0) {
+            // The status request itself failed -- EP0 has degraded, which is
+            // NOT evidence that a buffer exists. An earlier version of this
+            // loop treated it as "proceed"; that was wrong, and it proceeded on
+            // precisely the one condition where proceeding is least defensible.
+            // Stop here and leave the destructive stages alone.
+            printf("bug setup: attempt %d -- DFU status request failed, so EP0 has "
+                   "degraded and the device state is unknown. This is NOT a buffer. "
+                   "Stopping before the destructive stages.\n", attempt);
             break;
         }
 
-        // Lost the race: the device never saw the SETUP and is untouched, so
-        // retry costs nothing. DFU_ABORT keeps it in a known-clean idle rather
-        // than relying on it already being there.
-        irecv_usb_control_transfer(client, 0x21, 4, 0, 0, NULL, 0, 0);
+        if (finalDfuState != kDfuStateIdle) {
+            printf("bug setup: attempt %d -- device reports state %d (%s), so it IS "
+                   "holding a download buffer. Proceeding.\n",
+                   attempt, finalDfuState, dfuStateName((unsigned char)finalDfuState));
+            break;
+        }
+
+        // Lost the race: the device never saw the SETUP and is untouched, still
+        // in dfuIDLE. Deliberately NO DFU_ABORT here. An earlier version sent
+        // one between attempts to "keep it clean", and the device's EP0 died
+        // within three iterations. The device is already idle by definition --
+        // that is the condition being retried on -- so the abort was redundant,
+        // and SecureROM's DFU is a minimal implementation that need not handle
+        // an ABORT from dfuIDLE the way the spec describes.
+        usleep(retryDelayUs());
 
         if (attempt % 100 == 0) {
             printf("bug setup: %d attempts, device still dfuIDLE (SETUP not reaching it)\n",
                    attempt);
             fflush(stdout);
         }
+    }
+
+    if (maxAttempts > 1) {
+        printf("bug setup: %d attempts, %d of them got the device to consume bytes\n",
+               bugSetupAttempts, sawNonzeroConsumed);
+    }
+
+    if (maxAttempts > 1 && finalDfuState < 0) {
+        free(config.payload);
+        irecv_close(client);
+        return 0;
     }
 
     if (maxAttempts > 1 && finalDfuState == kDfuStateIdle) {

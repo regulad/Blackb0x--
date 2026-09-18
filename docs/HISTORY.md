@@ -3526,20 +3526,47 @@ Linux still dies at `checkm8: device did not reappear after payload execution`, 
 device is left **wedged**: off the USB bus entirely, needing a power cycle, not merely a
 failed reconnect.
 
-That points at the post-payload reset, where there is a real backend asymmetry in
-`irecv_reset()` (`libirecovery.c:2548`):
+That points at the post-payload reset, where `irecv_reset()` (`libirecovery.c:2548`)
+does genuinely different things per backend:
 
 - **IOKit** calls `ResetDevice()` **and then `USBDeviceReEnumerate(handle, 0)`**, and
   explicitly tolerates `kIOReturnNotResponding` from both -- precisely what a device
   executing injected SecureROM code would return.
-- **libusb** calls bare `libusb_reset_device()`, with **no re-enumerate and the return
-  value discarded**. Per libusb's own contract, a device whose descriptors changed
-  across the reset returns `LIBUSB_ERROR_NOT_FOUND` and invalidates the handle -- and
-  checkm8's payload changes the serial string (it appends `PWND:[checkm8]`), so a
-  descriptor change is exactly what happens here.
+- **libusb** calls bare `libusb_reset_device()` and discards the return value.
 
-This is a documented code difference, not a theory about timing, and it sits at the
-step where Linux dies.
+**Correction, after checking libusb and the kernel rather than assuming:** an earlier
+version of this entry claimed the libusb path does "no re-enumerate". That is wrong.
+`libusb_reset_device()` is `USBDEVFS_RESET`, which reaches the kernel's
+`usb_reset_and_verify_device()`; that re-reads the device, config and serial
+descriptors and, if `descriptors_changed()`, takes `goto re_enumerate` ->
+`hub_port_logical_disconnect()`, logically disconnecting and re-adding the device.
+libusb documents the userspace half: if descriptors change "the device will appear to
+be disconnected and reconnected... the device handle is no longer valid", reported as
+`LIBUSB_ERROR_NOT_FOUND`. Since checkm8's payload appends `PWND:[checkm8]` to the
+serial string, that is exactly the branch taken. So Linux does re-enumerate, and
+libirecovery discarding the return value is harmless here because the caller closes
+and re-discovers immediately afterwards regardless.
+
+What survives is narrower, and is a weaker suspect than first written:
+
+- IOKit's `USBDeviceReEnumerate()` is **unconditional** -- it terminates the IOUSBDevice
+  nub and re-enumerates as if the device were physically replugged, every time. Linux
+  re-enumerates **only if** `descriptors_changed()`; otherwise it restores the previous
+  configuration and keeps the same device instance.
+- IOKit's explicit tolerance of `kIOReturnNotResponding` says Apple's path *expects* an
+  unresponsive device at this point. Nothing equivalent is expressed on the libusb side.
+
+Whether either difference actually matters here is **not established**, and the
+mechanism originally asserted for it was false. Treat this as a lead, not a diagnosis.
+
+(Tangentially confirmed while checking: `libusb_reset_device()` is reportedly broken on
+macOS itself since OS X 10.11, with the suggested fix being Apple's own
+`usbDeviceReEnumerate`. Irrelevant to this project -- the macOS build uses libirecovery's
+IOKit backend and never goes through libusb -- but worth knowing before anyone proposes
+"just use libusb everywhere" as a way to remove the asymmetry.)
+
+Sources: libusb API docs (`libusb_reset_device`); Linux `usb_reset_and_verify_device()`
+/ `descriptors_changed()`; libusb issue #455.
 
 **The decisive next measurement is one run**: Linux at any delay <= 90us with
 `DEBUG_TRACE_TRANSFERS=1`, reading `payload-upload moved`.

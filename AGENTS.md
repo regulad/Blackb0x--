@@ -294,10 +294,12 @@ What actually differs is one row: **`payload-upload moved` is 0 on the successfu
 and 678 on the failing one** — a success/failure oracle available before the final
 reset. Linux dies at `device did not reappear after payload execution` with the device
 **wedged off the bus entirely**, which points at the post-payload reset, where
-`irecv_reset()` (`libirecovery.c:2548`) has a real backend asymmetry: IOKit does
-`ResetDevice()` *plus* `USBDeviceReEnumerate()` and tolerates `kIOReturnNotResponding`
-from both, while libusb does a bare `libusb_reset_device()` with no re-enumerate and the
-return value discarded.
+`irecv_reset()` (`libirecovery.c:2548`) differs per backend: IOKit does `ResetDevice()`
+*plus* an unconditional `USBDeviceReEnumerate()`, tolerating `kIOReturnNotResponding`
+from both, while libusb does a bare `libusb_reset_device()`. Note this is a **lead, not
+a diagnosis** — `libusb_reset_device()` *does* re-enumerate when descriptors change
+(which they do here), so the difference is narrower than "one re-enumerates and the
+other doesn't"; see `docs/HISTORY.md` for the correction.
 
 Getting that trace needed `blackb0x-pwn`'s own instrumentation, because the `XHC20`/
 tcpdump route is a **dead end**: macOS hides the USB capture interfaces unless SIP is

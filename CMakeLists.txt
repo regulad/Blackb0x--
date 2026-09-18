@@ -48,8 +48,8 @@ find_package(PkgConfig REQUIRED)
 # own vendored CMakeLists.txt files.
 find_package(Threads REQUIRED)
 
-# curl, libzip, and libusb are vendored and built from source as static
-# libraries below (curl_ext/libzip_ext/libusb_ext), NOT found via
+# curl and libzip are vendored and built from source as static
+# libraries below (curl_ext/libzip_ext), NOT found via
 # find_package(CURL)/pkg_check_modules(LIBZIP)/pkg_check_modules(LIBUSB)
 # the way earlier phases of this port did — see each ExternalProject_Add's
 # own comment for why. No find_package/pkg_check_modules calls for them
@@ -70,10 +70,6 @@ set(DEPS_LIB ${DEPS_PREFIX}/lib)
 set(DEPS_PKGCONFIG ${DEPS_LIB}/pkgconfig)
 file(MAKE_DIRECTORY ${DEPS_INCLUDE})
 file(MAKE_DIRECTORY ${DEPS_PKGCONFIG})
-# CMake validates INTERFACE_INCLUDE_DIRECTORIES on IMPORTED targets at
-# configure time, before libusb_ext has installed anything, so this must
-# exist up front even though libusb.h itself doesn't land until build time.
-file(MAKE_DIRECTORY ${DEPS_INCLUDE}/libusb-1.0)
 
 # Synthetic openssl.pc: libimobiledevice_ext's own configure.ac probes for
 # a pkg-config module literally named "openssl" (PKG_CHECK_MODULES(openssl,
@@ -302,7 +298,7 @@ set(PNG_LIBRARIES ${DEPS_LIB}/libpng16.a ${ZLIB_LIBRARY} CACHE STRING "" FORCE)
 # finding linuxbrew's shared .so, as xpwn's own ipsw-patch/CMakeLists.txt
 # INCLUDE(FindBZip2)/INCLUDE(FindPNG) does by default) purely for the
 # static-linking goal — no static libbz2.a/libpng.a exists anywhere with
-# guaranteed availability, same rationale as libusb/libzip above.
+# guaranteed availability, same rationale as libzip above.
 # Declared here, before add_subdirectory(third_party/xpwn), rather than
 # alongside the other ExternalProject_Add(..._ext) blocks further down —
 # confirmed necessary directly: a later foreach() loop over every
@@ -446,46 +442,6 @@ set(AUTOTOOLS_ENV ${CMAKE_COMMAND} -E env "PKG_CONFIG_PATH=${DEPS_PKGCONFIG}")
 set(DEPS_MODERN_PREFIX ${CMAKE_BINARY_DIR}/deps-modern)
 set(DEPS_MODERN_PKGCONFIG ${DEPS_MODERN_PREFIX}/lib/pkgconfig)
 
-# --disable-udev: udev (systemd's own device/hotplug library) has NO
-# static-archive build on essentially any mainstream Linux distribution —
-# systemd deliberately never ships one — so a genuinely fully-static
-# libusb cannot link it in at all. Confirmed there's a real, supported,
-# non-udev fallback rather than just accepting degraded functionality:
-# libusb's own configure.ac (see the `else` branch of its udev
-# AC_ARG_ENABLE block) falls back to a Linux netlink-socket-based
-# enumeration/hotplug backend (linux_netlink.c) when udev is disabled —
-# netlink is a raw kernel IPC mechanism with no userspace library
-# dependency at all, not a degraded/deprecated code path. This preserves
-# the same hotplug-arrival detection DeviceManager.cpp relies on for
-# noticing when an Apple TV enters DFU mode, just through a different
-# (also first-class) libusb backend.
-ExternalProject_Add(libusb_ext
-    SOURCE_DIR      ${CMAKE_SOURCE_DIR}/third_party/libusb
-    BUILD_IN_SOURCE 1
-    # --disable-examples-build/--disable-tests-build: both already default
-    # to "no" in libusb's own configure.ac, but passed explicitly anyway
-    # after a real build showed libusb's bundled `examples`/`tests`
-    # subdirectories getting built (and, since automake's recursive
-    # "install" target builds a subdirectory's `noinst_PROGRAMS` before
-    # installing, even a plain top-level `make install` hits this, not
-    # just `make`) despite that default -- root cause not fully pinned
-    # down (stale cache in a from-source ExternalProject_Add checkout is
-    # the leading suspect), but this project never needs libusb's own
-    # example/test binaries either way, only libusb-1.0.a itself, so
-    # forcing both off explicitly is correct regardless of why the
-    # default wasn't already doing that. This is what actually fixed a
-    # real macOS build failure: those examples need `-framework
-    # CoreFoundation -framework IOKit -framework Security`
-    # (darwin_usb.c's own CoreFoundation/IOKit/Security API use) that
-    # this project's own build has no reason to provide, since it never
-    # links those example binaries into anything.
-    CONFIGURE_COMMAND ${AUTOTOOLS_ENV} ./autogen.sh --prefix=${DEPS_PREFIX}
-                        --enable-static --disable-shared
-                        --disable-udev
-                        --disable-examples-build --disable-tests-build
-    BUILD_COMMAND   ${AUTOTOOLS_ENV} make -j
-    INSTALL_COMMAND make install
-)
 
 # ENABLE_OPENSSL/ENABLE_COMMONCRYPTO/ENABLE_WINDOWS_CRYPTO OFF: libzip only
 # needs OpenSSL/CommonCrypto at all for reading/writing AES-encrypted zip
@@ -979,15 +935,6 @@ set_target_properties(ZLIB::ZLIB PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES ${DEPS_INCLUDE})
 add_dependencies(ZLIB::ZLIB zlib_ext)
 
-add_deps_imported_lib(usb            libusb-1.0.a)
-add_dependencies(deps::usb libusb_ext)
-# libusb installs its public header to include/libusb-1.0/libusb.h (not
-# directly under include/), but usbmuxd's usb.c does `#include <libusb.h>`
-# with no subdirectory prefix, so the imported target's default
-# INTERFACE_INCLUDE_DIRECTORIES (just ${DEPS_INCLUDE}) isn't enough.
-set_target_properties(deps::usb PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${DEPS_INCLUDE};${DEPS_INCLUDE}/libusb-1.0")
-
 add_deps_imported_lib(zip            libzip.a)
 add_dependencies(deps::zip libzip_ext)
 
@@ -1242,7 +1189,6 @@ target_link_libraries(blackb0x PRIVATE
     deps::tatsu
     deps::general
     deps::wolfssl
-    deps::usb
     deps::zip
     deps::curl
     ZLIB::ZLIB
@@ -1294,7 +1240,7 @@ add_dependencies(blackb0x
     libplist_ext libusbmuxd_ext libimobiledevice_ext
     libirecovery_ext libimobiledevice_glue_ext libgeneral_ext libfragmentzip_ext
     libtatsu_ext
-    wolfssl_ext libusb_ext libzip_ext curl_ext bzip2_ext libpng_ext zlib_ext)
+    wolfssl_ext libzip_ext curl_ext bzip2_ext libpng_ext zlib_ext)
 
 # ---------------------------------------------------------------------------
 # Tests

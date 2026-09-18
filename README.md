@@ -58,7 +58,7 @@ with missing headers. Already cloned without it? `git submodule update --init --
 
 ### Build-time system dependencies
 
-Everything else — wolfSSL, curl, libusb, libimobiledevice, zlib, etc. — is vendored
+Everything else — wolfSSL, curl, libimobiledevice, zlib, etc. — is vendored
 and built from source as part of the build above; nothing else needs installing
 system-wide. What *does* need to already be on the system (verified against a real
 fresh clone + build, not just assumed):
@@ -101,8 +101,8 @@ fresh clone + build, not just assumed):
 `blackb0x` runs the checkm8 exploit by shelling out to `blackb0x-pwn` (see
 `Blackb0x/Source/Pwn/`), a second executable built on every platform. It runs
 this project's own original checkm8/SHAtter exploit directly over
-libirecovery — its native IOKit backend on macOS, libusb elsewhere. There is
-no choice to make and no flag to pass.
+libirecovery's native IOKit backend. There is no choice to make and no flag to
+pass.
 
 `blackb0x-pwn` is **known-good on macOS**: confirmed working against real
 AppleTV3,2 hardware. It can also be run standalone (`blackb0x-pwn checkm8` /

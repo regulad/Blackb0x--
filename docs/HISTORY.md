@@ -3991,3 +3991,47 @@ helper — built to chase the consumed-count avenue, which closed.
    real macOS build is the actual test.** The most likely failure sites are
    `BakeRamdisk.cpp`, where 309 lines were removed mechanically, and the `hdiutil`
    codepath that has never run anywhere.
+
+### Two vendored libraries dropped with it
+
+`libusb` and `p0sixspwn` are gone from `third_party/`, taking the submodule count from
+19 to 17 (`gaster` was the other, earlier).
+
+**`libusb` was the one genuine casualty of dropping Linux.** Four independent checks, so
+nobody has to re-derive this: nothing under `Blackb0x/` or `entrypoint/` includes
+`<libusb.h>` (every hit is a comment); libirecovery's `configure.ac:114-126` only reaches
+`PKG_CHECK_MODULES(libusb, ...)` in the branch *not* taken when `--with-iokit` is passed
+and IOKit is present, which is now unconditional; `libirecovery-1.0.pc.in` declares no
+`Requires` at all, so nothing propagates transitively; and xpwn's own libusb-dependent
+targets were already being skipped (`libusb is required for dfu-util!` /
+`libusb is required for xpwn!` in its configure output) with `pwnmetheus2` disabled in
+our fork. No other vendored dependency wants it either — checked
+`libusbmuxd`/`libimobiledevice`/`libimobiledevice-glue`/`libplist`/`libtatsu`/
+`libfragmentzip`, where every apparent hit is a `libusbmuxd` substring match.
+
+Removed with it: `libusb_ext`, the `deps::usb` imported target and the
+`INTERFACE_INCLUDE_DIRECTORIES` hack that existed because libusb installs its header to
+`include/libusb-1.0/` while consumers `#include <libusb.h>` unprefixed, the
+`file(MAKE_DIRECTORY ${DEPS_INCLUDE}/libusb-1.0)` that existed only so CMake could
+validate that property at configure time, and the `--disable-udev` rationale block (a
+Linux static-linking concern with no meaning on Darwin).
+
+**`p0sixspwn` was never wired up at all** — not a Linux casualty, just dead weight that
+predated this. Zero CMake references, and nothing anywhere read `third_party/p0sixspwn`:
+`stageP0sixspwn()` runs `ar x` against the real
+`com.ih8sn0w-squiffy-winocm.p0sixspwn_1.4-1_iphoneos-arm.deb` in `Blackb0x/Debs/`. It was
+added in `c67038e`, the same commit that added that `.deb` and deleted
+`Blackb0x/Files/p0sixspwn.tgz`, so it looks like a reference checkout that never became a
+build input. Note `.claude/TODO.md` item 3 ("Reimplement p0sixspwn's postinst in
+`entrypoint.c`") is still open and that source is exactly what it would want — re-add the
+submodule if that work starts, rather than treating its absence as a decision about item 3.
+
+**Verified still needed**, recorded so nobody prunes them on a guess: `libgeneral`
+(`libfragmentzip.c:16` includes `<libgeneral/macros.h>`), `libpng` and `bzip2`
+(`ibootim.c` uses `png.h`, `bspatch.c` uses `bzlib.h`, both compiled into
+`add_library(xpwn ...)` which `blackb0x` links), `zlib` (libzip/libpng/curl), and both
+`libplist` copies (deliberate — see above).
+
+One cosmetic leftover: the libirecovery fork's branch is still named
+`libusb-async-cancel-fix`, after libusb fixes this project no longer compiles. Renaming a
+pushed branch that `.gitmodules` pins is not worth the churn.

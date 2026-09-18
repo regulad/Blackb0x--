@@ -60,6 +60,15 @@ std::string resolveBakeAllRamdisksPath();
 // make blackb0x a GPLv3 derivative. Patcher.cpp fork/execs it.
 std::string resolveIBoot32PatcherPath();
 
+// Resolves the path to the `CBPatcher` binary (the kernel patcher; see
+// CMakeLists.txt -- built from the third_party/CBPatcher submodule as its own
+// executable, landing alongside blackb0x itself): $BLACKB0X_CBPATCHER if set,
+// otherwise "CBPatcher" alongside blackb0x's own executable.
+//
+// Separate binary rather than a linked library for the same reason as
+// iBoot32Patcher above: GPL-3.0. Patcher.cpp fork/execs it.
+std::string resolveCBPatcherPath();
+
 // Resolves the loose .deb root: $BLACKB0X_DEBS_DIR if set, otherwise
 // "Blackb0x/Debs" relative to the current working directory. bakeRamdisk()'s
 // stageDebcache() (BakeRamdisk.cpp) copies exactly the subset

@@ -112,19 +112,38 @@ Cflags: -I\${includedir} -include ${DEPS_INCLUDE}/wolfssl/options.h
 # seen elsewhere in this port. Recovered from zzanehip/CBPatcher and
 # zzanehip/iBoot32Patcher (the exact forks the README credits for "updated
 # CBPatcher"/"updated iBoot32Patcher"), confirmed by exact/near-exact header
-# match. This only surfaced once Patcher.cpp (Phase 5) became the first code
-# to actually call patch_kernel()/iBootPatcher(), forcing the linker to pull
-# in and resolve these object files.
+# match.
 #
-# iBoot32Patcher has since moved OUT of Blackb0x/Libraries entirely: it is a
-# submodule built as its own executable and fork/exec'd, for licensing
-# reasons — see its own block further down. Only cbpatcher is still an
-# in-tree recovered source.
-add_library(cbpatcher STATIC
-    Blackb0x/Libraries/CBPatcher.c
-    Blackb0x/Libraries/libcbpatcher/CBPatch.c
-    Blackb0x/Libraries/libcbpatcher/CBPUtils.c)
-target_include_directories(cbpatcher PUBLIC Blackb0x/Libraries)
+# BOTH have since moved OUT of Blackb0x/Libraries entirely: each is a
+# submodule built as its own executable and fork/exec'd, for the same
+# licensing reason — see their blocks below. Nothing recovered that way is
+# still an in-tree source.
+
+# CBPatcher: the kernel patcher, a SEPARATE EXECUTABLE that blackb0x
+# fork/execs — not a static library linked into it.
+#
+# Same licensing constraint as iBoot32Patcher below, and it applied here all
+# along without being noticed: zzanehip/CBPatcher is GPL-3.0, and it was a
+# static library on blackb0x's own link line, which made the whole binary a
+# GPLv3 derivative. The in-tree copy had no LICENSE file, which is how it went
+# unexamined. Do not "simplify" this back into add_library().
+#
+# Unlike iBoot32Patcher, no fork was needed: upstream already ships a real
+# main() (behind its own `#define MAIN`) whose CLI is a drop-in for the
+# patch_kernel() call this project used to link —
+#   cbpatcher <infile> <outfile> <version> [--nosb]
+# with nukesb defaulting to 1, exactly what the old in-tree wrapper hardcoded.
+# Returns 0 on success, -1 on failure.
+#
+# The whole local delta is therefore gone: the `#ifdef __APPLE__` that used to
+# bracket CBPatch.c's Apple-only Mach-O includes, and the portable_macho.h that
+# stood in for them, existed solely to build on Linux. With Linux support
+# removed they are dead weight, so this is plain upstream at a pinned commit.
+add_executable(CBPatcher
+    third_party/CBPatcher/CBPatcher.c
+    third_party/CBPatcher/CBPatch.c
+    third_party/CBPatcher/CBPUtils.c)
+target_include_directories(CBPatcher PRIVATE third_party/CBPatcher)
 
 # iBoot32Patcher is a SEPARATE EXECUTABLE that blackb0x fork/execs -- not a
 # static library linked into it. That is deliberate and is a licensing
@@ -157,7 +176,7 @@ target_include_directories(iBoot32Patcher PRIVATE third_party/iBoot32Patcher)
 # issue (see the blanket xpwn relaxation below) — this 32-bit-pointer-vs-
 # 64-bit-host-pointer reverse-engineering code assigns pointers to uint32_t
 # in a few places; not touching that logic, just relaxing the diagnostic.
-target_compile_options(cbpatcher PRIVATE
+target_compile_options(CBPatcher PRIVATE
     -Wno-error=implicit-int
     -Wno-error=implicit-function-declaration
     -Wno-error=incompatible-pointer-types
@@ -190,7 +209,7 @@ target_include_directories(blackb0x_xpwntool PUBLIC Blackb0x/Libraries)
 # doesn't provide: stitching a TSS-response SHSH/ECID/CERT blob into an
 # existing img3 file's own tags (img3_stitch_component()). Kept as its
 # own small static library rather than folded into blackb0x's own
-# sources, matching cbpatcher/iboot32patcher/blackb0x_xpwntool above.
+# sources, matching blackb0x_xpwntool above.
 add_library(idevicerestore_img3 STATIC
     Blackb0x/Libraries/idevicerestore_img3.c)
 target_include_directories(idevicerestore_img3 PUBLIC Blackb0x/Libraries)
@@ -1172,11 +1191,10 @@ add_executable(blackb0x
 
 target_include_directories(blackb0x PRIVATE third_party/xpwn/includes)
 
-# NOTE: iBoot32Patcher is deliberately absent here -- it is GPLv3 and is
-# fork/exec'd as a separate binary instead of linked. See its add_executable()
-# block above.
+# NOTE: CBPatcher and iBoot32Patcher are deliberately absent here -- both are
+# GPLv3 and are fork/exec'd as separate binaries instead of linked. See their
+# add_executable() blocks above.
 target_link_libraries(blackb0x PRIVATE
-    cbpatcher
     blackb0x_xpwntool
     idevicerestore_img3
     xpwn
@@ -1353,8 +1371,9 @@ add_executable(bake-all-bootloaders
 
 target_include_directories(bake-all-bootloaders PRIVATE third_party/xpwn/includes)
 
+# CBPatcher absent for the same GPLv3 reason as on blackb0x above; this target
+# fork/execs it through the same Patcher.cpp helper.
 target_link_libraries(bake-all-bootloaders PRIVATE
-    cbpatcher
     blackb0x_xpwntool
     xpwn
     deps::plist

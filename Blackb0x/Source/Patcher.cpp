@@ -8,7 +8,6 @@
 
 extern "C" {
 #include <xpwntool.h>
-#include <CBPatcher.h>
 #include <xpwn/libxpwn.h>
 }
 
@@ -28,15 +27,22 @@ extern char** environ;
 namespace fs = std::filesystem;
 
 // ---------------------------------------------------------------------------
-// iBoot32Patcher: invoked as a separate program, never linked
+// The GPL patchers: invoked as separate programs, never linked
 // ---------------------------------------------------------------------------
 
-// iBoot32Patcher is GPL-3.0-or-later (iH8sn0w, 2013-2016) and blackb0x
-// declares no license of its own, so linking it in would make the whole
-// binary a GPLv3 derivative. It is built as its own executable from the
-// third_party/iBoot32Patcher submodule (see CMakeLists.txt) and run here as
-// an independent program. That is a licensing requirement, not a style
-// choice -- do not replace this with a direct iBootPatcher() call.
+// Both patch tools this file drives are GPL-3.0 and blackb0x declares no
+// license of its own, so linking either would make the whole binary a GPLv3
+// derivative. Each is built as its own executable from its own submodule
+// (see CMakeLists.txt) and run here as an independent program:
+//
+//   iBoot32Patcher  the bootloader patcher (iH8sn0w, 2013-2016)
+//   CBPatcher       the kernel patcher (JonathanSeals; zzanehip's fork)
+//
+// That is a licensing requirement, not a style choice -- do not replace
+// either with a direct iBootPatcher()/patch_kernel() call. CBPatcher in
+// particular WAS linked in until this was noticed: it sat in
+// Blackb0x/Libraries with no LICENSE file alongside it, which is how a GPLv3
+// static library ended up on blackb0x's link line unexamined.
 //
 // Deliberately NOT reusing DeviceManager.cpp's runLineBufferedSubprocess():
 // that exists for long-running exploit tools that must stream progress out
@@ -47,10 +53,9 @@ namespace fs = std::filesystem;
 // the exit status.
 //
 // Returns the child's exit status, or -1 if it could not be run at all (both
-// of which callers already treat as failure -- iBoot32Patcher itself returns
-// 0 only on a fully-applied patch set).
-static int runIBoot32Patcher(const std::vector<std::string>& args) {
-    std::string binary = resolveIBoot32PatcherPath();
+// of which callers already treat as failure -- each tool returns 0 only on a
+// fully-applied patch).
+static int runPatchTool(const std::string& binary, const std::vector<std::string>& args) {
 
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>(binary.c_str()));
@@ -61,22 +66,34 @@ static int runIBoot32Patcher(const std::vector<std::string>& args) {
     int spawnErr = posix_spawn(&pid, binary.c_str(), nullptr, nullptr, argv.data(), environ);
     if (spawnErr != 0) {
         fprintf(stderr,
-                "runIBoot32Patcher: could not run %s: %s. It is built alongside blackb0x -- set "
-                "$BLACKB0X_IBOOT32PATCHER to override its location.\n",
+                "runPatchTool: could not run %s: %s. It is built alongside blackb0x -- see "
+                "ResourcePath.hpp for the env var that overrides its location.\n",
                 binary.c_str(), strerror(spawnErr));
         return -1;
     }
 
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) {
-        fprintf(stderr, "runIBoot32Patcher: waitpid() failed: %s\n", strerror(errno));
+        fprintf(stderr, "runPatchTool: waitpid() failed: %s\n", strerror(errno));
         return -1;
     }
     if (WIFSIGNALED(status)) {
-        fprintf(stderr, "runIBoot32Patcher: %s was killed by signal %d\n", binary.c_str(), WTERMSIG(status));
+        fprintf(stderr, "runPatchTool: %s was killed by signal %d\n", binary.c_str(), WTERMSIG(status));
         return -1;
     }
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int runIBoot32Patcher(const std::vector<std::string>& args) {
+    return runPatchTool(resolveIBoot32PatcherPath(), args);
+}
+
+// CLI is a drop-in for the patch_kernel() call this used to link:
+//   CBPatcher <infile> <outfile> <version> [--nosb]
+// nukesb defaults to 1 upstream, which is exactly what the old in-tree
+// wrapper hardcoded, so --nosb is deliberately never passed.
+static int runCBPatcher(const std::vector<std::string>& args) {
+    return runPatchTool(resolveCBPatcherPath(), args);
 }
 
 // ---------------------------------------------------------------------------
@@ -427,9 +444,9 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
     // ipswDataRoot()/deviceModel/buildID, two nested segments, no version
     // anywhere in the path at all) nor any real value in the manifest —
     // confirmed directly: it silently produced an empty string every time,
-    // which patch_kernel() (see below) correctly rejected as an unsupported
+    // which CBPatcher (see below) correctly rejected as an unsupported
     // "iOS 0" — but the caller never checked *that* either, so it fell
-    // through to decrypt()'ing a kernelcache.patched file that patch_kernel()
+    // through to decrypt()'ing a kernelcache.patched file that CBPatcher
     // never actually wrote, corrupting the heap in third_party/xpwn's own
     // decrypt()-with-template path instead of failing cleanly.
     //
@@ -441,7 +458,7 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
     // against a real AppleTV3,2 6.1.3 kernelcache, "7.0" finds ZERO
     // matching CBPatcher signatures ("[CBPatch] One or more patches not
     // found") while just passing productVersion straight through — which
-    // patch_kernel()'s own kernPat()/kernPatOld() truncates to major
+    // CBPatcher's own kernPat()/kernPatOld() truncates to major
     // version 6 internally (versionInt < 8 -> versionFloat =
     // (float)versionInt, see CBPatcher.c) — finds and applies every
     // expected patch (tfp0, AMFI/memcmp bypass, sandbox policy, ...) and
@@ -461,7 +478,7 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
 
     // decrypt() reports failure only by printing (e.g. "error: cannot open
     // infile") -- it returns void, and it still leaves a zero-byte output
-    // file behind. patch_kernel() then SEGVs on that empty input.
+    // file behind. CBPatcher then SEGVs on that empty input.
     //
     // Found by bake-all-bootloaders' first full AppleTV3,2 sweep: 10B329a
     // patches fine, 10B144b dies here with exit 139 after iBSS and iBEC have
@@ -477,22 +494,21 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
     if (!fs::exists(decPath, decEc) || fs::file_size(decPath, decEc) == 0) {
         fprintf(stderr,
                 "patchKernel: decrypt() produced no usable output for %s (wrote %s). Refusing to hand an "
-                "empty file to patch_kernel(), which crashes on one. Check this build's Kernelcache key/iv.\n",
+                "empty file to CBPatcher, which crashes on one. Check this build's Kernelcache key/iv.\n",
                 path.c_str(), decPath.c_str());
         fs::remove(decPath, decEc);
         return false;
     }
 
-    int patchResult = patch_kernel(const_cast<char*>(decPath.c_str()), const_cast<char*>(patchedPath.c_str()),
-                                    const_cast<char*>(internalFirmware.c_str()));
+    int patchResult = runCBPatcher({decPath, patchedPath, internalFirmware});
     if (patchResult != 0) {
-        // patch_kernel() never writes patchedPath on failure (see
-        // CBPatcher.c) — the previous version of this code called decrypt()
-        // on it anyway, which corrupted the heap in xpwntool's own
-        // decrypt()-with-template path when handed a nonexistent input file
-        // rather than failing cleanly. Stop here instead.
-        fprintf(stderr, "patchKernel: patch_kernel() failed for productVersion=\"%s\" (resolved to \"%s\")\n",
-                productVersion.c_str(), internalFirmware.c_str());
+        // CBPatcher never writes patchedPath on failure — the previous
+        // version of this code called decrypt() on it anyway, which corrupted
+        // the heap in xpwntool's own decrypt()-with-template path when handed
+        // a nonexistent input file rather than failing cleanly. Stop here
+        // instead.
+        fprintf(stderr, "patchKernel: CBPatcher failed for productVersion=\"%s\" (resolved to \"%s\", exit %d)\n",
+                productVersion.c_str(), internalFirmware.c_str(), patchResult);
         std::error_code ec;
         fs::remove(decPath, ec);
         return false;
@@ -510,7 +526,7 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
 }
 
 // See Patcher.hpp's own comment. Same decrypt()-only pattern as
-// useStockIBSS()/useStockIBEC()/useStockRamdisk() -- no patch_kernel()
+// useStockIBSS()/useStockIBEC()/useStockRamdisk() -- no CBPatcher
 // call at all.
 bool Patcher::useStockKernel(const std::string& path, bool stockRecovery) {
     if (stockRecovery) {

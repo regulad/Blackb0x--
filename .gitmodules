@@ -54,3 +54,6 @@
 	path = third_party/iBoot32Patcher
 	url = https://github.com/regulad/iBoot32Patcher.git
 	branch = blackb0x
+[submodule "third_party/CBPatcher"]
+	path = third_party/CBPatcher
+	url = https://github.com/zzanehip/CBPatcher.git

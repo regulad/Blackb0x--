@@ -67,8 +67,11 @@ original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
   payload byte arrays, `#include`d directly by `DeviceManager.cpp` — not leftover
   Cocoa, keep these.
 - `Blackb0x/Libraries/` — already-portable C kept in-tree and built directly by the
-  root `CMakeLists.txt`: `CBPatcher.c`/`libcbpatcher/`, `libiboot32patcher.c`/
-  `libiboot32patcher/`, `xpwntool.c`. `libbootkit/` is dead code, linked into nothing.
+  root `CMakeLists.txt`: `xpwntool.c`, `idevicerestore_img3.c`, `libplist_compat.c`.
+  Both GPL patchers have moved OUT of here to their own submodules, built as
+  separate executables and fork/exec'd rather than linked (see the table below):
+  `CBPatcher` and `iBoot32Patcher`. `libbootkit/` and `libprerestore.h` are dead
+  code, linked into nothing and referenced by nothing.
 - `Blackb0x/ramdisk/` — the ramdisk overlay payload shipped to the jailbroken Apple TV
   itself, checked in as loose files (no `.tar`/`.tgz`) mirroring their destination
   paths, merged onto the mounted ramdisk via one `cp -a` (single unconditional
@@ -117,6 +120,7 @@ statically linked. **Forked** means: patched on our own branch, pushed, pointed 
 | `libgeneral` | tihmstar/libgeneral | No |
 | `xpwn` | **regulad/xpwn**@`legacy` | Yes — a wolfSSL AES-CBC buffer over-read fix in `img3.c`, plus disabling the legacy-libusb-0.1-only `pwnmetheus2` subdirectory |
 | `wolfssl`, `curl`, `libzip`, `libpng`, `bzip2`, `zlib` | upstream | No — current HEAD or latest stable tag; none of these existed in the original app |
+| `CBPatcher` | zzanehip/CBPatcher (upstream, pinned) | No — plain upstream. **Built as a separate EXECUTABLE and fork/exec'd, never linked**, same GPL-3.0 reason as `iBoot32Patcher` below: it was a static library on blackb0x's own link line until that was noticed, which the in-tree copy's missing LICENSE file helped hide. No fork needed — upstream already ships a `main()` whose CLI (`<infile> <outfile> <version> [--nosb]`, nukesb defaulting to 1) is a drop-in for the `patch_kernel()` call this used to link. The old local delta (an `#ifdef __APPLE__` around CBPatch.c's Apple-only Mach-O includes, plus `portable_macho.h` standing in for them) existed only to build on Linux and died with Linux support |
 | `iBoot32Patcher` | **regulad/iBoot32Patcher**@`blackb0x`, off zzanehip/iBoot32Patcher | Yes — two real bug fixes: `patch_kaslr()` fell off the end of a non-void function on every *successful* branch (garbage return read non-zero on x86_64, 0 on arm64, so a real macOS run treated a successful KASLR patch as a hard failure), and `iBootPatcher()` tested its `RSA` argument twice so the `debug` argument was dead and `patch_debug_enabled()` ran whenever the RSA patch was asked for. **Built as a separate EXECUTABLE and fork/exec'd, never linked** — it is GPL-3.0-or-later and blackb0x declares no license, so linking would make blackb0x a GPLv3 derivative. Do not "simplify" it back into a static library |
 
 `Blackb0x/Libraries/xpwntool.c` (in-tree, not a submodule) is sourced from
@@ -126,9 +130,7 @@ template`) each printed the diagnostic and then fell through to dereference the 
 they had just reported, so any one of them was a SIGSEGV rather than a failure. They
 bail out now. That is the root cause behind the "`decrypt()` a nonexistent file
 corrupts the heap" hazard `Patcher.cpp` documents in several places; `decrypt()` is
-still `void`, so callers detect failure by checking for a zero-byte output. `Blackb0x/Libraries/libcbpatcher/` is likewise
-in-tree, recovered from `zzanehip/CBPatcher` but with real local portability work on
-top (see `portable_macho.h`).
+still `void`, so callers detect failure by checking for a zero-byte output.
 
 ## Build & run
 

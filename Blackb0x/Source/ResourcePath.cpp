@@ -90,6 +90,15 @@ std::string resolveIBoot32PatcherPath() {
     return "iBoot32Patcher";
 }
 
+std::string resolveCBPatcherPath() {
+    if (const char* override_ = getenv("BLACKB0X_CBPATCHER")) {
+        return std::string(override_);
+    }
+    std::string dir = resolveOwnExecutableDir();
+    if (!dir.empty()) return dir + "/CBPatcher";
+    return "CBPatcher";
+}
+
 std::string resolvePackagePath(const std::string& relativePath) {
     if (const char* override_ = getenv("BLACKB0X_PACKAGE_DIR")) {
         return std::string(override_) + "/" + relativePath;

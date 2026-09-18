@@ -3729,3 +3729,37 @@ what this investigation has been treating it as.
    `irecv_async_usb_control_transfer_with_cancel()`'s libusb branch: it must guarantee
    the SETUP is on the wire before cancelling, which `libusb_submit_transfer()` +
    `usleep()` + `libusb_cancel_transfer()` structurally cannot.
+
+### Making it loopable: retry the bug setup, not the whole exploit
+
+The retry experiment above was blocked by a practical problem: the device wedges on
+**every** failed run and needs a physical power cycle plus manual DFU re-entry, so
+"just run it 60 times" is 60 manual interventions rather than a loop.
+
+The confirmation above dissolves that. The run fails at the *first* step, and everything
+destructive happens after it -- the second grooming pass, the malformed 1660-byte
+overwrite, the payload upload, and the payload-executing reset. Those are what corrupt
+the device's descriptors and wedge it. Running them when the precondition is known
+absent is pure cost.
+
+And a *failed* bug setup leaves the device pristine: it never saw the SETUP, so it is
+still in `dfuIDLE` with nothing allocated. Retrying therefore needs no reset, no power
+cycle, and no manual DFU re-entry.
+
+`DEBUG_BUGSETUP_RETRIES=N` (default 1, the original single-shot behaviour) retries the
+bug setup in-process until `readDfuState()` reports anything other than `dfuIDLE`,
+sending `DFU_ABORT` between attempts to keep the device in a known-clean idle. If all N
+attempts lose the race it prints that plainly and **exits without running any of the
+destructive stages**, leaving the device still enumerable for the next attempt.
+
+This is the same shape as gaster's own per-stage retry -- its RESET/SETUP/SPRAY/PATCH
+machine restarts a stage on failure rather than pressing on -- which standalone
+`blackb0x-pwn` never had.
+
+Cost, stated honestly: one `DFU_GETSTATUS` per attempt, and GETSTATUS advances the DFU
+state machine. On the attempt that finally wins, it moves `dfuDNLOAD_SYNC` to
+`dfuDNBUSY`/`dfuDNLOAD_IDLE`. Polling GETSTATUS after a DNLOAD is exactly what a
+spec-compliant DFU host does, so it is unlikely to destroy the dangling buffer -- but
+that is **unverified**, and it is why this is opt-in rather than the default. If a run
+reports the buffer established and then still fails at the overwrite, this probe is the
+first thing to suspect.

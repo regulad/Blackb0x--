@@ -7,52 +7,36 @@
 # since resolving those correctly requires the real version number, not
 # just the buildID.
 #
+# GENERATED FILE — do not hand-edit. Regenerate with:
+#   scripts/generate_firmware_versions.py [--verify]
+# (.claude/TODO.md item 8: this used to be a hand-collected snapshot.)
+#
 # Format: one line per tuple, space-separated:
 #   <device> <buildID> <version>
 # Sorted by device then buildID (plain `LC_ALL=C sort`, matching this
 # directory's other list files).
 #
-# Source, for the 86 of 95 tuples whose buildID appears in ipsw.me's own
-# database: a single GET per device model against
-#   https://api.ipsw.me/v4/device/<model>?type=ipsw
-# (the same endpoint IPSW.cpp's signedBuildsForDevice() already hits),
-# reading the "buildid"/"version" pair out of each entry under the
-# response's top-level "firmwares" array. Generated 2026-09-14.
+# Generated 2026-09-18. 95 tuples: 1 via appledb, 8 via appledb+manifest, 86 via ipsw.me.
 #
-# The remaining 9 tuples' buildIDs don't appear in ipsw.me's database at
-# all (confirmed both per-device via the v4 endpoint above and globally
-# via https://api.ipsw.me/v4/ipsw/<buildID>, which 404s for all of them) —
-# they're internal/beta builds that never got a public release. For those,
-# https://api.appledb.dev (littlebyteorg/appledb's public API — see its
-# API.md) has an "Apple TV Software;<buildID>" entry for every one of
-# them; note its own "version" field is an internal/marketing version
-# number distinct from the real ProductVersion (e.g. buildID 11B553's
-# AppleDB "version" is "6.0.2", not the real ProductVersion at all), while
-# its "iosVersion" field is the one that actually lines up with
-# ProductVersion. That was independently verified (not just trusted) for
-# 7 of these 9 by resolving each build's real IPSW download URL from
-# AppleDB's own "sources", then range-fetching (via HTTP Range: requests
-# against the remote zip's End-Of-Central-Directory + central-directory
-# records, no full-IPSW download) just that IPSW's own BuildManifest.plist
-# and reading its real ProductVersion key directly — confirmed to match
-# AppleDB's "iosVersion" field exactly in all 7 cases:
-#   AppleTV3,1 11B553, AppleTV3,2 10B806, AppleTV3,2 11A469a,
-#   AppleTV3,2 11B553, AppleTV3,2 11D201b, AppleTV3,2 11D257a,
-#   AppleTV3,2 11D257b, AppleTV3,2 12A402
-# The 9th, AppleTV3,2 12B401, has no IPSW or OTA source archived anywhere
-# in AppleDB at all (nothing to range-fetch a real manifest from) — its
-# version below ("8.1") is inferred from AppleDB's "iosVersion" field
-# ("8.1 beta", trimmed) by the same now-7-for-7-verified iosVersion
-# pattern, and from it sitting in the same 12B buildID neighborhood as the
-# real, public 12B410a/8.1 GM — but unlike the other 8, it is NOT
-# independently verified against a real BuildManifest.plist. Flag this one
-# if it ever matters for exact version-range dependency gating.
+# Sourcing:
+#   ipsw.me         — https://api.ipsw.me/v4/device/<model>?type=ipsw,
+#                     one GET per device model, reading each entry's
+#                     "buildid"/"version" pair from the "firmwares" array.
+#   appledb         — https://api.appledb.dev/ios/Apple%20TV%20Software;<buildID>.json,
+#                     for internal/beta builds ipsw.me does not carry at
+#                     all. Reads "iosVersion", NOT "version": AppleDB's
+#                     "version" is an internal/marketing number that is not
+#                     the ProductVersion (build 11B553 reports version
+#                     "6.0.2" against a real ProductVersion of "7.0.4").
+#   appledb+manifest — the same, then independently verified by resolving
+#                     the build's real IPSW URL from AppleDB's own "sources"
+#                     and range-fetching just that IPSW's BuildManifest.plist
+#                     (HTTP Range against the remote zip's central directory,
+#                     no full download) to read its real ProductVersion.
 #
-# This file only needs to be regenerated if Blackb0x/ImageKeys/ ever gains
-# a new (device, buildID) tuple not listed below — the resolver has its
-# own runtime fallback for that gap when it happens, so this file doesn't
-# need to stay perfectly exhaustive forever, just accurate for what it
-# does list.
+# Per-tuple notes from this run:
+#   AppleTV3,2 12B401: no IPSW source archived; iosVersion unverified
+#
 AppleTV2,1 10A406e 6.0
 AppleTV2,1 10A831 6.0.1
 AppleTV2,1 10B144b 6.1

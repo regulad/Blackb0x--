@@ -457,7 +457,42 @@ prebuilt jailbreak components anywhere public raises different
 considerations than this project's current "you build it yourself"
 posture.
 
-## 8. Author a script to generate the (identifier, build) → firmware version binding
+## 8. Author a script to generate the (identifier, build) → firmware version binding (DONE)
+
+**Done.** `scripts/generate_firmware_versions.py` regenerates
+`Blackb0x/Misc/firmware_versions.txt` on demand, so it tracks
+`Blackb0x/ImageKeys/` instead of being a stale hand-collected snapshot. The
+sourcing logic that was previously only described after the fact is now
+checked in and auditable:
+
+- ipsw.me primary, one GET per device model
+  (`/v4/device/<model>?type=ipsw`), reading `buildid`/`version` from the
+  `firmwares` array — 86 of the 95 tuples.
+- AppleDB fallback (`/ios/Apple%20TV%20Software;<buildID>.json`) for the
+  internal/beta builds ipsw.me does not carry, reading **`iosVersion`, not
+  `version`** — AppleDB's `version` is a marketing number (build 11B553:
+  `version` 6.0.2 vs a real ProductVersion of 7.0.4).
+- `--verify` proves that rather than trusting it: resolves the build's real
+  IPSW URL from AppleDB's own `sources` and range-fetches just that IPSW's
+  `BuildManifest.plist` (HTTP Range against the remote zip's central
+  directory, no full download) to read the real ProductVersion. Reuses
+  `fetch_firmware_component.py`'s existing `HTTPRangeFile`/`fetch_zip_member`
+  rather than reimplementing them.
+- `--check` exits nonzero on drift between the checked-in file and freshly
+  resolved data, comparing data lines only — usable from CI (item 7).
+
+Verified on a real run: all 95 data lines came out byte-identical to the
+hand-collected file, and `--verify` independently confirmed 8 of the 9
+AppleDB-sourced tuples against real BuildManifest.plists. The 9th,
+`AppleTV3,2 12B401`, has no IPSW or OTA source archived anywhere in AppleDB,
+so it stays `iosVersion`-only and the generated header now says so per-tuple
+instead of that caveat living in a hand-written comment.
+
+One gotcha worth keeping: AppleDB's CDN 403s urllib's default
+`Python-urllib/3.x` User-Agent, which presents exactly like "that build does
+not exist". The script sends a real one.
+
+Original note follows.
 
 Not started. `bake-all-ramdisks` currently resolves the version that
 drives persistence-payload selection (`stageVersionBranch()`) and the

@@ -200,7 +200,24 @@ target_compile_options(iBoot32Patcher PRIVATE
 # "xpwntool" (its CLI tool of the same name), which collides otherwise.
 add_library(blackb0x_xpwntool STATIC
     Blackb0x/Libraries/xpwntool.c)
-target_include_directories(blackb0x_xpwntool PUBLIC Blackb0x/Libraries)
+# Blackb0x/Libraries for its own xpwntool.h; third_party/xpwn/includes for the
+# real xpwn headers. There used to be a private copy of 22 xpwn headers at
+# Blackb0x/Libraries/libxpwntool/ and this compiled against those instead --
+# a duplicate set that had quietly diverged from the submodule it links.
+# Deleted: this file only ever used <xpwn/libxpwn.h> and <xpwn/nor_files.h>,
+# and only AbstractFile-level calls (openAbstractFile/2/3,
+# duplicateAbstractFile2, createAbstractFileFromFile), all present upstream.
+#
+# The divergence was real but inert for us: the private img3.h carried extra
+# Img3Info members (shsh/ecid/decryptLast) and a replaceSignatureImg3()
+# that upstream lacks, so compiling against it while linking the submodule's
+# library was a latent struct-layout mismatch -- harmless only because
+# xpwntool.c never names Img3Info. The private libxpwn.h also declared
+# `extern int Img3DecryptLast`, which nothing uses and nothing anywhere
+# defines.
+target_include_directories(blackb0x_xpwntool PUBLIC
+    Blackb0x/Libraries
+    third_party/xpwn/includes)
 
 # idevicerestore's own img3.c/img3.h (src/img3.c, src/img3.h at
 # libimobiledevice/idevicerestore's current HEAD), copied in nearly
@@ -233,9 +250,10 @@ add_library(plist_compat STATIC
 # "target must exist first" reason as blackb0x_xpwntool's own PUBLIC xpwn
 # link a few lines up.
 
-# NOTE on provenance: Blackb0x/Libraries/xpwntool.c and libxpwntool/*.h were
-# confirmed (by direct content diff) to come from zzanehip/xpwntool-swift @
-# 58b69c595c (2020-09-13) — decrypt()'s body is byte-identical, only include
+# NOTE on provenance: Blackb0x/Libraries/xpwntool.c was confirmed (by direct
+# content diff) to come from zzanehip/xpwntool-swift @
+# 58b69c595c (2020-09-13); its libxpwntool/*.h header copies came from the
+# same place and have since been deleted in favour of third_party/xpwn's own — decrypt()'s body is byte-identical, only include
 # paths/a header comment/one debug printf differ. This matches the README's
 # own credit ("zzanehip - updated xpwntool (Created by planetbeing)"). That
 # repo is a reduced xpwntool-only tree with no DMG/HFS+ construction code,
@@ -1097,7 +1115,7 @@ target_include_directories(xpwn BEFORE PRIVATE ${DEPS_INCLUDE}/wolfssl)
 # blackb0x_xpwntool (our own target wrapping Blackb0x/Libraries/xpwntool.c,
 # declared far above — NOT the same target as xpwn's own "xpwntool" CLI
 # tool in this list) needs it too, for the exact same reason: its
-# transitively-included Blackb0x/Libraries/libxpwntool/img3.h has its own
+# transitively-included xpwn/img3.h has its own
 # bare `#include <openssl/aes.h>`. This was silently getting away without
 # it on Linux dev boxes that happen to have a real system libssl-dev
 # installed (AES_KEY's struct layout has stayed ABI-stable across the

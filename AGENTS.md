@@ -67,11 +67,14 @@ original macOS Cocoa/Objective-C app (the `.m`/`.mm`/`.h` files still in
   payload byte arrays, `#include`d directly by `DeviceManager.cpp` — not leftover
   Cocoa, keep these.
 - `Blackb0x/Libraries/` — already-portable C kept in-tree and built directly by the
-  root `CMakeLists.txt`: `xpwntool.c`, `idevicerestore_img3.c`, `libplist_compat.c`.
+  root `CMakeLists.txt`: `xpwntool.c` (compiled against `third_party/xpwn`'s own
+  headers — its private `libxpwntool/` header copies are deleted),
+  `idevicerestore_img3.c`, `libplist_compat.c`.
   Both GPL patchers have moved OUT of here to their own submodules, built as
   separate executables and fork/exec'd rather than linked (see the table below):
-  `CBPatcher` and `iBoot32Patcher`. `libbootkit/` and `libprerestore.h` are dead
-  code, linked into nothing and referenced by nothing.
+  `CBPatcher` and `iBoot32Patcher`. `libbootkit/` and `libprerestore.h` used to
+  sit here as dead code, linked into nothing and referenced by nothing; both are
+  deleted.
 - `Blackb0x/ramdisk/` — the ramdisk overlay payload shipped to the jailbroken Apple TV
   itself, checked in as loose files (no `.tar`/`.tgz`) mirroring their destination
   paths, merged onto the mounted ramdisk via one `cp -a` (single unconditional
@@ -124,7 +127,8 @@ statically linked. **Forked** means: patched on our own branch, pushed, pointed 
 | `iBoot32Patcher` | **regulad/iBoot32Patcher**@`blackb0x`, off zzanehip/iBoot32Patcher | Yes — two real bug fixes: `patch_kaslr()` fell off the end of a non-void function on every *successful* branch (garbage return read non-zero on x86_64, 0 on arm64, so a real macOS run treated a successful KASLR patch as a hard failure), and `iBootPatcher()` tested its `RSA` argument twice so the `debug` argument was dead and `patch_debug_enabled()` ran whenever the RSA patch was asked for. **Built as a separate EXECUTABLE and fork/exec'd, never linked** — it is GPL-3.0-or-later and blackb0x declares no license, so linking would make blackb0x a GPLv3 derivative. Do not "simplify" it back into a static library |
 
 `Blackb0x/Libraries/xpwntool.c` (in-tree, not a submodule) is sourced from
-`zzanehip/xpwntool-swift`, with one local fix: `decrypt()`'s three error paths
+`zzanehip/xpwntool-swift`, and compiles against `third_party/xpwn`'s headers
+rather than the private copies it shipped with, with one local fix: `decrypt()`'s three error paths
 (`cannot open infile` / `cannot open outfile` / `cannot duplicate file from provided
 template`) each printed the diagnostic and then fell through to dereference the NULL
 they had just reported, so any one of them was a SIGSEGV rather than a failure. They

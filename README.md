@@ -184,9 +184,6 @@ See [`AGENTS.md`](AGENTS.md) for repo conventions, and
 **[NSSpiral](https://github.com/NSSpiral/Blackb0x)**
 * Original Blackb0x — the macOS Cocoa/Objective-C app this project is a portable CLI port of
 
-**nyan_satan**
-* libbootkit (iBSS loader for AppleTV3,2)
-
 **dora2ios**
 * iBSS loader for AppleTV3,1
 

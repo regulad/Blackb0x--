@@ -6,6 +6,13 @@
 #
 # [packages-file] overrides package/packages.txt; only useful for testing.
 #
+# Environment:
+#   BLACKB0X_PICKLIST    path to a picklist (one .deb filename per line -- the
+#                        bake's full resolved closure). Required to build the
+#                        bundled local repo; without it no local repo is added.
+#   BLACKB0X_DEBS_DIR    where those .deb files live (default Blackb0x/Debs).
+#   LOCAL_ONLY_LIST      overrides package/local_only_debs.txt.
+#
 # <staging-dir> is a complete, ready-to-package tree: DEBIAN/ plus the payload
 # laid out at its final on-device paths. BakeRamdisk.cpp assembles that tree at
 # bake time (the payload is not static -- postinstall.sh is templated with the
@@ -55,6 +62,55 @@ fi
 if grep -q '__BLACKB0X_VERSION__' "$STAGING/DEBIAN/control"; then
     echo "$0: DEBIAN/control still has an unsubstituted __BLACKB0X_VERSION__" >&2
     exit 1
+fi
+
+# The bundled file-backed apt repository at /var/.blackb0x/local-debs.
+#
+# Built from the INTERSECTION of the picklist and local_only_debs.txt: the
+# former is what this bake actually resolved (apt's transitive closure plus the
+# local-only entries), the latter is every .deb that can only ever come from a
+# local repo because no live repo carries it. Taking the intersection rather
+# than local_only_debs.txt wholesale means a local-only package that this
+# firmware did not end up needing does not get shipped.
+#
+# Both files list .deb FILENAMES, so this matches on filename directly.
+#
+# The Packages index is generated in the container by the real
+# dpkg-scanpackages (see the container command at the bottom) -- apt needs a
+# real index, not just loose .deb bytes, to resolve these by name. The index
+# is unsigned, which is why postinstall.sh installs with
+# --allow-unauthenticated.
+: "${LOCAL_ONLY_LIST:=$(dirname "$0")/local_only_debs.txt}"
+: "${BLACKB0X_DEBS_DIR:=$(dirname "$0")/../Blackb0x/Debs}"
+LOCAL_DEBS_DEST="$STAGING/var/.blackb0x/local-debs"
+
+if [ -n "${BLACKB0X_PICKLIST:-}" ]; then
+    if [ ! -f "$BLACKB0X_PICKLIST" ]; then
+        echo "$0: BLACKB0X_PICKLIST=$BLACKB0X_PICKLIST does not exist" >&2
+        exit 1
+    fi
+    if [ ! -f "$LOCAL_ONLY_LIST" ]; then
+        echo "$0: $LOCAL_ONLY_LIST does not exist" >&2
+        exit 1
+    fi
+    mkdir -p "$LOCAL_DEBS_DEST"
+    # Strip comments/blanks from both sides, then intersect.
+    sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$LOCAL_ONLY_LIST" | grep -v '^$' | sort -u > "$STAGING/.local-only.tmp"
+    sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$BLACKB0X_PICKLIST" | grep -v '^$' | sort -u > "$STAGING/.picklist.tmp"
+    WANTED=$(comm -12 "$STAGING/.local-only.tmp" "$STAGING/.picklist.tmp")
+    rm -f "$STAGING/.local-only.tmp" "$STAGING/.picklist.tmp"
+
+    if [ -z "$WANTED" ]; then
+        echo "$0: note: no local-only .deb from $LOCAL_ONLY_LIST appears in the picklist; local repo will be empty" >&2
+    fi
+    for f in $WANTED; do
+        if [ ! -f "$BLACKB0X_DEBS_DIR/$f" ]; then
+            echo "$0: $LOCAL_ONLY_LIST lists $f and the picklist wants it, but $BLACKB0X_DEBS_DIR/$f is missing" >&2
+            exit 1
+        fi
+        cp "$BLACKB0X_DEBS_DIR/$f" "$LOCAL_DEBS_DEST/$f"
+        echo "$0: local repo <- $f" >&2
+    done
 fi
 
 # postinstall.sh's install list is substituted HERE, at package-build time,
@@ -139,6 +195,11 @@ fi
 # Directories 0755, files 0644, then the two things that must execute.
 PERMS_SCRIPT='
 set -eu
+# Real dpkg-scanpackages, not a hand-rolled index: apt is strict about the
+# fields and checksums it expects here.
+if [ -d /stage/var/.blackb0x/local-debs ] && ls /stage/var/.blackb0x/local-debs/*.deb >/dev/null 2>&1; then
+    ( cd /stage/var/.blackb0x/local-debs && dpkg-scanpackages . /dev/null 2>/dev/null > Packages )
+fi
 chown -R 0:0 /stage
 find /stage -type d -exec chmod 755 {} +
 find /stage -type f -exec chmod 644 {} +

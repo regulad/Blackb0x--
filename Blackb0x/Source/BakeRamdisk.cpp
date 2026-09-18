@@ -1904,7 +1904,8 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
 // missing loose asset elsewhere: a ramdisk with no packages to install
 // can't actually finish the jailbreak.
 static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmwareVersion,
-                           std::vector<std::string>& outResolvedPackages, std::string& outLocalRepoDir) {
+                           std::vector<std::string>& outResolvedPackages,
+                           std::vector<std::string>& outPicklist) {
     GlobalDebcacheResult result;
     if (!computeGlobalDebcacheOnce(firmwareVersion, result)) {
         return false;
@@ -1926,16 +1927,17 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
     allOk &= mergePreinstalledPackages(blackb0xRoot, result.preinstallPayloadDir, result.dpkgStateDir);
     allOk &= stageAptListsCache(blackb0xRoot, result.aptListsDir);
 
-    // local_only_debs.txt's real apt repo (Packages index + the .debs it
-    // describes) is NOT staged here. It is xyz.regulad.blackb0x package
-    // content -- handed back so stageBlackb0xPackage() can put it in the
-    // .deb, which is what actually installs it at /var/.blackb0x/local-debs.
+    // The bundled local apt repo is NOT staged here -- it is
+    // xyz.regulad.blackb0x package content. package/build.sh builds it from
+    // the intersection of this picklist and package/local_only_debs.txt, and
+    // generates its Packages index with the real dpkg-scanpackages, so the
+    // picklist is what gets handed back rather than a prebuilt directory.
     //
     // The debcache staged above (private/var/cache/apt/archives + apt-lists)
     // is a different thing entirely: the native apt cache, filled by the
     // baker with whatever could not usefully be pre-baked. Both happen to be
     // .debs, which is the only reason they were ever conflated.
-    outLocalRepoDir = result.localRepoDir;
+    outPicklist = result.allFilenames;
 
     outResolvedPackages = result.resolvedPackages;
     return allOk;
@@ -2397,7 +2399,7 @@ static bool stageVersionBranch(const fs::path& blackb0xRoot, const std::string& 
 // and /var are symlinks into /private), but /blackb0x is a flat mirror that
 // entrypoint.c replicates literally, so the real paths are used here.
 static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string& productVersion,
-                                  const std::string& localRepoDir) {
+                                  const std::vector<std::string>& picklist) {
     std::string stagingDir = makeTempDir("blackb0x-package-stage-");
     std::string outDir = makeTempDir("blackb0x-package-out-");
     if (stagingDir.empty() || outDir.empty()) {
@@ -2419,18 +2421,18 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
         return false;
     }
 
-    // The bundled local apt repo, if this run produced one.
-    if (!localRepoDir.empty()) {
-        fs::path dest = fs::path(stagingDir) / "var/.blackb0x/local-debs";
-        fs::create_directories(dest, ec);
-        fs::copy(localRepoDir, dest,
-                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-        if (ec) {
-            fprintf(stderr, "bakeRamdisk: cannot copy the local repo into the package: %s\n",
-                    ec.message().c_str());
-            ok = false;
-        }
+    // build.sh builds the bundled local repo itself, from the intersection of
+    // this picklist and package/local_only_debs.txt. It is handed the picklist
+    // rather than a finished directory so the package owns its own repo
+    // construction (including generating the Packages index with the real
+    // dpkg-scanpackages, which only exists inside the container).
+    std::string picklistPath = outDir + "/picklist.txt";
+    {
+        std::ofstream f(picklistPath);
+        for (const auto& fn : picklist) f << fn << "\n";
     }
+    setenv("BLACKB0X_PICKLIST", picklistPath.c_str(), 1);
+    setenv("BLACKB0X_DEBS_DIR", fs::absolute(resolveDebsPath()).c_str(), 1);
 
     std::string debPath = outDir + "/xyz.regulad.blackb0x.deb";
     if (!runCommand({resolvePackageRoot() + "/build.sh", stagingDir, debPath, productVersion}, ".")) {
@@ -2518,9 +2520,9 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
     // bundled local repo -- arrives as one real .deb instead of a dozen
     // stageFile() calls dpkg had no record of.
     std::vector<std::string> resolvedPackages;
-    std::string localRepoDir;
-    if (!stageDebcache(blackb0xRoot, productVersion, resolvedPackages, localRepoDir)) ok = false;
-    if (!stageBlackb0xPackage(blackb0xRoot, productVersion, localRepoDir)) ok = false;
+    std::vector<std::string> picklist;
+    if (!stageDebcache(blackb0xRoot, productVersion, resolvedPackages, picklist)) ok = false;
+    if (!stageBlackb0xPackage(blackb0xRoot, productVersion, picklist)) ok = false;
     if (!stageVersionBranch(blackb0xRoot, productVersion)) ok = false;
 
     return ok;

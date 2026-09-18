@@ -93,6 +93,33 @@ package installs. `Blackb0x/Misc/prebake_package_blacklist.txt` deliberately
 does **not** move: it is baker policy about what may be unpacked at bake time,
 not a statement about package content.
 
+## The bundled local repository
+
+`/var/.blackb0x/local-debs` is a real file-backed apt repo shipped inside the
+package. `build.sh` builds it from the **intersection** of two lists:
+
+- the picklist (`BLACKB0X_PICKLIST`) — every `.deb` this bake actually
+  resolved: apt's transitive closure plus the local-only entries
+  (`build_deb_cache.py` unions them at line 583)
+- `local_only_debs.txt` — every `.deb` that can only ever come from a local
+  repo, because no live repo carries it
+
+Intersecting rather than shipping `local_only_debs.txt` wholesale means a
+local-only package this firmware did not end up needing is not shipped. Both
+files list `.deb` filenames, so the match is on filename.
+
+The `Packages` index is generated in the container by the real
+`dpkg-scanpackages` — apt is strict about the fields and checksums it expects,
+so a hand-rolled index is not an option. That index is unsigned, which is why
+`postinstall.sh` installs with `--allow-unauthenticated`. (Note
+`build_deb_cache.py`'s comment describes the source line as
+`deb [trusted=yes] ...`; the real `local.list` has never carried that flag.)
+
+**This is why the package cannot be built standalone from a clean checkout.**
+`build.sh` works on any staging tree, but a *complete* package needs a
+debcache run to have produced a picklist first. Sequencing that is the baker's
+job.
+
 ## What's assembled at bake time
 
 `layout/` is static except for one file. `var/.blackb0x/postinstall.sh` ships

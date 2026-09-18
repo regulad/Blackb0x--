@@ -1,0 +1,34 @@
+#!/bin/sh
+# Load the first-boot installer LaunchDaemon.
+#
+# Deliberately trivial, and deliberately redundant: the daemon is RunAtLoad,
+# so a real first boot loads it anyway without this ever running. It exists
+# so that installing this package by hand on an already-booted device does
+# the right thing too.
+#
+# That triviality is load-bearing for the ramdisk baker. BakeRamdisk.cpp's
+# bake-time preinstall pass strips this script before `dpkg --configure`
+# (computePreinstallEligibleFilenames() -> strip_postinst_packages.txt),
+# because the bootstrap container has no `launchctl` and no iOS at all.
+# Stripping is only safe BECAUSE this is a no-op on a fresh boot -- follow
+# com.firecore.freemem-watcher, whose postinst is the same bare launchctl
+# load for the same reason (see Blackb0x/Misc/prebake_package_blacklist.txt).
+#
+# Consequences, if you edit this file:
+#   - Keep it idempotent and side-effect-free on a fresh boot. Anything that
+#     genuinely must happen at install time cannot live here; it would be
+#     silently skipped at bake time.
+#   - Do NOT add a preinst. preinst runs DURING `dpkg --unpack`, so the baker
+#     cannot strip it after the fact and has to rebuild the .deb without it.
+#   - Do NOT add this package to prebake_package_blacklist.txt. That would
+#     pull it, and everything depending on it, out of bake-time preinstall
+#     entirely.
+set -e
+
+PLIST=/System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist
+
+if [ -x /bin/launchctl ] || command -v launchctl >/dev/null 2>&1; then
+    [ -f "$PLIST" ] && launchctl load "$PLIST" 2>/dev/null || true
+fi
+
+exit 0

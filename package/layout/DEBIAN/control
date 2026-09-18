@@ -1,0 +1,10 @@
+Package: xyz.regulad.blackb0x
+Name: blackb0x
+Version: __BLACKB0X_VERSION__
+Architecture: iphoneos-arm
+Description: Apple TV 2/3 jailbreak bootstrap — apt sources, local package repository, and first-boot installer.
+Maintainer: regulad <parkeredwardwahle2017@gmail.com>
+Author: regulad <parkeredwardwahle2017@gmail.com>
+Section: System
+Depends: firmware (>= 4.0)
+Tag: role::hacker

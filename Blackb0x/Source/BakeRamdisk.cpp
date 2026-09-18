@@ -829,7 +829,7 @@ static bool stageAptListsCache(const fs::path& blackb0xRoot, const std::string& 
 // Depends: on it. Not staging the .deb bytes doesn't mean the package is
 // unreachable, though: its real Packages metadata still gets staged via
 // stageAptListsCache() below, and postinstall.sh's array (see
-// stagePostinstallScript()) still lists it — apt will fetch it over the
+// package/packages.txt) still lists it — apt will fetch it over the
 // network at install time if one is reachable, and just fail to install
 // that one specific package (not the rest) if not, matching the
 // "opportunistic network, not required" design this whole staging pass is
@@ -1894,7 +1894,7 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
 // mechanism is gone) — plus the preinstalled-package payload/dpkg-state
 // and the apt lists cache. Returns the real, apt-resolved package NAMES
 // (not .deb filenames) via `outResolvedPackages` for
-// stagePostinstallScript() to bake into postinstall.sh's install array.
+// package/build.sh to template into postinstall.sh's install array.
 // `firmwareVersion` is this bake's real, per-tuple ProductVersion (see
 // stageBlackb0xTree()'s own caller) — threaded straight into
 // computeGlobalDebcacheOnce() as both the cache key and the synthetic
@@ -1904,7 +1904,7 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
 // missing loose asset elsewhere: a ramdisk with no packages to install
 // can't actually finish the jailbreak.
 static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmwareVersion,
-                           std::vector<std::string>& outResolvedPackages) {
+                           std::vector<std::string>& outResolvedPackages, std::string& outLocalRepoDir) {
     GlobalDebcacheResult result;
     if (!computeGlobalDebcacheOnce(firmwareVersion, result)) {
         return false;
@@ -1927,19 +1927,15 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
     allOk &= stageAptListsCache(blackb0xRoot, result.aptListsDir);
 
     // local_only_debs.txt's real apt repo (Packages index + the .debs it
-    // describes) — staged at the exact path package/layout's local.list
-    // (`deb file:///var/.blackb0x/local-debs ./`) expects, so the real
-    // device's own apt-get can resolve these by name too.
+    // describes) is NOT staged here. It is xyz.regulad.blackb0x package
+    // content -- handed back so stageBlackb0xPackage() can put it in the
+    // .deb, which is what actually installs it at /var/.blackb0x/local-debs.
     //
-    // This is xyz.regulad.blackb0x PACKAGE content, not debcache: the local
-    // repo ships with the package, while the debcache
-    // (private/var/cache/apt/archives + apt-lists, staged above) is the
-    // native apt cache the baker fills with whatever it could not usefully
-    // pre-bake. Two different things that both happen to be .debs.
-    if (!result.localRepoDir.empty()) {
-        allOk &= stageDirectoryTree(blackb0xRoot, "var/.blackb0x/local-debs", result.localRepoDir, kUidMobile,
-                                     kGidStaff, 0644);
-    }
+    // The debcache staged above (private/var/cache/apt/archives + apt-lists)
+    // is a different thing entirely: the native apt cache, filled by the
+    // baker with whatever could not usefully be pre-baked. Both happen to be
+    // .debs, which is the only reason they were ever conflated.
+    outLocalRepoDir = result.localRepoDir;
 
     outResolvedPackages = result.resolvedPackages;
     return allOk;
@@ -2378,58 +2374,111 @@ static bool stageVersionBranch(const fs::path& blackb0xRoot, const std::string& 
     return true;
 }
 
-// Templates Misc/postinstall.sh's one placeholder, __BLACKB0X_PACKAGES__,
-// with the real, apt-resolved package names stageDebcache() just handed
-// back (everything except "cydia", which postinstall.sh already installs
-// separately, first, on its own — see that script's own comment for why).
-// Not a plain stageFile() copy like everything else staged here — this is
-// the one asset whose content actually depends on what this specific bake
-// resolved, not just a static checked-in file.
+// Builds the real xyz.regulad.blackb0x .deb and installs it into the staged
+// /blackb0x tree, which is what most of this file used to do by hand with a
+// dozen individual stageFile() calls (.claude/TODO.md item 11).
 //
-// INTERIM: package/build.sh now performs this same __BLACKB0X_PACKAGES__
-// substitution at package-build time, which is where it belongs -- it is the
-// package's own content. This function duplicates that only until the .deb
-// assembly is wired up (.claude/TODO.md item 11); at that point the baker
-// hands build.sh a resolved-packages file and this goes away entirely rather
-// than the two staying in sync by hand.
-static bool stagePostinstallScript(const fs::path& blackb0xRoot, const std::vector<std::string>& resolvedPackages) {
-    std::string srcPath = resolvePackagePath("var/.blackb0x/postinstall.sh");
-    std::ifstream in(srcPath, std::ios::binary);
-    if (!in) {
-        fprintf(stderr, "bakeRamdisk: WARNING: missing source %s — not staging postinstall.sh\n", srcPath.c_str());
+// The package needs no state beyond its own package/ tree and the bundled
+// local repo: package/build.sh templates postinstall.sh's install list from
+// package/packages.txt itself, not from this bake's resolved closure, so this
+// is a plain package build that happens to run during a bake rather than
+// something entangled with it.
+//
+// Installing it is the same mechanism stageEtasonatv()/stageP0sixspwn()
+// already use for packages that never go through real apt: extract the .deb,
+// merge its payload into /blackb0x, and append a real dpkg status stanza so
+// the on-device dpkg has a genuine record of it. Every file in the .deb is
+// uid 0 / gid 0 (dm.pl records the container-side root), which is exactly
+// what the LaunchDaemon plist needs -- launchd refuses to load a plist that
+// is not root-owned -- and mergeRealFilesystemTree() preserves that.
+//
+// Top-level etc/ and var/ are remapped to private/etc/ and private/var/. The
+// .deb ships them unprefixed, which is right for dpkg on-device (iOS's /etc
+// and /var are symlinks into /private), but /blackb0x is a flat mirror that
+// entrypoint.c replicates literally, so the real paths are used here.
+static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string& productVersion,
+                                  const std::string& localRepoDir) {
+    std::string stagingDir = makeTempDir("blackb0x-package-stage-");
+    std::string outDir = makeTempDir("blackb0x-package-out-");
+    if (stagingDir.empty() || outDir.empty()) {
+        fprintf(stderr, "bakeRamdisk: cannot create package build temp dirs\n");
         return false;
     }
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    std::string content = ss.str();
 
-    std::string packagesLiteral;
-    for (const auto& pkg : resolvedPackages) {
-        if (pkg == "cydia") continue;
-        if (!packagesLiteral.empty()) packagesLiteral += " ";
-        packagesLiteral += pkg;
-    }
-
-    const std::string placeholder = "__BLACKB0X_PACKAGES__";
-    size_t pos = content.find(placeholder);
-    if (pos == std::string::npos) {
-        fprintf(stderr, "bakeRamdisk: %s has no %s placeholder\n", srcPath.c_str(), placeholder.c_str());
+    bool ok = true;
+    std::error_code ec;
+    fs::copy(resolvePackagePath(""), stagingDir,
+             fs::copy_options::recursive | fs::copy_options::overwrite_existing |
+                 fs::copy_options::copy_symlinks,
+             ec);
+    if (ec) {
+        fprintf(stderr, "bakeRamdisk: cannot copy %s into the package staging tree: %s\n",
+                resolvePackagePath("").c_str(), ec.message().c_str());
+        fs::remove_all(stagingDir, ec);
+        fs::remove_all(outDir, ec);
         return false;
     }
-    content.replace(pos, placeholder.size(), packagesLiteral);
 
-    fs::path destPath = blackb0xRoot / "var/.blackb0x/postinstall.sh";
-    ensureParentDirs(blackb0xRoot, destPath);
-    std::ofstream out(destPath, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        fprintf(stderr, "bakeRamdisk: cannot write %s\n", destPath.c_str());
+    // The bundled local apt repo, if this run produced one.
+    if (!localRepoDir.empty()) {
+        fs::path dest = fs::path(stagingDir) / "var/.blackb0x/local-debs";
+        fs::create_directories(dest, ec);
+        fs::copy(localRepoDir, dest,
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            fprintf(stderr, "bakeRamdisk: cannot copy the local repo into the package: %s\n",
+                    ec.message().c_str());
+            ok = false;
+        }
+    }
+
+    std::string debPath = outDir + "/xyz.regulad.blackb0x.deb";
+    if (!runCommand({resolvePackageRoot() + "/build.sh", stagingDir, debPath, productVersion}, ".")) {
+        fprintf(stderr, "bakeRamdisk: package/build.sh failed — see stderr above\n");
+        fs::remove_all(stagingDir, ec);
+        fs::remove_all(outDir, ec);
         return false;
     }
-    out << content;
-    out.close();
-    chmod(destPath.c_str(), 0755);
-    chown(destPath.c_str(), kUidMobile, kGidStaff);
-    return true;
+
+    ExtractedDeb extracted = extractDebAndBuildStanza(debPath, "blackb0x-package-install-",
+                                                       "xyz.regulad.blackb0x");
+    if (!extracted.ok || extracted.stanza.empty()) {
+        fprintf(stderr, "bakeRamdisk: could not extract/describe the built xyz.regulad.blackb0x .deb\n");
+        if (!extracted.tempDir.empty()) fs::remove_all(extracted.tempDir, ec);
+        fs::remove_all(stagingDir, ec);
+        fs::remove_all(outDir, ec);
+        return false;
+    }
+
+    std::vector<std::string> ownedPaths;
+    for (const auto& entry : fs::directory_iterator(extracted.tempDir, ec)) {
+        std::string name = entry.path().filename().string();
+        if (name == "control" || name == "debian-binary" || name.rfind("control.tar", 0) == 0 ||
+            name.rfind("data.tar", 0) == 0) {
+            continue;
+        }
+        std::string destRel = name;
+        if (name == "etc" || name == "var") destRel = "private/" + name;
+        ok &= mergeRealFilesystemTree(blackb0xRoot, destRel, entry.path());
+    }
+
+    // Record the real on-device paths, which are the .deb's own (unprefixed)
+    // ones -- not the private/-prefixed spellings used inside /blackb0x.
+    for (const char* p : {"/etc/apt/sources.list.d/regulad.list", "/etc/apt/sources.list.d/saurik.list",
+                          "/etc/apt/sources.list.d/awkwardtv.list", "/etc/apt/sources.list.d/bigboss.list",
+                          "/etc/apt/sources.list.d/xbmc.list", "/etc/apt/sources.list.d/local.list",
+                          "/etc/apt/trusted.gpg.d/regulad.gpg", "/etc/apt/trusted.gpg.d/saurik.gpg",
+                          "/etc/apt/trusted.gpg.d/awkwardtv.gpg", "/etc/apt/trusted.gpg.d/bigboss.gpg",
+                          "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
+                          "/var/.blackb0x/postinstall.sh", "/var/root/.profile"}) {
+        ownedPaths.push_back(p);
+    }
+    ok &= stageManualDpkgInstall(blackb0xRoot, extracted.stanza, "xyz.regulad.blackb0x", ownedPaths);
+
+    fs::remove_all(extracted.tempDir, ec);
+    fs::remove_all(stagingDir, ec);
+    fs::remove_all(outDir, ec);
+    return ok;
 }
 
 // Builds /blackb0x under `parentDir` (a plain host directory — this no
@@ -2449,63 +2498,29 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
 
     bool ok = true;
 
-    stageFile(blackb0xRoot, "private/var/root/.profile", resolvePackagePath("var/root/.profile"), kUidMobile, kGidStaff, 0755);
-    // dpkg itself has no raw loose-file source in this repo, but it
-    // doesn't need one anymore: "dpkg" is a real, no-postinst entry in
-    // packages.txt, so stageDebcache()'s bake-time preinstall mechanism
-    // (see computePreinstallEligibleFilenames()/stagePreinstalledPackages())
-    // unpacks its real .deb (whose own payload already puts the binary at
-    // ./usr/bin/dpkg) and marks it installed directly — the same real
-    // mechanism now used for coreutils-bin, bash, and everything else with
-    // no postinst, not a special case.
-
+    // Bare directories the device needs to exist with specific ownership,
+    // which a .deb payload does not express well (they hold no files of ours).
     stageDir(blackb0xRoot, "private/etc/ssh", kUidMobile, kGidStaff, 0700);
     for (const auto& dir : kCydiaDirs) {
         stageDir(blackb0xRoot, dir, kUidMobile, kGidStaff, 0755);
     }
 
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/regulad.list", resolvePackagePath("etc/apt/sources.list.d/regulad.list"),
-              kUidMobile, kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/regulad.gpg", resolvePackagePath("etc/apt/trusted.gpg.d/regulad.gpg"), 0, 0,
-              0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/saurik.list", resolvePackagePath("etc/apt/sources.list.d/saurik.list"),
-              kUidMobile, kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/saurik.gpg", resolvePackagePath("etc/apt/trusted.gpg.d/saurik.gpg"), 0, 0,
-              0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/awkwardtv.list", resolvePackagePath("etc/apt/sources.list.d/awkwardtv.list"),
-              kUidMobile, kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/awkwardtv.gpg", resolvePackagePath("etc/apt/trusted.gpg.d/awkwardtv.gpg"), 0,
-              0, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/bigboss.list", resolvePackagePath("etc/apt/sources.list.d/bigboss.list"),
-              kUidMobile, kGidStaff, 0644);
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/bigboss.gpg", resolvePackagePath("etc/apt/trusted.gpg.d/bigboss.gpg"), 0, 0,
-              0644);
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/xbmc.list", resolvePackagePath("etc/apt/sources.list.d/xbmc.list"), kUidMobile,
-              kGidStaff, 0644);
-    // No net.tihmstar SOURCE LIST is staged, deliberately. Only
-    // apt/net.tihmstar.list.disabled exists -- there has never been an
-    // apt/net.tihmstar.list -- so the stageFile() call that used to be here
-    // warned and staged nothing on every single bake, and its return value
-    // was discarded (unlike every neighbouring call), so it never even showed
-    // up as a failure. That matches how etasonuntether actually reaches the
-    // device now: through the local file:// repo (Blackb0x/Misc/
-    // local_only_debs.txt), not a live one.
-    //
-    // The keyring below is still staged: harmless, and it keeps the .deb
-    // verifiable if the live repo is ever re-enabled by restoring the .list.
-    stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/net.tihmstar.gpg", resolveMiscPath("apt/net.tihmstar.gpg"),
-              0, 0, 0644);
-    // Points at var/.blackb0x/local-debs, which stageDebcache()
-    // below only actually populates if this bake's debcache run had
-    // local-only entries — an always-present but sometimes-empty source
-    // is harmless (apt just finds nothing there), unlike a source pointing
-    // at a directory that doesn't exist at all.
-    stageFile(blackb0xRoot, "private/etc/apt/sources.list.d/local.list", resolvePackagePath("etc/apt/sources.list.d/local.list"),
-              kUidMobile, kGidStaff, 0644);
+    // net.tihmstar's keyring is staged loose, alone among the repo keys: it
+    // is the one with no matching source list (only
+    // Blackb0x/Misc/apt/net.tihmstar.list.disabled exists), so it is not
+    // package content. Kept so the .deb stays verifiable if the live repo is
+    // ever re-enabled by restoring that list.
+    ok &= stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/net.tihmstar.gpg",
+                     resolveMiscPath("apt/net.tihmstar.gpg"), 0, 0, 0644);
 
+    // Everything else blackb0x installs -- the apt sources and keyrings,
+    // postinstall.sh, the first-boot LaunchDaemon, /var/root/.profile and the
+    // bundled local repo -- arrives as one real .deb instead of a dozen
+    // stageFile() calls dpkg had no record of.
     std::vector<std::string> resolvedPackages;
-    if (!stageDebcache(blackb0xRoot, productVersion, resolvedPackages)) ok = false;
-    if (!stagePostinstallScript(blackb0xRoot, resolvedPackages)) ok = false;
+    std::string localRepoDir;
+    if (!stageDebcache(blackb0xRoot, productVersion, resolvedPackages, localRepoDir)) ok = false;
+    if (!stageBlackb0xPackage(blackb0xRoot, productVersion, localRepoDir)) ok = false;
     if (!stageVersionBranch(blackb0xRoot, productVersion)) ok = false;
 
     return ok;

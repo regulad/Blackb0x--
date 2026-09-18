@@ -113,6 +113,13 @@ std::string resolvePackagePath(const std::string& relativePath) {
     return "package/layout/" + relativePath;
 }
 
+std::string resolvePackageRoot() {
+    if (const char* override_ = getenv("BLACKB0X_PACKAGE_ROOT")) {
+        return std::string(override_);
+    }
+    return "package";
+}
+
 std::string resolveDebsPath() {
     if (const char* override_ = getenv("BLACKB0X_DEBS_DIR")) {
         return std::string(override_);

@@ -2,7 +2,9 @@
 # Build the xyz.regulad.blackb0x .deb with Theos's dm.pl, inside
 # ghcr.io/regulad/dotfiles:latest.
 #
-# Usage: package/build.sh <staging-dir> <output.deb> [version] [resolved-packages-file]
+# Usage: package/build.sh <staging-dir> <output.deb> [version] [packages-file]
+#
+# [packages-file] overrides package/packages.txt; only useful for testing.
 #
 # <staging-dir> is a complete, ready-to-package tree: DEBIAN/ plus the payload
 # laid out at its final on-device paths. BakeRamdisk.cpp assembles that tree at
@@ -32,7 +34,7 @@ THEOS_DIR="${BLACKB0X_THEOS_DIR:-/home/regulad.linux/theos}"
 THEOS_UID="${BLACKB0X_THEOS_UID:-}"
 
 if [ "$#" -lt 2 ]; then
-    echo "usage: $0 <staging-dir> <output.deb> [version] [resolved-packages-file]" >&2
+    echo "usage: $0 <staging-dir> <output.deb> [version] [packages-file]" >&2
     exit 2
 fi
 
@@ -40,6 +42,7 @@ STAGING=$(cd "$1" && pwd)
 OUTPUT=$2
 VERSION=${3:-}
 PACKAGES_FILE=${4:-}
+# Empty means "use package/packages.txt" (set below).
 
 if [ ! -f "$STAGING/DEBIAN/control" ]; then
     echo "$0: $STAGING has no DEBIAN/control -- not a staging tree" >&2
@@ -55,35 +58,40 @@ if grep -q '__BLACKB0X_VERSION__' "$STAGING/DEBIAN/control"; then
 fi
 
 # postinstall.sh's install list is substituted HERE, at package-build time,
-# rather than by whoever assembles the staging tree. It is the one payload
-# file whose content depends on what a particular bake actually resolved
-# (package/packages.txt is the requested set; the resolved closure is what
-# apt could really satisfy), so it ships as a template and is filled in at the
-# moment the package is built.
+# from package/packages.txt.
 #
-# <resolved-packages-file> is whitespace-separated package names -- newline or
-# space, either way -- so the caller can hand over resolved_packages.txt
-# directly without reformatting it.
+# Deliberately packages.txt and NOT the ramdisk baker's resolved closure. The
+# package needs no state beyond its own tree and the bundled local repo, so it
+# can be built without a debcache run having happened at all -- which is what
+# keeps this a plain package build rather than something entangled with the
+# bake.
+#
+# It is also more correct on-device. Bake-time resolution runs sandboxed
+# against a synthetic "firmware" package, and a few entries legitimately fail
+# there (build_deb_cache.py's KNOWN_EXPECTED_UNRESOLVABLE) while resolving
+# fine against the real repos on a real device. Templating the resolved subset
+# silently dropped those; packages.txt asks for what was actually asked for.
+#
+# cydia is filtered out: postinstall.sh installs it first, on its own, because
+# its postinst does its own thing and nothing else may assume Cydia is
+# configured yet. Leaving it in the array would install it twice.
 POSTINSTALL="$STAGING/var/.blackb0x/postinstall.sh"
 PLACEHOLDER=__BLACKB0X_PACKAGES__
+: "${PACKAGES_FILE:=$(dirname "$0")/packages.txt}"
 
 if [ -f "$POSTINSTALL" ] && grep -q "$PLACEHOLDER" "$POSTINSTALL"; then
-    if [ -z "$PACKAGES_FILE" ]; then
-        echo "$0: $POSTINSTALL still has $PLACEHOLDER but no resolved-packages-file was given" >&2
-        exit 1
-    fi
     if [ ! -f "$PACKAGES_FILE" ]; then
-        echo "$0: resolved-packages-file $PACKAGES_FILE does not exist" >&2
+        echo "$0: package list $PACKAGES_FILE does not exist" >&2
         exit 1
     fi
-    # tr+xargs collapses newlines and runs of spaces into single spaces.
-    PACKAGES=$(tr "\n" " " < "$PACKAGES_FILE" | xargs echo)
+    PACKAGES=$(sed -e 's/#.*//' "$PACKAGES_FILE" | tr "\n" " " | xargs -n1 echo 2>/dev/null \
+                 | grep -v '^cydia$' | tr "\n" " " | xargs echo)
     if [ -z "$PACKAGES" ]; then
-        echo "$0: resolved-packages-file $PACKAGES_FILE is empty" >&2
+        echo "$0: package list $PACKAGES_FILE yielded no package names" >&2
         exit 1
     fi
-    # awk, not sed: the package list is arbitrary text and sed would treat
-    # any & or / in it as replacement syntax.
+    # awk, not sed: package names are arbitrary text and sed would treat any
+    # & or / among them as replacement syntax.
     awk -v repl="$PACKAGES" -v ph="$PLACEHOLDER" \
         '{ i = index($0, ph); if (i) { $0 = substr($0, 1, i - 1) repl substr($0, i + length(ph)) } print }' \
         "$POSTINSTALL" > "$POSTINSTALL.tmp"

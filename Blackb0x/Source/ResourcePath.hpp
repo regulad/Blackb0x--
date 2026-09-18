@@ -89,6 +89,10 @@ std::string resolveDebsPath();
 // and .claude/TODO.md item 11.
 std::string resolvePackagePath(const std::string& relativePath);
 
+// The package/ directory itself (not its layout/ subtree) -- where build.sh
+// and packages.txt live. $BLACKB0X_PACKAGE_ROOT if set, otherwise "package".
+std::string resolvePackageRoot();
+
 // Resolves `relativePath` against the loose-legacy-asset root:
 // $BLACKB0X_MISC_DIR if set, otherwise "Blackb0x/Misc" relative to the
 // current working directory. Holds files that need in-place content

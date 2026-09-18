@@ -3659,3 +3659,73 @@ corroboration for the same hypothesis.
 
 Finally, the `want 0 < n <= 1632` wording on that line is corrected in place: it now says
 the range is **not** the success condition, because macOS succeeds outside it.
+
+## Confirmed: on Linux the bug-setup SETUP never reaches the device
+
+The `DEBUG_DFU_STATUS` probe answered it in one run, and the answer does not need the
+macOS side for comparison:
+
+```
+dfu-status @ before bug setup  -> bStatus 0 (OK), bState 2 (dfuIDLE), bwPollTimeout 50 ms
+bug setup: cancel delay 50 us -> device consumed 0 of 2048 bytes, call took 415 us
+dfu-status @ after bug setup   -> bStatus 0 (OK), bState 2 (dfuIDLE), bwPollTimeout 50 ms
+```
+
+**`dfuIDLE` after the bug setup is conclusive.** Per the DFU spec, `DFU_DNLOAD` with
+`wLength > 0` from `dfuIDLE` moves the device to `dfuDNLOAD_SYNC`, and `GETSTATUS` from
+there returns `dfuDNBUSY` or `dfuDNLOAD_IDLE`. A device that had seen and accepted the
+request cannot report `dfuIDLE`; a rejection would be `dfuERROR`. The probe runs
+*before* the `DFU_ABORT` (0x21, 4) that follows the bug setup -- checked, not assumed --
+so this is not the abort resetting the state either.
+
+The device never processed the download. The SETUP never reached it.
+
+So **checkm8's precondition has never existed on Linux.** The dangling partial buffer is
+the entire point of the bug setup, and there is no buffer. Both grooming passes, the
+overwrite and the payload upload have all been operating on an ungroomed heap. This
+retroactively explains every earlier "all the numbers match macOS and it still fails"
+result: the numbers that matched were all downstream of a precondition that was absent.
+
+The other two probes returning `-7` is expected, not a defect: by then the grooming has
+deliberately stalled and leaked EP0, so `GETSTATUS` times out. No information either way.
+
+### Where the working window must be
+
+Two measurements bracket the transition:
+
+| cancel delay | consumed | device state after |
+|---|---|---|
+| <= 90us | 0 | `dfuIDLE` (confirmed at 50us) -- SETUP never sent |
+| 100us | 64 | SETUP sent **and** first data packet landed |
+
+The state actually wanted -- SETUP delivered, **zero** data bytes consumed, device in
+`dfuDNLOAD_SYNC` holding a buffer -- lies between them. That is also what macOS achieves:
+it reports `consumed 0` *and* pwns the device, which is only coherent if its device saw
+the SETUP. `USBDeviceAbortPipeZero()` aborts a pipe whose SETUP the controller has
+already put on the wire, so IOKit gets that state by construction; libusb's
+`USBDEVFS_DISCARDURB` has to race for it.
+
+### This is probably a race, not a threshold
+
+The SETUP transmits on a frame/microframe boundary whose phase relative to
+`libusb_submit_transfer()` is arbitrary. If so, a fixed delay near the boundary lands in
+the window only some of the time, and the same delay will succeed intermittently rather
+than never or always.
+
+That reframes a standing oddity: every serious checkm8 implementation retries
+unboundedly (gaster's own RESET/SETUP/SPRAY/PATCH state machine restarts on any stage
+failure), while standalone `blackb0x-pwn` makes exactly one attempt. A racy precondition
+plus a single attempt looks indistinguishable from deterministic breakage -- which is
+what this investigation has been treating it as.
+
+**Next, in order of cost:**
+
+1. Retry the same delay near the boundary many times (~60 runs at 95us) and look for any
+   run that reports `consumed 0` and then succeeds, or a nonzero consumed below 64.
+2. With `DEBUG_DFU_STATUS=1`, sweep 91-99us looking for `bState` after the bug setup that
+   is anything other than `dfuIDLE`. Remember the probe perturbs the state machine, so
+   use it to locate the window, then re-run without it.
+3. If the window proves unreachable by timing alone, the fix belongs in
+   `irecv_async_usb_control_transfer_with_cancel()`'s libusb branch: it must guarantee
+   the SETUP is on the wire before cancelling, which `libusb_submit_transfer()` +
+   `usleep()` + `libusb_cancel_transfer()` structurally cannot.

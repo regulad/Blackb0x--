@@ -2582,6 +2582,28 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
                   const std::string& entrypointBinaryPath, bool& outSizeWarning) {
     outSizeWarning = false;
 
+    // Resolved here, at the very top, even though it is not used until the
+    // finished image is measured at the end of this function. A bake takes
+    // minutes; discovering a typo'd DEBUG_RAMDISK_LIMIT_MIB only after paying
+    // for all of it would be its own small cruelty. See the size check at the
+    // end of this function for what the values mean.
+    int64_t limitMiB = 64;
+    if (const char* limitOverride = getenv("DEBUG_RAMDISK_LIMIT_MIB")) {
+        char* end = nullptr;
+        long long parsed = strtoll(limitOverride, &end, 10);
+        // Rejected rather than guessed: a typo that silently fell back to the
+        // default would be indistinguishable from the knob working, and a 0
+        // limit would fail every bake for no stated reason.
+        if (end == limitOverride || *end != '\0' || parsed < -1 || parsed == 0) {
+            fprintf(stderr,
+                    "bakeRamdisk: DEBUG_RAMDISK_LIMIT_MIB=\"%s\" is not a valid limit (expected -1 to disable, "
+                    "or a positive number of MiB)\n",
+                    limitOverride);
+            return false;
+        }
+        limitMiB = (int64_t)parsed;
+    }
+
     // Real root is required on BOTH platforms, for different reasons — and
     // this needs to fail loudly up front rather than incidentally. On
     // Linux, the loop-mount below needs CAP_SYS_ADMIN and fails with its
@@ -3073,20 +3095,35 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     decrypt(const_cast<char*>(decDMG.c_str()), const_cast<char*>(patchedDMG.c_str()), const_cast<char*>(key.c_str()),
             const_cast<char*>(iv.c_str()), (char*)"FALSE", const_cast<char*>(path.c_str()));
 
-    // Tripwire on the finished, baked ramdisk. 64MiB isn't a rule of thumb
-    // anymore -- a real run against an AppleTV3,2 failed mid-Ramdisk-upload
-    // with a USB bulk short-write at exactly byte offset 0x4000000 (64MiB)
-    // on a 68.9MiB ramdisk, and the device's own "ramdisk-size" getenv
-    // response (queried by warnIfRamdiskExceedsDeviceLimit() in
+    // Hard size limit on the finished, baked ramdisk.
+    //
+    // 64MiB is not a rule of thumb: a real run against an AppleTV3,2 failed
+    // mid-Ramdisk-upload with a USB bulk short-write at exactly byte offset
+    // 0x4000000 (64MiB) on a 68.9MiB ramdisk. The device's own "ramdisk-size"
+    // getenv response (queried by warnIfRamdiskExceedsDeviceLimit() in
     // DeviceManager.cpp, right before sendRamdisk() uploads it) is the
-    // authoritative source for this number on a given device/firmware —
-    // this constant is this port's best-known floor for it, not a
-    // per-device query result baked into every future run. Exceeding it
-    // only warns rather than failing the bake, since some devices/firmwares
-    // may genuinely tolerate more (or less) — see
-    // warnIfRamdiskExceedsDeviceLimit() for the real, per-device check that
-    // runs immediately before the upload that actually matters.
-    constexpr uint64_t kMaxRamdiskSize = 64ull * 1024 * 1024;
+    // authoritative per-device number; this constant is this port's
+    // best-known floor for it.
+    //
+    // This used to warn and return success. It FAILS the bake now. A ramdisk
+    // over the limit cannot be uploaded, so "succeeding" here only moved the
+    // failure to real hardware, where it costs a DFU cycle to discover and
+    // presents as an exploit problem rather than a size problem. Writing a
+    // dist/ entry that is known-unusable is worse than writing none.
+    //
+    // DEBUG_RAMDISK_LIMIT_MIB overrides the limit, following the DEBUG_
+    // convention the pwn binaries already use for investigation knobs (see
+    // Checkm8Pwn.c): unset means the real, hardware-confirmed default.
+    //   unset  -> 64 MiB, hard fail past it.
+    //   -1     -> no limit; warn only, exactly the old behaviour. For
+    //             deliberately baking an oversized ramdisk to measure it --
+    //             .claude/TODO.md item 10's size-shedding work needs real
+    //             per-tuple sizes, including for the tuples that are over.
+    //   N      -> N MiB, hard fail past it. For a device whose real
+    //             ramdisk-size is known to differ.
+    //
+    // `limitMiB` is resolved at the top of this function, not here, so a
+    // malformed value fails before the bake rather than after it.
     std::error_code finalSizeEc;
     uint64_t finalSize = fs::file_size(patchedDMG, finalSizeEc);
     if (finalSizeEc) {
@@ -3094,11 +3131,30 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
                 finalSizeEc.message().c_str());
         return false;
     }
-    if (finalSize > kMaxRamdiskSize) {
-        fprintf(stderr, "bakeRamdisk: WARNING!: finished ramdisk is %llu bytes, past the %llu byte rule-of-thumb "
-                        "tripwire — see kMaxRamdiskSize's own comment\n",
-                (unsigned long long)finalSize, (unsigned long long)kMaxRamdiskSize);
+
+    if (limitMiB < 0) {
+        fprintf(stderr,
+                "bakeRamdisk: finished ramdisk is %llu bytes (%.1f MiB); limit disabled via "
+                "DEBUG_RAMDISK_LIMIT_MIB=-1\n",
+                (unsigned long long)finalSize, (double)finalSize / (1024.0 * 1024.0));
         outSizeWarning = true;
+        return true;
+    }
+
+    uint64_t limitBytes = (uint64_t)limitMiB * 1024 * 1024;
+    if (finalSize > limitBytes) {
+        fprintf(stderr,
+                "bakeRamdisk: FAILED: finished ramdisk is %llu bytes (%.1f MiB), past the %lld MiB limit.\n"
+                "  A ramdisk this size cannot be uploaded (a real AppleTV3,2 short-writes at exactly 64MiB), so\n"
+                "  this would fail on hardware instead of here. Shed content (kNeverStageDebs in this file, and\n"
+                "  .claude/TODO.md item 10), or set DEBUG_RAMDISK_LIMIT_MIB=-1 to bake it anyway for measurement.\n",
+                (unsigned long long)finalSize, (double)finalSize / (1024.0 * 1024.0), (long long)limitMiB);
+        // Remove it rather than leaving a known-unusable dist/ entry behind:
+        // bake-all-ramdisks skips targets whose output already exists, so a
+        // leftover oversized file would be silently reused on the next run.
+        std::error_code rmOversizeEc;
+        fs::remove(patchedDMG, rmOversizeEc);
+        return false;
     }
 
     return true;

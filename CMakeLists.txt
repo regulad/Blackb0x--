@@ -944,7 +944,11 @@ endfunction()
 
 add_deps_imported_lib(plist          libplist.a)
 target_link_libraries(plist_compat PUBLIC deps::plist)
-add_dependencies(plist_compat deps::plist)
+# Directly on the ExternalProject, not on the imported archive: this file
+# #includes <plist/plist.h>, so it needs libplist_ext's INSTALL step to have
+# run, and a direct edge says that without depending on how CMake propagates
+# dependencies through an IMPORTED target.
+add_dependencies(plist_compat libplist_ext)
 
 add_deps_imported_lib(usbmuxd        libusbmuxd.a)
 add_deps_imported_lib(imobiledevice  libimobiledevice.a)
@@ -1001,8 +1005,41 @@ add_dependencies(deps::tatsu libtatsu_ext)
 # fighting it with symbol renaming.
 set_target_properties(deps::tatsu PROPERTIES INTERFACE_LINK_LIBRARIES "deps::curl;plist_compat")
 
-foreach(t plist usbmuxd imobiledevice irecovery imobiledevice_glue general fragmentzip)
-    add_dependencies(deps::${t} ${t}_ext)
+# Order each imported archive against the ExternalProject that actually
+# produces it.
+#
+# The names are spelled out rather than derived as ${t}_ext, because deriving
+# them is exactly how this broke: every ExternalProject here is libplist_ext,
+# libusbmuxd_ext and so on, while the imported targets drop the `lib`. The
+# loop that used to live here asked for plist_ext, usbmuxd_ext, ... -- seven
+# targets that do not exist. CMake accepts unknown dependency names on an
+# IMPORTED target without complaint, so this produced no ordering at all and
+# no diagnostic either.
+#
+# The symptom was a cold parallel build racing: plist_compat compiling before
+# libplist_ext had installed plist/plist.h, which an incremental tree never
+# reproduces because the header is already there from a previous run. It took
+# a CI runner with an empty build directory to fail it reliably.
+#
+# The foreach below therefore also ASSERTS each target exists, so the same
+# typo can never again be silently absorbed.
+foreach(pair
+        "plist=libplist_ext"
+        "usbmuxd=libusbmuxd_ext"
+        "imobiledevice=libimobiledevice_ext"
+        "irecovery=libirecovery_ext"
+        "imobiledevice_glue=libimobiledevice_glue_ext"
+        "general=libgeneral_ext"
+        "fragmentzip=libfragmentzip_ext")
+    string(REPLACE "=" ";" parts "${pair}")
+    list(GET parts 0 imported)
+    list(GET parts 1 project)
+    if(NOT TARGET ${project})
+        message(FATAL_ERROR
+            "deps::${imported} wants to depend on ${project}, which is not a target. "
+            "An ExternalProject was renamed without updating this list.")
+    endif()
+    add_dependencies(deps::${imported} ${project})
 endforeach()
 add_dependencies(deps::usbmuxd deps::plist)
 add_dependencies(deps::imobiledevice deps::plist deps::usbmuxd)

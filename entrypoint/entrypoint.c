@@ -3,7 +3,7 @@
  *
  * Replaces PID 1 on the patched restore ramdisk. Not real launchd — this is
  * Blackb0x's own first-boot installer, reverse-engineered from the
- * precompiled ARMv6 Mach-O this project shipped at Blackb0x/Misc/launchd
+ * precompiled ARMv6 Mach-O this project shipped at misc/launchd
  * (originally Blackb0x/Files/launchd). Confirmed genuinely freestanding via
  * its Mach-O load commands: LC_UNIXTHREAD (not LC_MAIN), zero
  * LC_LOAD_DYLIB entries — no libSystem, no dyld. Every syscall is made
@@ -19,7 +19,7 @@
  * helper (a hardcoded-nonsense mode, and a missing-leading-zero octal
  * literal at its one call site) — since fixed, now that this entrypoint
  * does real first-time dpkg/apt bootstrap work where directory permissions
- * actually matter. See Blackb0x/Misc/README.md for the full
+ * actually matter. See misc/README.md for the full
  * reverse-engineering writeup this is built from (strings, the original
  * Patcher.mm, a full Ghidra decompilation, and raw disassembly of every
  * syscall trampoline).
@@ -505,7 +505,7 @@ static int copy_preserving(const char *src, const char *dst) {
     return install_file(src, dst, uid, gid, mode);
 }
 
-/* net.tihmstar.etasonuntether's own real postinst (see Blackb0x/Misc/
+/* net.tihmstar.etasonuntether's own real postinst (see misc/
  * README.md's "etasonATV / tihmstar-untether provenance" section, and the
  * postinst itself, extracted directly from the real .deb) swaps
  * /usr/libexec/rtbuddyd for a symlink to jsc, backing up any real rtbuddyd
@@ -606,7 +606,7 @@ static int do_install(void) {
  * iBoot/DFU prompt instead of continuing
  * into the real, already-installed OS on NAND, needing a second manual
  * boot. Setting it back to 1 right before every reboot is exactly what the
- * ssh-rd-derived rc.boot this replaced also did (see Blackb0x/Misc/README.md's
+ * ssh-rd-derived rc.boot this replaced also did (see misc/README.md's
  * `rc.boot` entry for the full recovered content) — /usr/sbin/nvram is a
  * real, pristine binary already present on every restore ramdisk (confirmed directly:
  * firmware-sbin's own preinst backs up this exact path before ever

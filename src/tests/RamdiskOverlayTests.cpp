@@ -45,8 +45,8 @@ static void testResolveRamdiskPathOverride() {
 static void testResolveImageKeyPathDefault() {
     unsetenv("BLACKB0X_IMAGEKEYS_DIR");
     expect(resolveImageKeyPath("AppleTV2,1/AppleTV2,1_10A406e.keys") ==
-               "Blackb0x/ImageKeys/AppleTV2,1/AppleTV2,1_10A406e.keys",
-           "resolveImageKeyPath defaults under Blackb0x/ImageKeys/");
+               "keys/AppleTV2,1/AppleTV2,1_10A406e.keys",
+           "resolveImageKeyPath defaults under keys/");
 }
 
 static void testResolveImageKeyPathOverride() {
@@ -73,7 +73,7 @@ static void testDecryptedDMGFor() {
 }
 
 // Blackb0x/ramdisk/ was deleted outright as the first step of the NEO_FLOW
-// rewrite (see .claude/LEGACY_FLOW.md and .claude/NEO_FLOW.md) — the flat,
+// rewrite (see .claude/NEO_FLOW.md) — the flat,
 // pre-extracted Cydia tree this test used to check for doesn't exist
 // anymore by design, and its replacement (debcache + sources list + dpkg +
 // setup.sh + the persistence payload, all driven by a real dpkg/apt

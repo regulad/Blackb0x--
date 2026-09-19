@@ -1,6 +1,6 @@
 # Real, human-readable firmware version strings (Apple's own ProductVersion
 # field, e.g. "7.2.2") for every (device, buildID) tuple currently present
-# under Blackb0x/ImageKeys/<device>/<device>_<buildID>.keys — NOT the
+# under keys/<device>/<device>_<buildID>.keys — NOT the
 # opaque buildID itself (e.g. "12H606"). The package-dependency resolver
 # used when baking ramdisks needs this to evaluate packages whose Depends:
 # is gated on a firmware version range (e.g. `Depends: firmware (>= 6.0)`),

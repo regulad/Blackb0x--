@@ -45,11 +45,11 @@ established "heavy tooling runs in a container, nothing touches the host"
 convention), pointed at a fully sandboxed apt root (`-o Dir=...`) that never
 touches the container's own system state either.
 
-How trust is decided per repo, matching Blackb0x/Misc/README.md's own
+How trust is decided per repo, matching misc/README.md's own
 documented findings from testing each of these directly — and one real
 surprise hit while building this script, documented here rather than
 silently worked around:
-  - A repo with a paired Blackb0x/Misc/apt/<name>.gpg.key (awkwardtv, saurik,
+  - A repo with a paired misc/apt/<name>.gpg.key (awkwardtv, saurik,
     regulad) gets that key imported and its Release/Release.gpg verified
     directly with plain `gpgv` — the whole run aborts if that fails.
   - This does NOT go through apt's own built-in Release verification,
@@ -110,7 +110,7 @@ resolve by name — because a bake-time cache alone doesn't help the actual
 DEVICE: postinstall.sh's own runtime `apt-get install` has to be able to
 find "essential" by name too, the exact same way it finds every other
 package, and there's no live repo anywhere that still carries it. See
-Blackb0x/Misc/apt/local.list and BakeRamdisk.cpp's staging of
+misc/apt/local.list and BakeRamdisk.cpp's staging of
 <output-dir>/local-repo/ for the on-device half of this.
 
 Writes <output-dir>/picklist.txt: the sorted list of every .deb filename
@@ -127,7 +127,7 @@ filenames) — this is what stageDebcache() bakes into postinstall.sh's own
 install array, so postinstall.sh never has to guess which of
 packages.txt's entries are real, installable package names versus the
 handful of known leaked-in non-names (bigboss/modmyifone/saurik/zodttd —
-see Blackb0x/Misc/README.md) that would abort `apt-get install` outright if
+see misc/README.md) that would abort `apt-get install` outright if
 ever passed to it directly. Deliberately excludes local_only_debs.txt's
 entries — apt could never resolve those by name either, on-device any more
 than here.
@@ -135,7 +135,7 @@ than here.
 Writes <output-dir>/local-repo/: a real, `dpkg-scanpackages`-generated
 Packages index plus copies of local_only_debs.txt's actual .deb files —
 BakeRamdisk.cpp stages this verbatim at
-/var/.blackb0x/local-debs/ on-device, matching Blackb0x/Misc/apt/
+/var/.blackb0x/local-debs/ on-device, matching misc/apt/
 local.list's `deb [trusted=yes] file:///var/.blackb0x/local-debs ./`
 source entry, so the real device's own apt-get can resolve and install
 these by name (e.g. "essential") exactly like anything else, with zero
@@ -188,12 +188,12 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MISC_DIR = REPO_ROOT / "Blackb0x" / "Misc"
+MISC_DIR = REPO_ROOT / "misc"
 # The .list files moved into the xyz.regulad.blackb0x package's own layout
 # when the package was introduced -- they are shipped to the device verbatim
 # from there, so that copy is the single source of truth for which repos this
 # project uses, and resolving against anything else here would let the two
-# drift. Blackb0x/Misc/apt/ still holds the ARMORED keys (*.gpg.key) that this
+# drift. misc/apt/ still holds the ARMORED keys (*.gpg.key) that this
 # script feeds to gpgv; the package layout carries their dearmored binary
 # counterparts (trusted.gpg.d/*.gpg) for apt on-device. Two spellings of the
 # same keys, each in the form its consumer wants.
@@ -203,7 +203,7 @@ DEBS_DIR = REPO_ROOT / "debcache"
 PACKAGE_DIR = REPO_ROOT / "package"
 # packages.txt and local_only_debs.txt describe what the
 # xyz.regulad.blackb0x package installs, so they live with the package
-# rather than in Blackb0x/Misc (which is bake-time host assets).
+# rather than in misc (which is bake-time host assets).
 PACKAGES_LIST = PACKAGE_DIR / "packages.txt"
 LOCAL_ONLY_LIST = PACKAGE_DIR / "local_only_debs.txt"
 
@@ -219,7 +219,7 @@ LOCAL_ONLY_LIST = PACKAGE_DIR / "local_only_debs.txt"
 # pin below. It briefly moved to local_only_debs.txt instead (resolving through
 # a local file:// repo rather than repo.tihmstar.net, whose live
 # Packages/Release have been seen out of sync — see
-# Blackb0x/Misc/apt/net.tihmstar.list.disabled), but it is applied STATICALLY
+# misc/apt/net.tihmstar.list.disabled), but it is applied STATICALLY
 # by BakeRamdisk.cpp's stageEtasonatv(), with this project's own untether.bin
 # overriding the one its .deb ships. Shipping it through a local repo as well
 # meant two install paths for one package, so it is back to being a tolerated

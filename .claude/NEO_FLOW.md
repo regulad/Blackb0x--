@@ -1,8 +1,9 @@
 # NEO_FLOW.md — the current install-time design
 
-Supersedes everything described in `.claude/LEGACY_FLOW.md`, which is kept
-purely as historical record of the pre-rewrite Objective-C tool's actual
-behavior — nothing in it describes what runs today. This file used to be a
+Supersedes the pre-rewrite Objective-C tool's install flow entirely; nothing
+about that design survives in what runs today, and its write-up has been
+deleted now that nothing referenced it as anything but history.
+`docs/HISTORY.md` and git keep the record. This file used to be a
 design doc for work not yet implemented; that work is done, has been
 validated end-to-end against real hardware-adjacent artifacts (real bakes,
 real `fsck.hfsplus`, a real downloaded Cydia package), and has moved past
@@ -11,20 +12,19 @@ a proposal — where the two disagree, the code is right and this file was
 wrong until now.
 
 Only one of the six original source tarballs `Blackb0x/ramdisk/` was ever
-extracted from is still kept packed, directly under `Blackb0x/Misc/`:
+extracted from is still kept packed, directly under `misc/`:
 `tihmstar-untether.tar` (no independently re-downloadable copy exists
 anywhere). The other five were dropped outright, and `RamdiskBins.tar`'s
 own extracted contents have themselves mostly been deleted since (real
 installed packages or Apple's own base OS cover what they provided) — see
-`Blackb0x/Misc/README.md` for the full per-file provenance, including a
+`misc/README.md` for the full per-file provenance, including a
 few genuine dead ends investigated at length (`Misc/dirhelper`'s origin
 could not be traced past "someone compiled this, adapting a well-known
 technique, and never published it").
 
 ## Why (unchanged from the original plan)
 
-Two structural problems with the legacy flow (see `LEGACY_FLOW.md`'s
-closing section for the full reasoning):
+Two structural problems with the legacy flow drove the rewrite:
 
 1. `postinstall.sh` hit the live network on every single real-OS boot,
    forever (`apt-get update`/`upgrade`/`install` several times over), with
@@ -47,10 +47,10 @@ entire tree is assembled once, at bake time, by
 the real device by `entrypoint.c`'s `merge_tree()` at boot. The pipeline,
 in the order it actually runs:
 
-1. **Resolve.** `scripts/build_deb_cache.py` reads `Blackb0x/Misc/packages.txt`
+1. **Resolve.** `scripts/build_deb_cache.py` reads `package/packages.txt`
    (a flat list of real package *names*, not `.deb` filenames) and resolves
    it against this project's five real configured repos
-   (`Blackb0x/Misc/apt/{regulad,saurik,bigboss,awkwardtv,xbmc}.list` — each
+   (`misc/apt/{regulad,saurik,bigboss,awkwardtv,xbmc}.list` — each
    GPG-verified directly with `gpgv` where a key exists, since modern
    apt's own weak-digest hardening rejects several of these repos' real,
    legitimate, merely-old 2008-era DSA-1024/SHA-1 signatures) inside a
@@ -67,20 +67,20 @@ in the order it actually runs:
 2. **Local-only fallback.** A small number of packages will never resolve
    through *any* live repo, but this project already has a real,
    previously-recovered `.deb` for them (`essential`, currently the only
-   entry). `Blackb0x/Misc/local_only_debs.txt` names these by filename;
+   entry). `package/local_only_debs.txt` names these by filename;
    `build_deb_cache.py` skips the normal resolution attempt for them
    entirely, generates a real `dpkg-scanpackages` index for them
    (`local-repo/`), and both (a) folds their filename straight into
    `picklist.txt` so their bytes get cached like anything else, and (b)
    adds their package name to `resolved_packages.txt` so `postinstall.sh`
-   installs them by name too — through `Blackb0x/Misc/apt/local.list`
+   installs them by name too — through `misc/apt/local.list`
    (`deb file:///var/.blackb0x/local-debs ./`, staged on-device by
    `BakeRamdisk.cpp` at the exact same path `local-repo/` lands at), never
    through any of this project's own bake-time force-install machinery.
 3. **Decide what gets force-installed at bake time vs. left for real apt.**
    `BakeRamdisk.cpp`'s `computePreinstallEligibleFilenames()` walks
    `picklist.txt`'s full resolved closure against
-   `Blackb0x/Misc/prebake_package_blacklist.txt` — packages with a real,
+   `misc/prebake_package_blacklist.txt` — packages with a real,
    stateful, uninspectable, or device-only postinst/preinst (`cydia`,
    `firmware-sbin`, `rtadvd`, `pam`, `pam-modules`, `essential` for an
    unmet-Depends reason of its own, the exploit-specific packages) are

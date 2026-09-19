@@ -19,7 +19,7 @@
 #include <vector>
 
 // A firmware component's decryption [iv, key] pair, as stored in
-// Blackb0x/ImageKeys/<device>/<device>_<buildID>.keys.
+// keys/<device>/<device>_<buildID>.keys.
 struct FirmwareKeyPair {
     std::string iv;
     std::string key;

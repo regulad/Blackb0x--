@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # The legacy behavior this file used to implement is fully documented in
-# .claude/LEGACY_FLOW.md — nothing here needs to preserve it anymore. The
+# the legacy tether flow — nothing here needs to preserve it anymore. The
 # target design is .claude/NEO_FLOW.md.
 #
 # Run directly by xyz.regulad.blackb0x's LaunchDaemon plist as
@@ -41,11 +41,11 @@ fi
 # would be. `coreutils-bin` has no Depends: of its own at all (confirmed
 # from its own control file) and already has a cached copy waiting in apt's
 # own archive directory (see BakeRamdisk.cpp's stageDebcache() — it's
-# already in Blackb0x/Misc/packages.txt), so installing it directly via
+# already in package/packages.txt), so installing it directly via
 # dpkg — no apt-get, no network, no repo metadata needed at all — is enough
 # to make a real `sleep` available before doing anything else. In practice
 # this branch is usually moot: coreutils-bin has no postinst at all (see
-# Blackb0x/Misc/prebake_package_blacklist.txt — it's not on it), so
+# misc/prebake_package_blacklist.txt — it's not on it), so
 # bakeRamdisk() typically tree-merges it directly and marks it installed at
 # bake time (see BakeRamdisk.cpp's stagePreinstalledPackages()), meaning a
 # real /bin/sleep is usually already sitting on disk before this script
@@ -128,9 +128,9 @@ apt-get install -y --allow-unauthenticated cydia
 # Baked in at bake time (see BakeRamdisk.cpp's stagePostinstallScript()),
 # from the exact package-name set scripts/build_deb_cache.py actually
 # resolved through real apt for this build — not hand-copied from
-# Blackb0x/Misc/packages.txt, which still carries a few leaked-in
+# package/packages.txt, which still carries a few leaked-in
 # non-package names (bigboss/modmyifone/saurik/zodttd — see
-# Blackb0x/Misc/README.md) that would abort this whole `apt-get install`
+# misc/README.md) that would abort this whole `apt-get install`
 # line outright if ever passed to it directly. Letting apt-get resolve
 # each of these names' own dependencies itself (rather than also listing
 # the full transitive closure here) is the same thing apt would do on any

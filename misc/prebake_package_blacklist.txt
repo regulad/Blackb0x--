@@ -28,7 +28,7 @@
 #
 # com.ih8sn0w-squiffy-winocm.p0sixspwn never actually resolves through real
 # apt at all today (its Depends: firmware constraint doesn't match this
-# project's sandboxed resolution — see Blackb0x/Misc/README.md and
+# project's sandboxed resolution — see misc/README.md and
 # scripts/build_deb_cache.py's KNOWN_EXPECTED_UNRESOLVABLE).
 # net.tihmstar.etasonuntether is the same case: applied statically by
 # BakeRamdisk.cpp's stageEtasonatv() (with this project's own untether.bin
@@ -70,7 +70,7 @@ cydia
 # exactly once, and a fake "already installed" stub risks apt/dpkg never
 # giving it that real, one-time chance later. essential's .deb still gets
 # staged into the real on-device apt cache like anything else (see
-# Blackb0x/Misc/local_only_debs.txt) — Blackb0x/Misc/postinstall.sh just
+# package/local_only_debs.txt) — package/layout/var/.blackb0x/postinstall.sh just
 # `dpkg -i`s it directly, after cydia has genuinely been installed for
 # real, instead of asking apt to resolve it by name (which it can't do —
 # see local_only_debs.txt for why) or bake-time-preinstalling it (which

@@ -110,7 +110,7 @@ namespace fs = std::filesystem;
 static const char* kProg = "bake-firmware";
 
 // Every (device, buildID) pair this port has a .keys file for — read
-// straight from the directory structure (Blackb0x/ImageKeys/<device>/
+// straight from the directory structure (keys/<device>/
 // <device>_<buildID>.keys), not some separate hardcoded list, so this
 // tracks ImageKeys/ automatically as devices/builds are added or removed.
 static std::vector<std::pair<std::string, std::string>> knownFirmwareTargets() {

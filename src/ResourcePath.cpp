@@ -31,7 +31,7 @@ std::string resolveImageKeyPath(const std::string& relativePath) {
     if (const char* override_ = getenv("BLACKB0X_IMAGEKEYS_DIR")) {
         return std::string(override_) + "/" + relativePath;
     }
-    return "Blackb0x/ImageKeys/" + relativePath;
+    return "keys/" + relativePath;
 }
 
 // Shared by resolvePwnPath()/resolveBakeFirmwarePath()/
@@ -123,7 +123,7 @@ std::string resolveMiscPath(const std::string& relativePath) {
     if (const char* override_ = getenv("BLACKB0X_MISC_DIR")) {
         return std::string(override_) + "/" + relativePath;
     }
-    return "Blackb0x/Misc/" + relativePath;
+    return "misc/" + relativePath;
 }
 
 std::string resolveEntrypointPath() {

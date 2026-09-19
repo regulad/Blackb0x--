@@ -1301,7 +1301,7 @@ add_test(NAME RamdiskOverlayTests
 # bake-firmware
 #
 # The single ahead-of-time baker: downloads and patches the whole firmware
-# suite for every (device, firmware) combination under Blackb0x/ImageKeys/ —
+# suite for every (device, firmware) combination under keys/ —
 # iBSS/iBEC/KernelCache/DeviceTree into dist/bootchain/, and the jailbreak
 # ramdisk into dist/. Not invoked by blackb0x for the bootchain half (that is
 # .claude/TODO.md item 5, still done live); Cli.cpp does spawn it with

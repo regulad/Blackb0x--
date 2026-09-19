@@ -14,7 +14,7 @@
 # That distinction is why this is a separate list from the ordinary
 # packages.txt resolution flow, rather than one more tolerated warning.
 #
-# Entries here are still checked against Blackb0x/Misc/prebake_package_blacklist.txt
+# Entries here are still checked against misc/prebake_package_blacklist.txt
 # like anything else in picklist.txt — see that file for why "essential"
 # is listed there too (real, unmet Depends: on cydia, which is
 # deliberately never bake-time-preinstalled).
@@ -25,7 +25,7 @@ essential_0-1_iphoneos-arm.deb
 # It is applied statically instead, by BakeRamdisk.cpp's stageEtasonatv():
 # extracted straight from its real .deb in debcache/, with this project's
 # own untether.bin substituted for the one that .deb ships (see that
-# function's own comment and Blackb0x/Misc/README.md for why the override
+# function's own comment and misc/README.md for why the override
 # exists), then registered with a real held dpkg status stanza. Shipping it
 # through this local repo as well would mean two install paths for one
 # package, with the static override being the one that actually matters --

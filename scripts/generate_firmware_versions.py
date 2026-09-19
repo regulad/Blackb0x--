@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-generate_firmware_versions.py — regenerate Blackb0x/Misc/firmware_versions.txt,
+generate_firmware_versions.py — regenerate misc/firmware_versions.txt,
 the (device, buildID) -> real ProductVersion binding.
 
 That file used to be a hand-collected snapshot: an agent ran the ipsw.me
 queries, range-fetched the BuildManifest.plists, and cross-checked AppleDB by
 hand, then wrote the answers down. The answers were right, but nothing could
-reproduce them -- adding a tuple to Blackb0x/ImageKeys/ meant redoing that
+reproduce them -- adding a tuple to keys/ meant redoing that
 research by hand or leaving the file stale. This script is that research,
 checked in and rerunnable (.claude/TODO.md item 8).
 
@@ -70,8 +70,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fetch_firmware_component import fetch_zip_member  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMAGE_KEYS = os.path.join(REPO_ROOT, "Blackb0x", "ImageKeys")
-DEFAULT_OUTPUT = os.path.join(REPO_ROOT, "Blackb0x", "Misc", "firmware_versions.txt")
+IMAGE_KEYS = os.path.join(REPO_ROOT, "keys")
+DEFAULT_OUTPUT = os.path.join(REPO_ROOT, "misc", "firmware_versions.txt")
 
 IPSW_ME_DEVICE = "https://api.ipsw.me/v4/device/{device}?type=ipsw"
 # AppleDB keys Apple TV entries under the "Apple TV Software" OS string, even
@@ -207,7 +207,7 @@ def render(rows, verify, notes):
     add = lines.append
     add("# Real, human-readable firmware version strings (Apple's own ProductVersion")
     add('# field, e.g. "7.2.2") for every (device, buildID) tuple currently present')
-    add("# under Blackb0x/ImageKeys/<device>/<device>_<buildID>.keys — NOT the")
+    add("# under keys/<device>/<device>_<buildID>.keys — NOT the")
     add('# opaque buildID itself (e.g. "12H606"). The package-dependency resolver')
     add("# used when baking ramdisks needs this to evaluate packages whose Depends:")
     add("# is gated on a firmware version range (e.g. `Depends: firmware (>= 6.0)`),")

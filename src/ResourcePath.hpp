@@ -3,7 +3,7 @@
 //  Blackb0x
 //
 //  Resolves paths under Blackb0x/ramdisk/ (the ramdisk overlay trees — see
-//  Patcher.cpp's patchRamdisk()) and Blackb0x/ImageKeys/ (per-firmware .keys)
+//  Patcher.cpp's patchRamdisk()) and keys/ (per-firmware .keys)
 //  — replaces every [[NSBundle mainBundle] pathForResource:...] call site in
 //  the original. Proper install-prefix resolution (CMAKE_INSTALL_DATADIR,
 //  /usr/share/blackb0x) is Phase 7 work; for now this checks an override env
@@ -24,7 +24,7 @@ std::string resolveRamdiskPath();
 
 // Resolves `relativePath` (e.g. "AppleTV2,1/AppleTV2,1_10A406e.keys") against
 // the per-firmware decryption key root: $BLACKB0X_IMAGEKEYS_DIR if set,
-// otherwise "Blackb0x/ImageKeys" relative to the current working directory.
+// otherwise "keys" relative to the current working directory.
 // Kept separate from resolveRamdiskPath() above — these aren't shipped to
 // the device like everything under ramdisk/, they're only ever read locally.
 std::string resolveImageKeyPath(const std::string& relativePath);
@@ -88,7 +88,7 @@ std::string resolveDebcachePath();
 // relative to the current working directory, same convention as
 // resolveMiscPath() below.
 //
-// These files used to live loose under Blackb0x/Misc/ and be staged one
+// These files used to live loose under misc/ and be staged one
 // stageFile() call at a time. They are package payload now -- see package/
 // and .claude/TODO.md item 11.
 std::string resolvePackagePath(const std::string& relativePath);
@@ -97,11 +97,20 @@ std::string resolvePackagePath(const std::string& relativePath);
 // and packages.txt live. $BLACKB0X_PACKAGE_ROOT if set, otherwise "package".
 std::string resolvePackageRoot();
 
-// Resolves `relativePath` against the loose-legacy-asset root:
-// $BLACKB0X_MISC_DIR if set, otherwise "Blackb0x/Misc" relative to the
-// current working directory. Holds files that need in-place content
-// splicing into the mounted volume at bake time rather than a plain
-// `cp -a` (rc.boot) — see Blackb0x/Misc/README.md.
+// Resolves `relativePath` against the bake-time asset root:
+// $BLACKB0X_MISC_DIR if set, otherwise "misc" relative to the current
+// working directory. Four consumers, nothing else:
+//   untether.bin / dirhelper       -> staged onto the device by stageBlackb0xTree()
+//   apt/net.tihmstar.gpg           -> staged as an on-device apt keyring
+//   prebake_package_blacklist.txt  -> read by computePreinstallEligibleFilenames()
+//   firmware_versions.txt          -> the (device, buildID) -> ProductVersion binding
+// apt/*.gpg.key are armored keys for scripts/build_deb_cache.py's gpgv pass,
+// read by that script directly rather than through here.
+//
+// This used to be described as "files needing in-place content splicing rather
+// than a plain cp -a (rc.boot)". That is no longer true of anything in it:
+// rc.boot was deleted once the entrypoint splice target became /sbin/launchd,
+// and every file above is an ordinary copy. See misc/README.md.
 std::string resolveMiscPath(const std::string& relativePath);
 
 // Resolves the entrypoint/ source directory (the freestanding ARMv6

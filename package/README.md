@@ -98,8 +98,8 @@ also what makes `dm.pl` get ownership right without help.
 - `local_only_debs.txt` — which of those ship from the bundled local repo at
   `/var/.blackb0x/local-debs` rather than a live one.
 
-Both live here rather than in `Blackb0x/Misc/` because they describe what this
-package installs. `Blackb0x/Misc/prebake_package_blacklist.txt` deliberately
+Both live here rather than in `misc/` because they describe what this
+package installs. `misc/prebake_package_blacklist.txt` deliberately
 does **not** move: it is baker policy about what may be unpacked at bake time,
 not a statement about package content.
 

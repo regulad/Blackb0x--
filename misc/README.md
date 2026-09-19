@@ -1,7 +1,7 @@
-# Blackb0x/Misc
+# misc
 
 Now that `Blackb0x/ramdisk/` has been deleted outright (see
-`.claude/LEGACY_FLOW.md`/`.claude/NEO_FLOW.md`), this directory is where
+`.claude/NEO_FLOW.md`), this directory is where
 everything from it worth keeping for provenance/reference lives instead.
 No original source tarball is needed going forward anymore — see
 "Original tarballs" below: every one, including `tihmstar-untether.tar`
@@ -12,7 +12,7 @@ exception: `untether.bin` itself, kept standalone (see below), since it's
 an open forensic question in its own right, not just install-time payload.
 
 - `rc.boot` — **deleted**. This was the restore ramdisk's early-boot
-  script (behavior doc in `.claude/LEGACY_FLOW.md`), kept here on the
+  script (behavior recovered and written up in this entry), kept here on the
   assumption `bakeRamdisk()` would need to re-splice it. That assumption
   didn't hold: the entrypoint splice target ended up being `/sbin/launchd`
   (see docs/HISTORY.md's "Entrypoint injection point" entry), never
@@ -61,7 +61,7 @@ generated into a temp directory that `bakeRamdisk()`
 owns and shells out to `build_deb_cache.py --output-dir <tempdir>` to
 populate, every time a ramdisk gets baked. Documented here anyway since
 this is where its provenance/behavior is explained. It's the resolved
-output of running `Blackb0x/Misc/packages.txt` (a flat package-name list)
+output of running `package/packages.txt` (a flat package-name list)
 through real `apt` dependency resolution against this project's own
 `*.list` sources: the exact, deduplicated set of `.deb` filenames under
 `debcache/` that actually get copied into the ramdisk overlay's
@@ -83,7 +83,7 @@ resolved through apt at all, so dropping out of this list here is the
 correct signal, not a gap to fix.
 
 Two more names never even attempt live apt resolution at all —
-`Blackb0x/Misc/local_only_debs.txt`'s own mechanism, a real local
+`package/local_only_debs.txt`'s own mechanism, a real local
 `file://` repo built from `.deb`s this project already has:
 `essential`, genuinely not found in any of the five configured repos
 today despite `debcache/essential_0-1_iphoneos-arm.deb` already
@@ -92,7 +92,7 @@ existing here from some earlier, no-longer-reachable source; and
 `repo.tihmstar.net` *does* exist (it would genuinely resolve there,
 firmware-gate aside) but which moved to this same local mechanism once
 that repo's live index turned out to be an unreliable dependency (see
-`Blackb0x/Misc/apt/net.tihmstar.list.disabled`) — same end state as
+`misc/apt/net.tihmstar.list.disabled`) — same end state as
 `essential` (a local file:// repo, not a live one), different reason for
 getting there.
 
@@ -126,7 +126,7 @@ is already preserved elsewhere, individually, below or in `debcache/`:
   in `debcache/`) — `BakeRamdisk.cpp`'s `stageEtasonatv()` extracts the
   same four files straight out of that `.deb` instead of this tarball now.
   One file from it — `untether/untether.bin` — is kept as a standalone copy
-  at `Blackb0x/Misc/untether.bin` even though nothing installs it anymore:
+  at `misc/untether.bin` even though nothing installs it anymore:
   it's not a byte-for-byte match of either of tihmstar's own two published
   `untether.bin` builds (`etasonuntether-1.3.1`'s or
   `untetherhomedepot`'s — see "etasonATV / tihmstar-untether provenance"
@@ -261,7 +261,7 @@ dawg!" in its own string table. Since real `/usr/libexec/dirhelper` is a
 legitimate daemon the OS invokes automatically and repeatedly with root
 privilege, replacing it makes iOS/tvOS unknowingly re-run this whole flow
 — the actual persistence mechanism for a firmware generation with no
-other untether (`.claude/LEGACY_FLOW.md`: "genuinely tethered, no
+other untether (the legacy tether flow: "genuinely tethered, no
 untether exists for this range at all").
 
 **Where it came from: the ether.** Extensively searched and could not
@@ -342,7 +342,7 @@ directory to glob rather than filtering repo config out of a flat `Misc/`
 listing that also holds unrelated payloads.
 
 - `xyz.regulad.blackb0x.postinstall.plist` — LaunchDaemon plist (see
-  LEGACY_FLOW.md/NEO_FLOW.md for what installs/runs it). No
+  NEO_FLOW.md for what installs/runs it). No
   `com.openssh.sshd.plist` here anymore — NEO_FLOW deliberately doesn't
   bootstrap an early sshd; the real `openssh` package's own LaunchDaemon
   plist is the only one that ever starts sshd now, once `postinstall.sh`
@@ -484,7 +484,7 @@ listing that also holds unrelated payloads.
   pinned now instead of `0.8.5-5`.
 - `profile` — replacement root `.profile` (colors, prompt, `ls` alias).
 - `rtbuddyd.bin` — the pre-`jsc`-swap tether-only `rtbuddyd` replacement
-  used by `install_blackb0x_tether()`'s branch (see LEGACY_FLOW.md).
+  used by `install_blackb0x_tether()`'s branch, in the removed tether flow.
 - `postinstall.sh` — the legacy first-boot installer script, being fully rewritten
   per NEO_FLOW.md; kept here as the pre-rewrite reference.
 - `apt/trustdb.gpg`, `apt/trusted.gpg` — Cydia's apt keyring database, extracted
@@ -799,7 +799,7 @@ another root package, so it'd get pulled in regardless). **`sqlite3-lib` is
 not** — nothing in this project's dependency graph formally depends on it,
 which is exactly why an earlier graph-based trim dropped it from what was
 then `persist_packages.txt` (since merged with the former
-`ramdisk_packages.txt` into `Blackb0x/Misc/packages.txt`). But this binary
+`ramdisk_packages.txt` into `package/packages.txt`). But this binary
 explicitly installing it by name, before dpkg dependency resolution is even
 in the picture, means it's still a load-bearing package, not dead weight
 the graph missed correctly — it's back in `packages.txt` now, but the

@@ -22,7 +22,7 @@ files are for anymore — which per-firmware persistence payload to stage,
 and all of the old runtime install-state/version branching, moved
 entirely into `BakeRamdisk.cpp`, since the target firmware is already
 fully known at bake time. See
-`Blackb0x/Misc/README.md` for the reverse-engineering writeup (strings, the
+`misc/README.md` for the reverse-engineering writeup (strings, the
 original `Patcher.mm`, a full Ghidra decompilation, and raw disassembly of
 every syscall trampoline) this is built from.
 

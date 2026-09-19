@@ -15,7 +15,7 @@
 #include <string>
 
 // `path` is the downloaded, still-encrypted RestoreRamdisk; `key`/`iv` are
-// its "RestoreRamdisk" entry from a Blackb0x/ImageKeys/*.keys file.
+// its "RestoreRamdisk" entry from a keys/*.keys file.
 // `productVersion` is this firmware's own BuildManifest.plist ProductVersion
 // (e.g. "6.1.3", "8.4.2" — see IPSW.hpp's ManifestInfo) — used to pick which
 // per-firmware persistence payload gets staged under /blackb0x (see

@@ -11,7 +11,7 @@ Consolidates everything learned doing this by hand once:
   - BuildManifest.plist's component keys don't always match ipsw.me's/this
     project's own naming casing (e.g. "RestoreRamDisk", not "RestoreRamdisk")
     — resolved case-insensitively here.
-  - Blackb0x/ImageKeys/<device>/<device>_<buildID>.keys stores each
+  - keys/<device>/<device>_<buildID>.keys stores each
     component's [IV, KEY] in that ORDER (array index 0 = IV, index 1 = KEY)
     — this is easy to get backwards (we did, once) since both are just hex
     strings with no label. Matches src/IPSW.cpp's own parsing.
@@ -38,7 +38,7 @@ Examples:
     scripts/fetch_firmware_component.py AppleTV2,1 11D257c RestoreRamDisk \\
         --extract sbin/launchd --extract-out /tmp/real_launchd
 
-Requires: this repo's Blackb0x/ImageKeys/<device>/*.keys for the requested
+Requires: this repo's keys/<device>/*.keys for the requested
 build, and build/third_party/xpwn/ipsw-patch/xpwntool already built
 (`cmake --build build`). --extract additionally needs `7z` on PATH
 (`brew install p7zip`). That used to run inside a throwaway
@@ -59,7 +59,7 @@ import zipfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 XPWNTOOL = os.path.join(REPO_ROOT, "build", "third_party", "xpwn", "ipsw-patch", "xpwntool")
-IMAGEKEYS_DIR = os.path.join(REPO_ROOT, "Blackb0x", "ImageKeys")
+IMAGEKEYS_DIR = os.path.join(REPO_ROOT, "keys")
 
 
 class HTTPRangeFile:
@@ -149,7 +149,7 @@ def find_component_path(manifest_bytes, component):
 
 
 def load_key_iv(device, build_id, component):
-    """Blackb0x/ImageKeys/<device>/<device>_<buildID>.keys — each component
+    """keys/<device>/<device>_<buildID>.keys — each component
     is a 2-element array: [IV, KEY], in that order (see src/IPSW.cpp's
     keysForDevice(), which this mirrors exactly)."""
     path = os.path.join(IMAGEKEYS_DIR, device, f"{device}_{build_id}.keys")
@@ -246,7 +246,7 @@ def main():
         f.write(encrypted_bytes)
     print(f"  {len(encrypted_bytes)} bytes")
 
-    print(f"Loading key/iv from Blackb0x/ImageKeys/{args.device}/{args.device}_{args.build_id}.keys...")
+    print(f"Loading key/iv from keys/{args.device}/{args.device}_{args.build_id}.keys...")
     iv_hex, key_hex = load_key_iv(args.device, args.build_id, args.component)
 
     print("Decrypting (2 xpwntool passes: decrypt, then unwrap IMG3)...")

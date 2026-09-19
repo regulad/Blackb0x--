@@ -12,7 +12,7 @@
 # because the bootstrap container has no `launchctl` and no iOS at all.
 # Stripping is only safe BECAUSE this is a no-op on a fresh boot -- follow
 # com.firecore.freemem-watcher, whose postinst is the same bare launchctl
-# load for the same reason (see Blackb0x/Misc/prebake_package_blacklist.txt).
+# load for the same reason (see misc/prebake_package_blacklist.txt).
 #
 # Consequences, if you edit this file:
 #   - Keep it idempotent and side-effect-free on a fresh boot. Anything that

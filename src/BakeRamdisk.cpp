@@ -762,7 +762,7 @@ static bool shouldSkipStagingDeb(const std::string& filename) {
 
 // ---------------------------------------------------------------------------
 // Bake-time package preinstallation — for packages with no postinst (or a
-// trivial one, see Blackb0x/Misc/prebake_package_blacklist.txt's own
+// trivial one, see misc/prebake_package_blacklist.txt's own
 // comment for the full audit) this unpacks the real .deb and writes real
 // dpkg status/info state directly into /blackb0x at bake time, instead of
 // just caching the .deb for postinstall.sh's own apt-get to install for
@@ -974,7 +974,7 @@ static std::set<std::string> readPrebakeBlacklist() {
 // Computes which of `resolvedFilenames` (picklist.txt's full transitive
 // closure) are safe to unpack + mark installed at bake time. A package is
 // eligible only if it is NOT in
-// Blackb0x/Misc/prebake_package_blacklist.txt AND every one of its real
+// misc/prebake_package_blacklist.txt AND every one of its real
 // Depends:/Pre-Depends: (extracted directly from the actual .deb, not
 // guessed) is ALSO eligible, transitively. This propagation is not
 // optional: cydia is blacklisted (real, stateful first-run postinst — see
@@ -1601,14 +1601,14 @@ struct GlobalDebcacheResult {
     // build_deb_cache.py's local_only_debs.txt output (a real
     // dpkg-scanpackages Packages index + the loose .debs it describes) —
     // empty string if that run had no local-only entries to build one
-    // for. See Blackb0x/Misc/apt/local.list's own comment for why this
+    // for. See misc/apt/local.list's own comment for why this
     // needs a real generated index, not just cached .deb bytes.
     std::string localRepoDir;
 };
 
 // Runs scripts/build_deb_cache.py and the bake-time dpkg preinstall
 // mechanism at most ONCE per distinct real firmware version, no matter how
-// many (device, buildID) tuples this run bakes. Blackb0x/Misc/packages.txt's
+// many (device, buildID) tuples this run bakes. package/packages.txt's
 // own resolution (and the real dpkg unpack/audit it feeds) is entirely
 // firmware-independent EXCEPT for the synthetic "firmware" package's own
 // declared version (see kPreinstallInnerScript's/INNER_SCRIPT's own
@@ -1710,7 +1710,7 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
 
     cached.aptListsDir = tempDir + "/apt-lists";
     // Only present if local_only_debs.txt had entries this run — see that
-    // file and Blackb0x/Misc/apt/local.list's own comments.
+    // file and misc/apt/local.list's own comments.
     if (fs::exists(tempDir + "/local-repo")) {
         cached.localRepoDir = tempDir + "/local-repo";
     }
@@ -2021,13 +2021,13 @@ static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const s
     return result;
 }
 
-// iOS 8.4 branch — tihmstar's EtasonATV untether (see Blackb0x/Misc/README.md's
+// iOS 8.4 branch — tihmstar's EtasonATV untether (see misc/README.md's
 // "etasonATV / tihmstar-untether provenance" for the jsc/rtbuddyd/--early-boot
 // mechanism this stages), extracted directly from the real
 // net.tihmstar.etasonuntether .deb (Depends: firmware = 8.4.1, and its one
 // real repo — repo.tihmstar.net — turned out to be an unreliable live apt
-// dependency besides; see Blackb0x/Misc/apt/net.tihmstar.list.disabled and
-// Blackb0x/Misc/local_only_debs.txt) rather than the old, hand-assembled
+// dependency besides; see misc/apt/net.tihmstar.list.disabled and
+// package/local_only_debs.txt) rather than the old, hand-assembled
 // tihmstar-untether.tar. Its real postinst never runs either way — see
 // stageManualDpkgInstall() below. Only the four loose payload
 // files plus the real dpkg state (stageManualDpkgInstall() above) are
@@ -2066,9 +2066,9 @@ static bool stageEtasonatv(const fs::path& blackb0xRoot) {
     ok &= stageFile(blackb0xRoot, "usr/bin/orphan_commander", tempDir + "/usr/bin/orphan_commander", 0, 0, 0755);
     stageDir(blackb0xRoot, "untether", 1000, 985, 0755);
     // The real .deb's own untether.bin is NOT staged here — see
-    // Blackb0x/Misc/README.md's "etasonATV / tihmstar-untether provenance"
+    // misc/README.md's "etasonATV / tihmstar-untether provenance"
     // section: this project's own untether.bin (kept standalone at
-    // Blackb0x/Misc/untether.bin once the original tarball that bundled it
+    // misc/untether.bin once the original tarball that bundled it
     // was retired) checks against real AppleTV3 (S5L8947X) kernel banners
     // across several tvOS 8.4.x point releases, while the .deb's own build
     // never references that SoC at all — it's a generic multi-device
@@ -2313,7 +2313,7 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
 
     // net.tihmstar's keyring is staged loose, alone among the repo keys: it
     // is the one with no matching source list (only
-    // Blackb0x/Misc/apt/net.tihmstar.list.disabled exists), so it is not
+    // misc/apt/net.tihmstar.list.disabled exists), so it is not
     // package content. Kept so the .deb stays verifiable if the live repo is
     // ever re-enabled by restoring that list.
     ok &= stageFile(blackb0xRoot, "private/etc/apt/trusted.gpg.d/net.tihmstar.gpg",

@@ -66,7 +66,7 @@ struct CliOptions {
     // whether iBSS itself is stock or blackb0x-patched). So this is left
     // to fail at runtime with a specific "no iBSS keys loaded for <device>
     // <build>" (Patcher::useStockIBSS()) rather than refused upfront here
-    // -- drop a real .keys file for that build under Blackb0x/ImageKeys/
+    // -- drop a real .keys file for that build under keys/
     // and rerun to get past it.
     bool stockRecovery = false;
     // Sends a stock kernelcache (see Patcher::useStockKernel()) and stock

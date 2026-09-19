@@ -1,13 +1,13 @@
 # Disabled: scripts/build_deb_cache.py only globs *.list, so this
 # `.list.disabled` suffix means it's never picked up as a live source.
 # repo.tihmstar.net is real (still serves signed content — see
-# Blackb0x/Misc/README.md's "etasonATV / tihmstar-untether provenance"),
+# misc/README.md's "etasonATV / tihmstar-untether provenance"),
 # but its live Packages/Packages.gz has been observed out of sync with its
 # own Release file's declared size ("Mirror sync in progress?" per apt's
 # own message) — a small, low-traffic personal repo with no guarantee of
 # staying self-consistent run to run. The one package this project ever
 # needed from it, net.tihmstar.etasonuntether, is handled entirely through
-# Blackb0x/Misc/local_only_debs.txt instead (the same local file:// repo
+# package/local_only_debs.txt instead (the same local file:// repo
 # mechanism "essential" already uses) — see that file's own comment.
 # Re-enable by dropping the `.disabled` suffix if a real future need for
 # live resolution against this repo comes up.

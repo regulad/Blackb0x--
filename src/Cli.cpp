@@ -866,7 +866,7 @@ int runCli(const CliOptions& options) {
     // failure mode: --stock-recovery alone still points buildToRequest at
     // "latest" (needed for the ticket itself), but patchKernel()/
     // patchRamdisk() have zero support for whatever build that resolves
-    // to (no Blackb0x/ImageKeys/ entry, no baked dist/ ramdisk), so they
+    // to (no keys/ entry, no baked dist/ ramdisk), so they
     // fail with no output component set at all, surfacing several layers
     // away as a generic "Not all required components patched
     // successfully".
@@ -1109,7 +1109,7 @@ int runCli(const CliOptions& options) {
 
         // Only useStockIBSS()'s decrypt-only branch (stockRecovery
         // *without* stockSecurerom) ever needs a real local
-        // Blackb0x/ImageKeys/ entry -- when stockSecurerom is also set,
+        // keys/ entry -- when stockSecurerom is also set,
         // every single component (iBSS/iBEC/kernel/ramdisk) goes out
         // untouched, still encrypted, still img3-wrapped (see
         // useStockIBSS()/useStockIBEC()/useStockKernel()/useStockRamdisk()'s

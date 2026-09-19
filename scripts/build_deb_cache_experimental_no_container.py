@@ -59,12 +59,12 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MISC_DIR = REPO_ROOT / "Blackb0x" / "Misc"
+MISC_DIR = REPO_ROOT / "misc"
 DEBS_DIR = REPO_ROOT / "debcache"
 PACKAGE_DIR = REPO_ROOT / "package"
 # packages.txt and local_only_debs.txt describe what the
 # xyz.regulad.blackb0x package installs, so they live with the package
-# rather than in Blackb0x/Misc (which is bake-time host assets).
+# rather than in misc (which is bake-time host assets).
 PACKAGES_LIST = PACKAGE_DIR / "packages.txt"
 LOCAL_ONLY_LIST = PACKAGE_DIR / "local_only_debs.txt"
 

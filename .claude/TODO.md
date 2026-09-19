@@ -5,13 +5,13 @@ Open items not yet resolved. See `AGENTS.md` for repo conventions and
 
 ## 1. Pin down `untether.bin`'s exact build (mostly resolved)
 
-`Blackb0x/Misc/tihmstar-untether.tar` — the last original tarball ever
+`misc/tihmstar-untether.tar` — the last original tarball ever
 checked into this repo — is gone now: the real, long-lost
 `net.tihmstar.etasonuntether-1.3.1.deb` itself turned up (now in
 `debcache/`), and `BakeRamdisk.cpp`'s `stageEtasonatv()` extracts the
 8.4 untether payload straight out of that `.deb` at bake time instead of
 the tarball. Direct provenance was already confirmed before this switch —
-see `Blackb0x/Misc/README.md`'s `## etasonATV / tihmstar-untether
+see `misc/README.md`'s `## etasonATV / tihmstar-untether
 provenance` section, `### Direct provenance, found via the "Home Depot"
 lead`: tihmstar's own Cydia repo (`repo.tihmstar.net`) is still live, and
 `untether/expl.js`, `usr/bin/orphan_commander`, and `etc/rc.d/daemonload`
@@ -23,7 +23,7 @@ not their content.
 What's still open — narrower than before, but not closed:
 
 - `untether/untether.bin` (43,680 bytes, now kept standalone at
-  `Blackb0x/Misc/untether.bin` — see that file's own README section) still
+  `misc/untether.bin` — see that file's own README section) still
   doesn't match either currently published build: not tihmstar's real
   `etasonuntether-1.3.1`'s `untether.bin` (35,677 bytes, dated 2021-04-04
   in that package), nor `untetherhomedepot`'s (33,600 bytes, 2017). **The
@@ -400,7 +400,7 @@ that's now happened.
 **Partly done** — the non-ramdisk half now has a tool:
 `bake-firmware` (`src/BakeFirmware.cpp`) downloads
 and patches iBSS/iBEC/KernelCache/DeviceTree ahead of time for every
-`(device, buildID)` under `Blackb0x/ImageKeys/`, writing
+`(device, buildID)` under `keys/`, writing
 `dist/bootchain/<device>_<buildID>/`. It shares `Patcher.cpp` with
 `blackb0x` itself, so the two cannot drift — which also makes it the only
 way to exercise `patchiBSS()`/`patchiBEC()`/`patchKernel()`, and therefore
@@ -451,7 +451,7 @@ Not started. `bake-firmware` now builds on both Linux and macOS (see
 item 4a above), but only ever a handful of individual `(device, buildID)`
 tuples have actually been baked and checked in either environment this
 session — never a full run across every one of the 95 known tuples under
-`Blackb0x/ImageKeys/` (`AppleTV2,1`/`AppleTV3,1`/`AppleTV3,2` combined).
+`keys/` (`AppleTV2,1`/`AppleTV3,1`/`AppleTV3,2` combined).
 Worth a real `--signed-only`-less full run on each platform (every known
 build, not just currently-signed ones) to catch tuple-specific breakage
 the handful of spot-checked builds wouldn't — e.g. the AppleTV2,1 4.x
@@ -484,8 +484,8 @@ posture.
 ## 8. Author a script to generate the (identifier, build) → firmware version binding (DONE)
 
 **Done.** `scripts/generate_firmware_versions.py` regenerates
-`Blackb0x/Misc/firmware_versions.txt` on demand, so it tracks
-`Blackb0x/ImageKeys/` instead of being a stale hand-collected snapshot. The
+`misc/firmware_versions.txt` on demand, so it tracks
+`keys/` instead of being a stale hand-collected snapshot. The
 sourcing logic that was previously only described after the fact is now
 checked in and auditable:
 
@@ -524,8 +524,8 @@ synthetic `firmware` dpkg package's pin via a live `newestVersionForDevice()`
 call per device model at bake time (`IPSW.cpp`, memoized per run in
 `BakeFirmware.cpp` — see `docs/HISTORY.md`/this session's own fix for
 why it has to be the newest-known-per-model version, not a given tuple's
-own `ProductVersion`). `Blackb0x/Misc/firmware_versions.txt` (one
-`<device> <buildID> <version>` line per known `Blackb0x/ImageKeys/` tuple)
+own `ProductVersion`). `misc/firmware_versions.txt` (one
+`<device> <buildID> <version>` line per known `keys/` tuple)
 already exists as a similar, related binding, but was hand-collected by
 an agent doing one-off research (ipsw.me queries, range-fetched
 `BuildManifest.plist`s, AppleDB cross-checks for builds ipsw.me doesn't
@@ -540,7 +540,7 @@ rather than only described after the fact.
 
 ## 9. Change the saurik repo version when not building against an iOS 8 version
 
-Not started. `Blackb0x/Misc/apt/saurik.list` is a static, checked-in file
+Not started. `misc/apt/saurik.list` is a static, checked-in file
 (`deb http://apt.saurik.com/ ios/8.0 main`) staged verbatim onto every
 baked ramdisk regardless of target OS
 (`BakeRamdisk.cpp:stageBlackb0xTree()`'s plain `stageFile(...,

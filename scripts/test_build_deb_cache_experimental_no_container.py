@@ -48,7 +48,12 @@ def make_fake_deb(dest_dir: Path, package: str, depends: str = "", pre_depends: 
 
         deb_path = dest_dir / f"{package}_1.0_iphoneos-arm.deb"
         subprocess.run(
-            ["ar", "rc", str(deb_path), str(tmp / "debian-binary"), str(tmp / "control.tar.gz"), str(tmp / "data.tar.gz")],
+            # "rcS", not "rc" -- see the same note in BakeRamdisk.cpp's
+            # stripPreinstFromDeb(). macOS's cctools ar prepends a
+            # __.SYMDEF SORTED member to any archive it creates, which
+            # makes the result not a .deb at all. GNU ar omits it without
+            # being asked, so "rc" only ever broke here on macOS.
+            ["ar", "rcS", str(deb_path), str(tmp / "debian-binary"), str(tmp / "control.tar.gz"), str(tmp / "data.tar.gz")],
             check=True,
         )
         return deb_path
@@ -100,7 +105,12 @@ class ReadDebControlInfoTests(unittest.TestCase):
             subprocess.run(["tar", "-czf", str(tmp / "data.tar.gz"), "-C", str(data_dir), "."], check=True)
             deb_path = tmp / "broken.deb"
             subprocess.run(
-                ["ar", "rc", str(deb_path), str(tmp / "debian-binary"), str(tmp / "control.tar.gz"), str(tmp / "data.tar.gz")],
+                # "rcS", not "rc" -- see the same note in BakeRamdisk.cpp's
+                # stripPreinstFromDeb(). macOS's cctools ar prepends a
+                # __.SYMDEF SORTED member to any archive it creates, which
+                # makes the result not a .deb at all. GNU ar omits it without
+                # being asked, so "rc" only ever broke here on macOS.
+                ["ar", "rcS", str(deb_path), str(tmp / "debian-binary"), str(tmp / "control.tar.gz"), str(tmp / "data.tar.gz")],
                 check=True,
             )
             with self.assertRaises(SystemExit):

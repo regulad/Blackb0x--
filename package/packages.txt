@@ -3,7 +3,6 @@ apr-lib
 apt7
 apt7-key
 apt7-lib
-apt7-ssl
 base
 bash
 beigelist
@@ -11,7 +10,6 @@ berkeleydb
 bzip2
 com.ericasadun.utilities
 com.firecore.freemem-watcher
-com.ih8sn0w-squiffy-winocm.p0sixspwn
 com.nito.nitotv
 com.nito.tssagent
 com.nito.updatebegone
@@ -39,7 +37,6 @@ less
 lzma
 mobilesubstrate
 ncurses
-net.tihmstar.etasonuntether
 network-cmds
 odcctools
 openssh

@@ -1,0 +1,47 @@
+# never_stage_debs.txt -- .deb filename PREFIXES whose archive bytes are never
+# copied into the baked ramdisk's apt cache (private/var/cache/apt/archives/).
+# Read by shouldSkipStagingDeb() in src/BakeRamdisk.cpp. One prefix per line;
+# blank lines and #-comments ignored; matched with a plain starts-with against
+# the .deb's filename, so a trailing underscore pins the package name and keeps
+# it from matching a longer one.
+#
+# NOT THE SAME LIST AS prebake_package_blacklist.txt, and the difference
+# matters:
+#
+#   prebake_package_blacklist.txt  "do not force-install this at BAKE time"
+#                                  -- it has a real, stateful, device-dependent
+#                                  maintainer script that has to run on the
+#                                  device. Its .deb IS still staged, so apt can
+#                                  install it offline at first boot.
+#
+#   this file                      "do not ship this .deb at all" -- purely a
+#                                  size decision. The package stays reachable:
+#                                  its Packages metadata is still staged by
+#                                  stageAptListsCache(), and postinstall.sh
+#                                  still lists it, so on-device apt fetches it
+#                                  over the network if one is reachable and
+#                                  fails only that one package if not.
+#
+# A package with a real postinst belongs in prebake_package_blacklist.txt.
+# Putting it here instead does not protect anything -- it just makes the
+# package network-only for no reason.
+#
+# THE UNIT IS .deb ARCHIVE SIZE, NOT UNPACKED SIZE. These are staged as
+# archives and never extracted at bake time, so a package's unpacked footprint
+# is irrelevant here. afsctool cannot shrink them either; they are already
+# compressed.
+#
+# Budget, measured on a real finished bake of AppleTV3,2 10B329a: 30.0 MiB
+# against the 64 MiB ceiling (kMaxRamdiskSize), so 34.0 MiB of headroom. This
+# list was five entries when the same bake produced 70.9 MiB; odcctools
+# (1.04 MiB), gettext (0.73 MiB) and curl (0.26 MiB) were all excluded for size
+# alone and are staged again now.
+
+# 35.12 MiB. The only genuine size casualty left, and it misses narrowly:
+# 30.0 + 35.12 = 65.1 MiB, roughly 1.1 MiB over the ceiling. The bake
+# hard-fails rather than shipping something unuploadable, so this cannot simply
+# be un-listed. The only route to it is freeing space elsewhere -- see
+# .claude/TODO.md item 14, where dropping /usr/sbin/nvram's 14.22 MiB dylib
+# closure out of the pristine tree would make it fit with room to spare. That
+# is a real behavioural change to the boot chain.
+org.xbmc.kodi-atv2_

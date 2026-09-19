@@ -139,13 +139,17 @@ def read_deb_control_info(deb_path: Path) -> PackageInfo:
         # latent, pre-existing gap there too, not something new to this
         # script; out of scope to fix here, but worth knowing about).
         listing = subprocess.run(
-            ["tar", "--auto-compress", "-tf", str(control_tar)], cwd=tmp, check=True, capture_output=True, text=True
+            # No --auto-compress: macOS's bsdtar rejects -a outright under -t
+            # ("Option -a is not permitted in mode -t"), and tar detects the
+            # compression from the stream on read anyway. Same fix as
+            # BakeRamdisk.cpp's readDebControlInfo().
+            ["tar", "-tf", str(control_tar)], cwd=tmp, check=True, capture_output=True, text=True
         ).stdout.splitlines()
         control_member = next((m for m in listing if m in ("./control", "control")), None)
         if control_member is None:
             raise SystemExit(f"{deb_path}: no control member found in {control_tar.name} (listing: {listing})")
         control_text = subprocess.run(
-            ["tar", "--auto-compress", "-xOf", str(control_tar), control_member],
+            ["tar", "-xOf", str(control_tar), control_member],
             cwd=tmp, check=True, capture_output=True, text=True
         ).stdout
 

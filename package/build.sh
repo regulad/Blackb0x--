@@ -184,15 +184,25 @@ done
 # group/world-writable, and fails as "the daemon simply never ran" with
 # nothing pointing at permissions.
 #
-# Running as root is the broken case, not the safe one: dm.pl would then
-# record whatever the staging tree actually carries. The old containerized
-# build hit exactly that -- dm.pl ran as container root, so it needed an
-# explicit `chown -R 0:0` to put the ownership back. Natively there is nothing
-# to correct.
+# As root, dm.pl takes the other branch and records whatever the staging tree
+# actually carries -- which is the invoking user, not root:wheel, unless we say
+# otherwise. So under root we assert the ownership explicitly and let dm.pl
+# preserve it. Both branches then produce byte-identical root:wheel entries;
+# they just get there from opposite directions.
+#
+# This used to be a hard refusal ("run as an ordinary user"), which deadlocked
+# the one caller that matters: bakeRamdisk() REQUIRES root (it chown()s staged
+# content to root:wheel and writes into root-owned files on the mounted
+# ramdisk), and it invokes this script through stageBlackb0xPackage(). Root
+# required on one side, root refused on the other, so the ramdisk bake could
+# never complete. The refusal was never wrong about dm.pl's behaviour, only
+# about there being nothing to correct -- the old containerized build corrected
+# it with exactly this `chown -R 0:0`, and that remains the right answer
+# whenever euid is 0.
 if [ "$(id -u)" = "0" ]; then
-    echo "$0: refusing to run as root -- dm.pl preserves on-disk ownership when euid is 0," >&2
-    echo "    and stamps the correct root:wheel only when it is not. Run as an ordinary user." >&2
-    exit 1
+    echo "$0: running as root -- asserting root:wheel on the staging tree so dm.pl's" >&2
+    echo "    preserve-on-disk branch records the same ownership its non-root branch forces." >&2
+    chown -R 0:0 "$STAGING"
 fi
 
 exec "$THEOS_DIR/bin/dm.pl" -b -Zgzip "$STAGING" "$OUTPUT"

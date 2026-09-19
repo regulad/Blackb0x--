@@ -47,11 +47,14 @@ plist_t requestTSS(std::shared_ptr<void> buildIdentity, uint64_t ecid, const uns
     }
 
     // Best-effort, cheap check before ever bothering Apple's real TSS
-    // server: ipsw.me's own crowd-sourced signing-status snapshot (the
-    // same one bake-firmware's --signed-only already relies on) can
-    // at least warn upfront that this is very likely a wasted request --
+    // server: ipsw.me's own crowd-sourced signing-status snapshot can at
+    // least warn upfront that this is very likely a wasted request --
     // it's not authoritative (can lag Apple's own signing-window changes
     // in either direction), so this only warns, never blocks.
+    //
+    // This and Cli.cpp's --stock-recovery build selection are now the only
+    // two callers of signedBuildsForDevice(); bake-firmware's --signed-only
+    // was the third and is gone (see IPSW.hpp).
     if (!deviceModel.empty() && !buildID.empty()) {
         std::set<std::string> signedBuilds = signedBuildsForDevice(deviceModel);
         if (!signedBuilds.count(buildID)) {

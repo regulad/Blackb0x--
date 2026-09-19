@@ -136,9 +136,11 @@ the real package's postinst does that isn't replicated anywhere yet.
 
 ## 4. Bring back macOS support for `blackb0x` (and, eventually, ramdisk baking too)
 
-`AGENTS.md` currently states "CLI-only, Linux-only... dropped, not
-dual-maintained" as a "don't re-litigate without asking" convention — this
-entry reopens that by explicit request. Reopened a second time, more
+`AGENTS.md` stated "CLI-only, Linux-only... dropped, not dual-maintained" as
+a "don't re-litigate without asking" convention at the time this was written
+— this entry reopened that by explicit request. (That quote is long stale:
+AGENTS.md now says "CLI-only, macOS-only", and Linux support is gone
+outright. Kept as written because it records what was true then.) Reopened a second time, more
 urgently, after a long real-hardware debugging session on Linux
 (AppleTV3,2, ECID 2685369898254) kept surfacing libusb/DFU-state races in
 `DeviceManager.cpp`'s `boot_client()` — an intermittent "boots into the
@@ -340,6 +342,43 @@ Apple frameworks linked pre-emptively (matching how `blackb0x`'s own
 `if(APPLE)` framework block was arrived at from a real link error, not a
 guess).
 
+**UPDATE — the real macOS link error arrived.** `bake-firmware` does not
+link without CoreFoundation, Security and SystemConfiguration: wolfSSL's
+`DoAppleNativeCertValidation`/`LoadSystemCaCertsMac` and curl's
+`Curl_macos_init` reach into them unconditionally on Darwin. Those three
+are linked now, taken from the actual undefined-symbol list. IOKit is
+deliberately absent — this binary talks to no USB device, and adding it
+for symmetry with `blackb0x` would link a framework nothing references.
+
+**UPDATE — the `.deb`-reading half of this path now runs on real macOS**,
+and needed two fixes nothing on Linux could have surfaced. `ar rc` builds
+an archive dpkg rejects outright on macOS, because Apple's cctools ar
+prepends a `__.SYMDEF SORTED` member ahead of `debian-binary`; `rcS`
+suppresses it. And `tar --auto-compress` is create-only in bsdtar, so
+`readDebControlInfo()`'s `-t` call was a hard error on every package.
+Both fixed; the portable resolver now walks all 107 real archives and
+resolves 60 top-level packages to 68 files. See AGENTS.md's "First real
+macOS build" for the full list.
+
+**UPDATE — `entrypoint/` builds on macOS too, and needs no cross-toolchain.**
+This was briefly the blocker for reaching the `hdiutil` half at all, since
+the bake builds `entrypoint/` before it gets that far and
+`arm-apple-darwin11-clang` was not installed. It turns out nothing needs to
+be: Apple's own `clang` keeps the ARM backend and Apple's own `ld` still
+lists `armv6` in `ld -v`, so `entrypoint/Makefile` now passes `-arch armv6`
+to the system compiler. Verified artifact: Mach-O armv6, `LC_UNIXTHREAD`,
+zero `LC_LOAD_DYLIB`, `_entry` as the thread-state PC, `ldid`-signed
+`com.apple.launchd`. The `cctools-port` build and the 1.7GB Xcode 4.6 SDK
+extraction are both dropped from the documented path; `brew install ldid` is
+the whole setup now.
+
+**Still unverified: the `hdiutil` volume-creation half.** The two spots
+flagged below stand exactly as written. One incidental finding toward them:
+attaching a bare HFS+ volume with no partition map requires
+`-imagekey diskimage-class=CRawDiskImage`, or `hdiutil attach` fails with
+"image not recognized" — confirmed by mounting two real decrypted
+RestoreRamdisks by hand.
+
 **Not yet real-hardware/real-macOS verified** — everything above was
 built and tested on Linux only (the experimental resolver's 18 tests
 pass there; both `blackb0x` and `bake-firmware` build clean with
@@ -413,7 +452,8 @@ bake needed `CAP_SYS_ADMIN` for its loop mount. With the loop mount gone
 (the ramdisk bake is `hdiutil` now, also rootless) that reason went with it
 and the two were merged into the single `bake-firmware`, which had been
 carrying two verbatim copies of the target enumeration and the
-`--signed-only`/`--device`/`--build` filters. `--only bootchain` is the
+`--device`/`--build` filters (there was a `--signed-only` too; it has since
+been removed outright — see item 13). `--only bootchain` is the
 fast iteration loop the old split used to provide: it skips the entrypoint
 cross-compile and the debcache entirely.
 
@@ -452,8 +492,8 @@ item 4a above), but only ever a handful of individual `(device, buildID)`
 tuples have actually been baked and checked in either environment this
 session — never a full run across every one of the 95 known tuples under
 `keys/` (`AppleTV2,1`/`AppleTV3,1`/`AppleTV3,2` combined).
-Worth a real `--signed-only`-less full run on each platform (every known
-build, not just currently-signed ones) to catch tuple-specific breakage
+Worth a real full run (every known build, not just the handful spot-checked)
+to catch tuple-specific breakage
 the handful of spot-checked builds wouldn't — e.g. the AppleTV2,1 4.x
 legacy-recreation case `bakeRamdisk()` currently refuses outright (see its
 own early bail-out), older firmware branches' different persistence
@@ -561,7 +601,58 @@ instead of a fixed string — likely templated the same way
 (not all of this project's supported OS eras necessarily have their own
 distinct saurik dist branch — worth checking which do).
 
-## 10. Additional ramdisk size shedding to get under the 64MiB watermark
+## 10. Additional ramdisk size shedding to get under the 64MiB watermark (LARGELY MOOT)
+
+**The watermark is no longer the binding constraint.** A real finished bake of
+AppleTV3,2 10B329a came out at **30.0 MiB against the 64 MiB ceiling**, once
+the payload was decmpfs-compressed *before* the volume was sized (item 16).
+This entry was written when the same bake was producing 70.9 MiB.
+
+With 34.0 MiB of headroom, `kNeverStageDebs` shrank from five entries to two.
+`odcctools` (1.04 MiB), `gettext` (0.73 MiB) and `curl` (0.26 MiB) are staged
+again -- they had been excluded for size alone, and 2.03 MiB is nearly free
+now. They install offline instead of needing a network at first boot.
+
+What remains, and why:
+
+| package | .deb size | why it stays |
+|---|---|---|
+| `org.xbmc.kodi-atv2` | 35.12 MiB | 30.0 + 35.12 = 65.1 MiB, about 1.1 MiB over the ceiling |
+
+`com.nito.nitotv` came off this list too, because it was on the wrong one.
+It has a real postinst that deletes live device files
+(`/var/mobile/Media/Photos/seas0nTV.png`,
+`/Library/MobileSubstrate/DynamicLibraries/apocalypsePony*`), which is exactly
+what `prebake_package_blacklist.txt` exists for — and it was already listed
+there. Having it in `kNeverStageDebs` as well protected nothing: the prebake
+blacklist already stopped it being force-installed at bake time, so the second
+listing only made it network-only for no reason. At 1.61 MiB it now ships, and
+apt installs it on-device where its postinst can actually run.
+
+**The list moved to `misc/never_stage_debs.txt`**, read by
+`shouldSkipStagingDeb()`, so each entry can carry its own reasoning. That file's
+header spells out the distinction the nitotv mistake turned on:
+
+- `prebake_package_blacklist.txt` — "do not force-install at bake time"; the
+  `.deb` is still staged, so apt can install it offline.
+- `never_stage_debs.txt` — "do not ship this `.deb` at all"; purely a size
+  decision.
+
+A package with a real maintainer script belongs in the first, never the second.
+
+Kodi is the only real size casualty left, and it misses by roughly a megabyte.
+The one route to it is item 14's `nvram` removal, which would free 14.22 MiB of
+pristine-tree dylibs -- a real boot-chain change, and not worth spending on
+Kodi.
+
+Note the unit that matters is **.deb archive size, not unpacked size**. These
+are staged into apt's cache as archives and never extracted at bake time, so
+odcctools' ~7.4 MiB unpacked footprint was never the cost; its 1.04 MiB archive
+was. afsctool does not shrink them either -- they are already compressed.
+
+Original note follows.
+
+## 10 (original). Additional ramdisk size shedding to get under the 64MiB watermark
 
 **The hard-fail half is DONE.** A finished ramdisk over the limit now fails
 the bake instead of warning: `bakeRamdisk()` returns false and removes the
@@ -636,7 +727,28 @@ used (not guessed) before moving anything: confirm nothing in the
 bootstrap closure itself, and nothing that runs before `postinstall.sh`
 gets a working apt, actually `Depends:`/`Pre-Depends:` on it.
 
-## 11. Convert blackb0x's own install content into a real `xyz.regulad.blackb0x` .deb
+## 11. Convert blackb0x's own install content into a real `xyz.regulad.blackb0x` .deb (DONE)
+
+**Done, in commit 2ff796c.** This entry said "Not started" long after it
+shipped; corrected here against the actual code.
+
+What exists now: `stageBlackb0xPackage()` (`BakeRamdisk.cpp`) runs
+`package/build.sh` to produce a real `xyz.regulad.blackb0x` `.deb` with
+Theos's `dm.pl`, extracts it, merges its payload into the staged tree
+(remapping top-level `etc/`/`var/` to `private/`), and registers it with
+`stageManualDpkgInstall()` carrying the real on-device paths — the
+`regulad.list`/`regulad.gpg` pair, `postinstall.sh`, the
+`xyz.regulad.blackb0x.postinstall.plist` LaunchDaemon and `/var/root/.profile`
+included. So all of it is dpkg-tracked now, with real `Status:`/`.list`
+entries, exactly as this item asked. `package/build.sh` templates
+`postinstall.sh`'s `__BLACKB0X_PACKAGES__` from `package/packages.txt` rather
+than from a bake's resolved closure, which is what keeps the package
+independently buildable.
+
+See AGENTS.md's "Install-time design" section, step 6, for the as-built
+description.
+
+Original note follows.
 
 Not started. `stageBlackb0xTree()` (`BakeRamdisk.cpp`) currently stages
 blackb0x's own install content as plain loose files via `stageFile()`,
@@ -661,3 +773,560 @@ like every other package on the device (real `Status:`/`.list`/`.md5sums`
 entries, upgradeable/removable through normal apt instead of being
 permanently-invisible loose files), instead of being the one piece of
 this ramdisk's own content dpkg has no record of at all.
+
+## 12. Kernelcache decrypt fails on every IMG3 whose `DATA` size is not 16-aligned
+
+Found by the first real macOS `bake-firmware --only bootchain` sweep, run at
+the time over the five then-currently-signed builds. Three of the five currently-signed builds fail to patch their
+kernelcache, while iBSS, iBEC and DeviceTree succeed for all five:
+
+| device | build | kernel |
+|---|---|---|
+| AppleTV2,1 | 10B809 | FAIL |
+| AppleTV2,1 | 11D258 | FAIL |
+| AppleTV3,1 | 10B809 | ok |
+| AppleTV3,1 | 12H606 | ok |
+| AppleTV3,2 | 12H606 | FAIL |
+
+**This is not a macOS regression** — nothing in the failing path is
+platform-specific, and `docs/HISTORY.md` already records 10B144b failing the
+same way during a Linux sweep. It is also not a crash: `Patcher::patchKernel()`
+already detects the empty `decrypt()` output and skips the firmware cleanly,
+which is why a whole sweep survives it.
+
+The correlation is exact. Every failing build's IMG3 `DATA` tag has a
+`dataSize` that is **not** a multiple of 16 (13, 11 and 14 trailing bytes
+respectively); the passing `AppleTV3,1` 12H606 is exactly block-aligned.
+`decrypt()` is not what reports the failure — `openAbstractFile2()` returns
+NULL because xpwn's `createAbstractFileFromComp()` (`lzssfile.c`) rejects the
+stream: `decompress_lzss()` returns ~50-70 bytes fewer than the `complzss`
+header's own `length_uncompressed`.
+
+Two things already ruled out, so nobody repeats them:
+
+- **Not a wrong key.** The `complzss` header sits at offset 0 of the encrypted
+  payload and parses correctly (right signature, plausible compressed and
+  uncompressed sizes, and `length_compressed + 0x180` lands exactly on
+  `dataSize`). A wrong key would produce noise there. The bulk of the stream
+  decompresses; only the tail is wrong.
+- **Not the decrypt/encrypt length asymmetry, at least not on its own.**
+  `img3.c`'s `setKeyImg3()` decrypts
+  `((header->size - sizeof(AppleImg3Header)) / 16) * 16` bytes while
+  `closeImg3()` encrypts `(header->dataSize / 16) * 16` — genuinely different
+  formulas. Changing the decrypt side to match the encrypt side was tried and
+  **does not fix it**: the decompressed length moves (12894145 -> 12894142 on
+  AppleTV3,2 12H606) without reaching the claimed 12894208. The padded form is
+  probably the correct one anyway, since Apple pads the encrypted payload up to
+  the block boundary and the tag is sized to hold exactly that.
+
+Worth re-reading with this in hand: `IMG3_AES_OVERREAD_PAD`'s own comment
+attributes an observed valgrind over-read to wolfSSL lookahead. That over-read
+is the same ~11 bytes as the gap between `dataSize` and the padded tag size, so
+the two may be the same phenomenon described twice. Confirming or refuting that
+is a good first move.
+
+Next step is probably to diff a known-good decryption of one failing kernelcache
+(any independent AES-CBC implementation) against xpwn's output over the last few
+hundred bytes, which localises the defect to decrypt or to `decompress_lzss()`
+without guessing.
+
+## 13. `--signed-only` removed from `bake-firmware` (DONE)
+
+**Done.** The flag, its argument parsing, and its target-filter block are gone
+from `src/BakeFirmware.cpp`.
+
+It asked ipsw.me which builds Apple is still actively signing and baked only
+those. That filter answers a question the baker has no stake in. What this
+project can jailbreak is decided by which `(device, buildID)` tuples have a
+`.keys` file under `keys/` and patches that work against them, and the live
+path pins `kJailbreakTargetBuild` (`Cli.cpp`, currently `10B329a`) regardless.
+Apple's signing window neither creates nor removes a bakeable target, so the
+flag only ever hid targets that were perfectly valid to bake, at the cost of
+one network round trip per device model. `--device`/`--build` remain as the
+way to narrow a run.
+
+**`signedBuildsForDevice()` (`IPSW.hpp`) stays, and is not dead.** After this
+removal it has exactly two callers, both `--stock-*` diagnostic routes, both
+of which genuinely need Apple's signing window because a real SHSH ticket can
+only be issued inside it:
+
+- `Personalize.cpp`'s `requestTSS()` — warns before a TSS request Apple is
+  near-certain to refuse. Reached only via `DeviceManager.cpp`'s
+  `personalizeIMG3Component()`, inside `if ((isATV31 || isATV32) &&
+  stockSecurerom)`.
+- `Cli.cpp`'s `--stock-recovery` build selection — prefers a still-signed
+  build blackb0x has local keys for over blindly resolving `"latest"`.
+  Guarded by `if (options.stockSecurerom || options.stockRecovery)` and then
+  narrowed by `if (!options.stockSecurerom)`, so `--stock-recovery` alone.
+
+One real user-facing bug fixed on the way out: `Patcher.cpp`'s no-baked-ramdisk
+PANIC message told the user to re-run `bake-firmware --signed-only`, a flag
+that no longer exists. It now prints the exact `--device`/`--build` invocation
+for the tuple that is actually missing.
+
+Do not wire signing status back into the baker.
+
+## 14. Deleting Apple's pristine ramdisk content for space (measured, rejected for now)
+
+Considered as a size lever for item 10 and rejected on measurement, recorded so
+nobody re-derives it.
+
+`entrypoint.c` is freestanding, so almost nothing Apple ships on the restore
+ramdisk is referenced at boot. Its whole dependency on the pristine tree is:
+
+- `/dev` — only needs to exist as an empty directory; the kernel mounts devfs
+  onto it, which is where `/dev/console` and `/dev/disk0s1s1` come from.
+- `/mnt1` — a mountpoint, already empty on every pristine ramdisk.
+- `/usr/sbin/nvram` — `execve`'d by `set_auto_boot()`.
+
+Both filesystem mounts go through `sys_mount()` directly, so `mount_hfs`, `fsck`,
+`mount` and the rest are unused, and nothing reads `/bin`,
+`/System/Library/LaunchDaemons`, `restored_external`, `asr` or `sed`.
+
+**Why deleting the rest is not worth it: `nvram`'s closure is the ramdisk.**
+Measured against a real AppleTV3,1 12H606 RestoreRamdisk, its transitive dylib
+closure is 43 files totalling **14.22 MiB of a 15 MiB volume** — CoreFoundation
+(4.5 MB), libobjc (2.1 MB), libicucore (2.1 MB), IOKit, dyld and all of
+`/usr/lib/system`. Keeping one 36 KB binary means keeping essentially everything,
+so the saving is under a megabyte, against a real risk of deleting something
+load-bearing that would only show up as a device that will not boot.
+
+**The version that WOULD pay: drop `nvram` itself.** It exists only for
+`set_auto_boot()`, and the host can do that job instead — `DeviceManager.cpp`
+already sends `setenv auto-boot false` + `saveenv` to iBEC in
+`sendStockRestoreTail()`, so issuing the `auto-boot=1` equivalent before `bootx`
+moves it off the device entirely and makes the whole 14.22 MiB closure deletable.
+That roughly doubles the `/blackb0x` budget under the 64 MiB ceiling. Not done:
+it is a real behavioural change to the boot chain, unverifiable without hardware,
+and a mistake in it presents as an exploit failure rather than a size problem.
+
+**A larger, zero-risk saving is already available** without deleting anything —
+see item 15. The current bake inflates Apple's 15 MiB to 34 MiB by destroying
+HFS+ compression, so fixing the mechanism recovers more than deleting the content
+would.
+
+## 15. `bakeRamdisk()` grows the original volume instead of rebuilding it (DONE)
+
+**Done.** The macOS branch now resizes, attaches with `-owners on`, splices
+`/sbin/launchd` and copies `/blackb0x` straight onto the mounted original, then
+First real bake attempt got through the whole bootchain, the debcache
+resolution, the preinstall-eligibility pass and the staging decisions, then died
+in `package/build.sh` with an empty stderr. Cause: **`package/build.sh` was
+committed mode 0644**, and `stageBlackb0xPackage()` `execvp()`s it directly, so
+exec failed with EACCES. It was invisible because `runCommand()`'s child did a
+bare `_exit(127)` after `execvp()` and never said why. Both fixed: the script
+(and `scripts/push_authorized_keys.sh`, run directly per the README) are 0755 in
+git now, and `runCommand()` reports the real `strerror(errno)` for a failed
+`chdir`/`execvp` and names a signal if the child was killed. Worth remembering as
+a class: anything this project fork/execs out of the repo needs its mode tracked
+in git, not just locally.
+
+Second failure, one step further on: `package/build.sh` **refused to run as
+root**, while `bakeRamdisk()` **requires** root and calls it via
+`stageBlackb0xPackage()`. A mutual deadlock that predates all of this work and
+was only reachable once the bake got far enough to invoke the package builder.
+Both checks were individually well-reasoned. `dm.pl` picks ownership off its
+own real uid (confirmed by reading `$THEOS/bin/dm.pl`): non-root forces
+`root:wheel`, root preserves what is on disk. Fixed by making the root branch
+converge instead of refusing — `build.sh` now does `chown -R 0:0` on the
+staging tree when euid is 0, so `dm.pl`'s preserve branch records the same
+`root:wheel` its non-root branch forces. Same `.deb` either way; the non-root
+path was re-verified to still stamp `root:wheel`. Note this is exactly the
+correction the old containerized build already applied, so the refusal's claim
+that "natively there is nothing to correct" was the one wrong part.
+
+detaches. `readVolumeLabel()`, `copyVolumeHeaderMetadata()` and
+`unwrapUDIFIfPresent()` all existed only to make a synthesized volume resemble
+the original and are deleted; `<plist/plist.h>` went with them, since
+`readVolumeLabel()` was this file's only plist consumer. Not yet run end to end
+(needs root plus a real bake). The rationale below is kept as the record.
+
+The macOS branch currently attaches the original read-only, `cp -a`s its whole
+content out to a plain host directory, stages `/blackb0x` and the spliced
+`launchd` there, and synthesizes a brand-new volume with
+`hdiutil create -srcfolder`. That is backwards, in two directions at once.
+
+**Upstream did it the other way.** `origin/main:Blackb0x/Source/Patcher.mm`'s
+`patchRamdisk:ssh:` runs `hdiutil resize -size 60MB <decryptedDMG>`, then
+`hdiutil attach`, then writes new content straight into the mounted original with
+`tar -xvf ... -C <mountpoint>`, then detaches. `hdiutil create -srcfolder` appears
+exactly once, inside `if([path containsString:@"AppleTV2,1_4."])`, for the oldest
+firmware where there is genuinely nothing to preserve. This port generalized that
+one legacy special case into the main mechanism — and then refuses the 4.x case,
+which is the one place it was right.
+
+**What the round trip costs, all measured on real decrypted ramdisks:**
+
+- **Ownership, silently.** The attach passes no `-owners on`, so macOS maps every
+  file to the invoking user. Same image, two attaches: with the current flags
+  `/sbin/launchd` reads as `regulad:staff`; with `-owners on` it reads `root:wheel`.
+  The function requires root so its `chown()`s work, then copies the wrong uid
+  anyway. Every file of Apple's tree would bake in owned by uid 501.
+- **HFS+ compression, worth 19 MiB.** Apple's content is decmpfs-compressed.
+  `du` on the mounted original: **15 MB**. After `cp -a` to a staging dir:
+  **34 MB**. `/sbin/halt` goes from `compressed` to nothing. Against a 64 MiB hard
+  ceiling this is the single largest waste in the whole bake.
+- **Hard links.** `/sbin/halt` and `/sbin/reboot` are one inode, nlink 2. BSD
+  `cp -R` writes two copies.
+- **Volume identity.** A new volume means new CNIDs, a new UUID and a new header,
+  which is the only reason `copyVolumeHeaderMetadata()` exists. Growing in place
+  makes that function unnecessary.
+
+**The replacement, verified standalone on a real ramdisk:**
+
+```
+hdiutil resize -sectors <computed> -imagekey diskimage-class=CRawDiskImage <img>
+hdiutil attach -nobrowse -owners on -imagekey diskimage-class=CRawDiskImage \
+    -mountpoint <mp> <img>
+# write /blackb0x and splice launchd directly into <mp>
+hdiutil detach <mp>
+```
+
+Confirmed on AppleTV3,1 12H606: the image grew 16.6 MB -> 60 MB, the filesystem
+grew with it (`df`: 60Mi total, 44Mi free), `/sbin/launchd` kept `root:wheel` and
+its 2016 timestamp, and new files wrote fine. `-imagekey
+diskimage-class=CRawDiskImage` is REQUIRED on both commands for a bare HFS+ image
+with no partition map; without it `attach` fails with "image not recognized".
+
+Keep the port's dynamic sizing (a real improvement over upstream's fixed 60MB) and
+feed the computed size to `resize` instead of `create`. Leave the AppleTV2,1 4.x
+bail-out alone; nothing has ever tested that path.
+
+**Root is still required, and that is not fixable.** Verified as a normal user:
+`hdiutil attach`/`resize` need no privilege, but `chown()` to root:wheel returns
+EPERM, writing into the pristine root-owned `/sbin/launchd` returns EACCES, and
+new files land as the invoking user. Staging real ownership goes through the VFS
+and is root-only on Darwin. (`bake-firmware` used to print "No root needed"
+unconditionally while `bakeRamdisk()` hard-failed without it; that contradiction
+is fixed.) Note also that macOS mounts disk images `nosuid`, which does not matter
+here: `chmod 4755` still records the bit on disk, it just is not honoured on the
+build host.
+
+## 16. decmpfs-compressing our own staged content (DONE)
+
+**Ordering correction, learned the hard way.** The first implementation
+compressed the payload AFTER copying it onto the mounted volume, then tried to
+shrink. That saved almost nothing -- a real bake went 70.9 MiB -> 67.8 MiB --
+for two separate reasons, both now fixed:
+
+- **In-place compression cannot be reclaimed.** HFS+ shrinks only down to its
+  highest allocated block, and compressing in place frees blocks scattered
+  through the volume without relocating anything. Measured: usage fell 62 MiB ->
+  31 MiB and the minimum achievable image size stayed at 73 MiB. Compress the
+  staging tree on the host FIRST, then grow the volume to fit the compressed
+  size. Growing the right amount once is the only arrangement that pays.
+- **`hdiutil resize -limits` lies for a bare raw HFS+ image.** Its first field
+  reports the image's ORIGINAL size (19440 sectors on a real AppleTV3,2
+  ramdisk) no matter how much is allocated, and resizing to it fails EINVAL.
+  The code shrank to that, failed, warned, and carried on with a full-size
+  image. Use `-size min` (which does the arithmetic itself) or `-alllimits`
+  (which reports the real per-image minimum). Shrink itself works fine -- the
+  earlier conclusion that it was unusable was wrong, and came from using the
+  wrong flag.
+
+**`ditto`, not `cp -a`.** decmpfs does not survive `cp`, which reads through the
+VFS and gets decompressed bytes. Measured on the same tree, APFS staging ->
+HFS+ volume: ditto lands 3.3 MB still flagged `compressed`, `cp -a` lands 10 MB
+with the flag gone. ditto also preserves mode, owner, group, xattrs and ACLs,
+which is what `cp -a` was there for. A `tar` pipe works too.
+
+**`directoryContentSize()` now measures `st_blocks`, not `fs::file_size`.** A
+compressed file still reports its full uncompressed length through `stat()`, so
+sizing from the logical length would size the volume for the uncompressed tree
+and undo the whole exercise.
+
+**Verified end to end on a realistic tree** (all 63 non-`kNeverStageDebs`
+package payloads): 52 MiB staged uncompressed, 22 MiB after
+`afsctool -c -T ZLIB`, volume grown to 35 MiB, `ditto` preserved every
+compressed file, `-size min` brought the finished raw image to 31.7 MiB. All
+decmpfs entries are type 3 or 4; zero LZVN.
+
+One scanning gotcha worth knowing: `getxattr()` follows symlinks by default,
+and these package trees contain absolute symlinks (`/bin/more` ->
+`/usr/bin/less`). Auditing compression types without `XATTR_NOFOLLOW` reads the
+HOST's own LZVN-compressed system binaries and reports phantom type-8 files.
+
+Not done. Worth doing, with one real constraint that makes it non-trivial.
+
+Item 15 stopped the bake from *destroying* Apple's HFS+ compression. The
+obvious follow-up is to *add* compression to the content this project stages
+itself, which is currently written uncompressed.
+
+**The payoff is large.** `build/blackb0x` (5,329,096 bytes) compresses to 1.9 MB
+on a real HFS+ volume via `ditto --hfsCompression`, a 64% saving. The staged
+`.deb` bytes in apt's cache will not shrink (already compressed), but the
+bake-time-preinstalled package payloads are ordinary binaries and libraries and
+should compress comparably.
+
+**The constraint: the compression type must be ZLIB, and modern macOS will not
+pick it for you.** decmpfs type support is per-kernel, and this project's
+firmware range spans 2012 to 2016. Measured directly on real decrypted
+ramdisks:
+
+| firmware | decmpfs types present |
+|---|---|
+| AppleTV2,1 10B809 (tvOS 6.1, xnu-2107) | 3 and 4 only (ZLIB xattr / ZLIB resource fork) |
+| AppleTV3,1 12H606 (tvOS 8.4.2, xnu-2784) | 3, 4, and 8 (LZVN resource fork) |
+
+So ZLIB is safe across the whole range; LZVN is only safe on the 8.4.x targets.
+And `ditto --hfsCompression` on macOS 26 produces **type 8 (LZVN)** — verified
+by reading the `com.apple.decmpfs` xattr off a file it wrote. Using it naively
+would bake a ramdisk that boots on 8.4.x and fails on 6.1.x, discoverable only
+on hardware and presenting as an exploit failure.
+
+`ditto` exposes no type selector. Options, none free:
+
+- `afsctool -c` can target zlib, but is a third-party dependency this project
+  does not have and would have to vendor.
+- Write decmpfs by hand: deflate the data, set `com.apple.decmpfs` (magic
+  `fpmc`, type 3 inline or 4 in the resource fork, plus the uncompressed size)
+  and set `UF_COMPRESSED`. Fully documented format, no new dependency, but easy
+  to corrupt silently.
+- Compress only when the target is 8.4.x and skip otherwise. Cheapest to build,
+  but makes the output firmware-dependent in a new way.
+
+**Two things already confirmed safe**, so they need not be re-tested:
+
+- Splicing into a decmpfs-compressed file works. The pristine `/sbin/launchd`
+  is compressed on every firmware checked, and `open(O_WRONLY|O_TRUNC)` +
+  write leaves the file byte-identical to what was written, with the
+  `compressed` flag and the `com.apple.decmpfs` xattr both cleared.
+- Compression on the ramdisk does not leak onto the device. `merge_tree()`
+  (`entrypoint.c`) reads through the VFS with plain `read()`, which decompresses
+  transparently, so `/mnt1` receives ordinary uncompressed files. The saving is
+  purely ramdisk-side, which is exactly where the 64 MiB ceiling binds.
+
+
+## 17. Replacing the experimental resolver with real apt (VENDORED AND BUILDING; not yet wired in)
+
+**apt now builds and solves natively on macOS.** `third_party/apt` is a real
+submodule (`regulad/apt`@`blackb0x`, off Debian's 2.9.4 tag) and produces
+`apt 2.9.4 (darwin-arm)` from a clean checkout.
+
+What it took, so nobody rediscovers it:
+
+- **apt7 itself is unobtainable.** `git.saurik.com` is down, telesphoreo.org is
+  gone, and the GitHub user `apt7` is an unrelated person's computer-graphics
+  coursework (`bezier.cpp`, `cohentoviewport.cpp`), not Debian apt. Do not go
+  looking again.
+- **Homebrew's `apt` formula cannot work on Darwin.** It pulls `libcap`,
+  `systemd` and `util-linux`, which are Linux-only by nature. Confirmed by a
+  real install attempt failing on `libcap`. Note apt itself needs none of the
+  three: its own CMake marks systemd optional and never mentions libcap or
+  libmount.
+- **Procursus is the real precedent.** They build this exact apt version for
+  Darwin, and their `build_patch/apt` (nine diffs) plus `build_patch/apt-macos`
+  (`apt-key.diff`) apply cleanly to 2.9.4. Their `makefiles/apt.mk` also moves
+  `private-output.cc` and `algorithms.cc` to `.mm` (both reach into Foundation;
+  as plain C++ every Objective-C declaration in `NSObjCRuntime.h` fails) and
+  copies `memrchr.cc` into `ftparchive/`.
+- **One fix beyond their set was needed**, for a toolchain newer than theirs:
+  `cacheset.h`'s `Container_iterator` arithmetic operators had to become
+  `const`. See that commit for the reasoning.
+
+Build requirements (host tools, not vendored libraries — apt is never linked
+into anything this project ships): Homebrew `berkeley-db@5`, `openssl@3`,
+`xxhash`, `lz4`, `xz`, `gettext`, `dpkg`; `Dpkg.pm` on `PERL5LIB` (it lives in
+dpkg's `libexec/lib/perl5`, not a default `@INC` path); and julian-klode's
+`triehash` on `PATH`. CMake needs `BERKELEY_INCLUDE_DIRS`/`BERKELEY_LIBRARIES`
+passed explicitly, since apt's `FindBerkeley.cmake` does not know Homebrew's
+keg-only layout. `USE_NLS=1`, not 0 — with NLS off, `apti18n.h`'s stub
+declarations collide with the system headers' exception specifications.
+
+**Proven to actually solve**, against the real `debcache/`:
+
+- `apt-ftparchive packages debcache` indexes all 107 packages.
+- With a synthetic root (`Dir::State`, `Dir::Cache`, `Dir::Etc`, `Dir::Log`,
+  `Dir::Bin::methods` pointing at the build tree) `apt-get update` succeeds off
+  a `file://` source.
+- `apt-get -s install cydia openssh` resolves **31 packages** with real version
+  constraints and `Provides:` handling.
+
+Three configuration facts that cost time:
+
+- `APT::System "Debian dpkg interface"` must be set explicitly, or apt exits
+  with "Unable to determine a suitable packaging system type".
+- `Dir::Bin::methods` must point at the build tree's `methods/`, or every fetch
+  fails with "The method driver .../file could not be found".
+- The synthetic `firmware` package must be declared installed in the status
+  file at the target's real version, exactly as the existing scripts already
+  do. Without it `com.saurik.patcyh` fails on `Depends: firmware (>= 5.3)`.
+
+**Steps 1 and 2 are DONE.** `CMakeLists.txt` has an `apt_ext` ExternalProject
+and an `apt` target, and `triehash` is vendored at `third_party/triehash` (a
+single MIT-licensed Perl script; apt wants it on `PATH` under the bare name, so
+the build creates a small symlink shim directory). Homebrew prefixes are
+resolved at configure time via `brew --prefix`, not hardcoded, because these
+are keg-only formulae whose paths differ by architecture.
+
+`apt` is **`EXCLUDE_FROM_ALL`** and must be asked for by name:
+
+```
+cmake --build build --target apt
+```
+
+That is deliberate. It is a large C++ build most work here never touches, and
+it needs Homebrew formulae the rest of the project does not — an ordinary
+`cmake --build build` failing on a machine without `berkeley-db@5` would be a
+bad trade for a tool only the ramdisk bake uses. Verified: a normal build is
+completely unaffected.
+
+Output lands in one predictable place rather than an ExternalProject prefix:
+
+```
+build/apt-tools/{apt-get,apt-cache,apt-config,apt-ftparchive}
+build/apt-tools/methods/...
+```
+
+`methods/` has to come along, because apt shells out to `methods/file` for a
+`file://` source. Verified end to end from the staged copies alone:
+`apt-ftparchive` indexes debcache, `apt-get update` succeeds, and
+`apt-get -s install cydia openssh` resolves 31 packages.
+
+**Remaining work to actually replace the resolver:**
+
+3. Replace `computeGlobalDebcacheOnce()`'s call to the experimental resolver
+   with an apt invocation, parsing the "The following NEW packages will be
+   installed:" block.
+4. Handle the one expected failure mode: apt reports
+   "Couldn't configure grep, probably a dependency cycle" because this
+   ecosystem has a genuine circular `Pre-Depends` chain (`dpkg -> tar ->
+   gzip/lzma -> sed -> dpkg`), which this project already documents. That is an
+   *ordering* failure, not a resolution failure — the package set is printed
+   correctly before it. Parse the list and ignore the ordering error, or pass
+   `-o APT::Immediate-Configure=false`.
+5. Only then delete `scripts/build_deb_cache_experimental_no_container.py` and
+   its tests.
+
+Original note follows.
+
+Open. `scripts/build_deb_cache_experimental_no_container.py` is what every bake
+uses to resolve `package/packages.txt` into a `.deb` closure, and it is
+deliberately naive: a transitive walk by bare package name, with no version
+constraint comparison and no real `Provides:`/`Conflicts:`/`Breaks:` semantics.
+Its own docstring lists the gaps. The goal is to delete it in favour of a real
+solver.
+
+**Homebrew's `apt` formula is not the answer.** It exists (`apt` 3.3.3,
+keg-only) but its dependency list includes `libcap`, `systemd` and
+`util-linux`, and a real install attempt fails because `libcap` does not build
+on macOS. Those are Linux-only by nature, not packaging accidents. Confirmed,
+not assumed.
+
+Better lead: **the era-appropriate apt is already proven to build for Darwin,
+because it is what runs on the device.** The on-device package manager is
+`apt7 0.7.25.3` (saurik's Telesphoreo port), an ARM Darwin build of real
+Debian apt. That version predates apt's dependency on libcap/systemd/libmount
+entirely. Vendoring that source as a `third_party/` submodule and building it
+for the host fits this project's existing convention exactly ("every
+third-party dependency is a git submodule, built from source"), and has a
+second advantage over modern apt: bake-time resolution would run the *same
+solver version* the device itself runs, so the two cannot disagree.
+
+Worth checking before committing to it: whether saurik's apt7 source is still
+retrievable, how much of its build assumes an iOS cross-toolchain rather than a
+plain host build, and whether a host build can be pointed at a synthetic root
+(`-o Dir::State=`, `-o Dir::Cache=`, `-o Dir::Etc=`) over `debcache/` without
+needing a real dpkg database. The resolution job itself is architecture-
+independent -- it is reading `Packages` indices and control fields, not
+executing ARM binaries -- so nothing requires the solver to be an ARM build.
+
+Until then the experimental resolver stays, and its output is at least
+load-bearing enough to have produced a closure that assembles into a real
+ramdisk.
+
+
+## 18. `package/packages.txt` entries that cannot all coexist (RESOLVED)
+
+**Both fixed. `packages.txt` is 60 entries now and real apt solves it cleanly
+for every firmware, with zero drops.** The `--allow-drops` machinery stays in
+`build_deb_cache_apt.py` as a guard, but nothing trips it any more.
+
+- `apt7-ssl` removed. It is superseded by `apt7-lib`, which declares
+  `Provides:`/`Conflicts:`/`Replaces:` on it -- the standard idiom for "this
+  absorbed that". Nothing in the 107-package debcache depends on it, it is
+  `Priority: optional` against apt7-lib's `required`, and it would have dragged
+  in `curl`, which `kNeverStageDebs` deliberately excludes for size. **The
+  `.deb` stays in `debcache/`**; only the list entry is gone.
+- `net.tihmstar.etasonuntether` and `com.ih8sn0w-squiffy-winocm.p0sixspwn`
+  removed. They are mutually exclusive by firmware (`firmware (= 8.4.1)` and
+  `firmware (< 7.0)`), so no flat list could ever be right for both. They never
+  needed to be there: `stageVersionBranch()` picks between them off the real
+  ProductVersion, and `stageEtasonatv()`/`stageP0sixspwn()` open their `.deb`
+  by hardcoded filename straight out of `debcache/`, never via the picklist.
+  Both still register real dpkg state through `stageManualDpkgInstall()`, so
+  the device still sees them installed -- that path is untouched.
+
+Result: 60 top-level packages resolve to 67 `.deb` files, identically for 6.1.3
+and 8.4.1, with the era-correct persistence payload staged by the bake rather
+than by apt.
+
+Original note follows.
+
+## 18 (original). `package/packages.txt` has entries that cannot all coexist
+
+Surfaced by switching to real apt (item 17). The list is one flat,
+firmware-independent set, but three of its 63 entries are neither flat nor
+firmware-independent, and real apt refuses the whole solve over them:
+
+- **`apt7-ssl`: FIXED, removed from the list.** It and `apt7-lib` genuinely
+  `Conflicts:` each other and both were listed; the old resolver had no
+  `Conflicts:` handling, so it staged both, which cannot have been installable
+  on-device. `apt7-ssl` is unambiguously the one to drop, and the evidence is
+  stronger than "apt complained about it":
+  - `apt7-lib` (0.7.25.3-**16**) declares `Provides: apt7-ssl`,
+    `Conflicts: apt7-ssl` **and** `Replaces: apt7-ssl`. That triple is the
+    standard Debian idiom for "this package has absorbed and superseded that
+    one" — apt7-lib *is* apt7-ssl's functionality now, and anything depending
+    on the name is still satisfied through the `Provides:`.
+  - The versions agree: apt7-lib is at -16, apt7-ssl stalled at -3.
+  - Nothing in the entire 107-package debcache depends on `apt7-ssl` (checked
+    every `Depends:`/`Pre-Depends:` field directly).
+  - `apt7-ssl` is `Priority: optional` against apt7-lib's `required`, and it
+    `Depends: curl` — which is in `kNeverStageDebs` as too big for this
+    ramdisk. Keeping it would have dragged a deliberately-excluded package
+    back in.
+- **The two persistence payloads are mutually exclusive by firmware.**
+  `net.tihmstar.etasonuntether` is `Depends: firmware (= 8.4.1)` and
+  `com.ih8sn0w-squiffy-winocm.p0sixspwn` is `Depends: firmware (< 7.0)`. At
+  most one is installable for any target. The old resolver stripped version
+  constraints and picked *neither*.
+
+`scripts/build_deb_cache_apt.py --allow-drops` works around this by dropping
+the offending TOP-LEVEL entries one at a time and reporting each, which is how
+`bakeRamdisk()` invokes it. That is a workaround, not a fix: the list still
+claims things that are false, and the warning fires on every bake.
+
+**What is left is only the persistence pair**, and it may not be a bug so much
+as a list that should be shorter. Confirmed by reading the code: both payloads
+are loaded by HARDCODED FILENAME straight out of `debcache/` --
+`stageEtasonatv()` opens `net.tihmstar.etasonuntether-1.3.1.deb` and
+`stageP0sixspwn()` opens `com.ih8sn0w-squiffy-winocm.p0sixspwn_1.4-1_iphoneos-arm.deb`
+directly, with `stageVersionBranch()` choosing between them off the real
+`ProductVersion`. Neither goes through the picklist at all.
+
+So their presence in `packages.txt` controls only two things: whether their
+`.deb` is staged into the on-device apt cache, and whether `postinstall.sh`
+tries to `apt-get install` them on-device. For the wrong-era payload both are
+undesirable, and apt now correctly excludes it. For the right-era one, it is
+already installed at bake time, so the on-device install is at best redundant.
+That argues for removing both entries — but it changes `postinstall.sh`'s
+behaviour, which is the half that cannot be tested without hardware, so it is
+left alone. The `--allow-drops` path produces the correct staged set either
+way; the cost is one warning line per bake.
+
+Worth knowing before touching it: `packages.txt` feeds TWO consumers, the
+bake-time closure and `postinstall.sh`'s own on-device `apt-get install` list
+(templated by `package/build.sh`). A fix has to be right for both, and the
+on-device half is the one that cannot be tested without hardware.
+
+Evidence that the new resolver gets this right, from real runs against the
+real debcache:
+
+| target | dropped (after the apt7-ssl fix) | persistence chosen |
+|---|---|---|
+| 6.1.3 | `net.tihmstar.etasonuntether` (`firmware (= 8.4.1)`) | p0sixspwn |
+| 8.4.1 | `com.ih8sn0w-squiffy-winocm.p0sixspwn` (`firmware (< 7.0)`) | etasonuntether |
+
+Both still resolve to 68 `.deb` files, and exactly one entry is dropped per
+target rather than two.

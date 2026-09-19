@@ -53,7 +53,7 @@
 
 #include "IPSW.hpp"
 
-// Whether dist/<deviceModel>_<buildID>-Ramdisk.dmg needs a fresh bake --
+// Whether dist/RestoreRamDisk-<deviceModel>_<buildID>.dmg needs a fresh bake --
 // i.e. whether it exists at all. Factored out here so Cli.cpp's
 // downloadAndPatchComponents() can ask the same question up front (before a
 // device's own Patcher instance has even loaded keys for it) to decide
@@ -105,7 +105,7 @@ public:
     bool patchKernel(const std::string& path, const std::string& productVersion);
     // No path parameter (unlike patchiBSS()/patchiBEC()/patchKernel() above)
     // -- this never had one that actually did anything: it only ever looks
-    // at dist/<deviceModel_>_<buildID_>-Ramdisk.dmg, built from
+    // at dist/RestoreRamDisk-<deviceModel_>_<buildID_>.dmg, built from
     // loadKeysForDevice()/setBuildID()'s own member variables, not from any
     // argument. Cli.cpp's downloadAndPatchComponents() used to download
     // RestoreRamdisk from Apple first and pass its local path in here
@@ -206,6 +206,21 @@ public:
     // (stockRecovery false).
     bool useStockKernel(const std::string& path, bool stockRecovery = false);
 
+    // Feed an already-baked component straight in, with no patching and no
+    // decryption. blackb0x uses these for the normal jailbreak path: it
+    // consumes bake-firmware's dist/ output rather than producing its own, so
+    // it never calls patchiBSS()/patchiBEC()/patchKernel() and therefore never
+    // fork/execs iBoot32Patcher or CBPatcher at all. Same shape as
+    // setDeviceTreePath() below, which has always worked this way because
+    // DeviceTree is sent unmodified.
+    //
+    // The patch* methods above stay for bake-firmware, which is the only thing
+    // that patches now.
+    void setBakedIBSSPath(const std::string& path);
+    void setBakedIBECPath(const std::string& path);
+    void setBakedKernelPath(const std::string& path);
+    void setBakedRamdiskPath(const std::string& path);
+
     void setDeviceTreePath(const std::string& path);
 
     // Like setDeviceTreePath() above -- sent unmodified, no decrypt/patch
@@ -264,7 +279,7 @@ private:
     std::map<std::string, FirmwareKeyPair> keys_;
     PatchedComponents outputs_;
     // Set by loadKeysForDevice() — patchRamdisk() needs these to compute
-    // which dist/<device>_<buildID>-Ramdisk.dmg bake-firmware should
+    // which dist/RestoreRamDisk-<device>_<buildID>.dmg bake-firmware should
     // already have produced.
     std::string deviceModel_;
     std::string buildID_;

@@ -90,7 +90,19 @@ public:
 
 // GET https://api.ipsw.me/v4/device/<deviceModel>?type=ipsw — returns every
 // build ID Apple is still actively signing for this device right now
-// (per ipsw.me's own "signed" flag), for bake-firmware's --signed-only.
+// (per ipsw.me's own "signed" flag).
+//
+// Consumers are the --stock-* diagnostic routes ONLY, and that is the whole
+// list: Personalize.cpp's requestTSS() (warn before a TSS request Apple is
+// near-certain to refuse) and Cli.cpp's --stock-recovery build selection
+// (prefer a still-signed build blackb0x has local keys for over blindly
+// resolving "latest"). Both care because a real SHSH ticket can only be
+// issued for a build inside Apple's current signing window.
+//
+// bake-firmware used to be the third consumer, via a --signed-only flag.
+// That is gone: which firmwares this project can bake is decided by what
+// has a .keys file under keys/, not by what Apple still signs, so the
+// filter only ever hid valid targets. Do not wire this back into the baker.
 // Unlike firmwareURLForDevice()'s v2.1 endpoint, this response IS JSON —
 // deliberately hand-extracted here (regex over the known-flat, no-nested-
 // braces firmware-entry shape) rather than pulling in a real JSON parser:

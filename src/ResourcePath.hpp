@@ -69,6 +69,43 @@ std::string resolveIBoot32PatcherPath();
 // iBoot32Patcher above: GPL-3.0. Patcher.cpp fork/execs it.
 std::string resolveCBPatcherPath();
 
+// Hands `path` back to the user who invoked sudo, instead of leaving it owned
+// by root.
+//
+// bake-firmware requires root (it chown()s staged content to root:wheel and
+// writes into root-owned files on a mounted ramdisk), but its OUTPUT is
+// ordinary build artifacts the invoking user then wants to read, move, publish
+// and eventually delete. Leaving dist/ root-owned means a later non-root
+// `blackb0x` run cannot write there, and the user needs sudo just to clean up
+// their own build directory.
+//
+// Reads $SUDO_UID/$SUDO_GID, which sudo sets to the real invoking user. A
+// no-op when they are absent (a genuine root login, or a non-root caller) --
+// there is no one to hand ownership to in that case, and guessing would be
+// worse than doing nothing. Failures are silent by design: this is a
+// convenience, and a bake that produced a correct artifact should not be
+// reported as failed because a cosmetic chown did not take.
+//
+// Applied to what bake-firmware writes into dist/. Deliberately NOT applied to
+// the IPSW download cache (IPSWDownloader.hpp's ipswDataRoot()), which has the
+// same problem and would want the same treatment -- left alone so this change
+// stays scoped to build output rather than quietly reaching into a cache
+// directory too.
+void chownToSudoCaller(const std::string& path);
+
+// Resolves the directory holding this project's own vendored apt build --
+// apt-get/apt-cache/apt-config/apt-ftparchive plus the methods/ directory apt
+// needs to fetch anything: $BLACKB0X_APT_TOOLS_DIR if set, otherwise
+// "apt-tools" alongside bake-firmware's own executable (where CMakeLists.txt's
+// apt_ext target stages them).
+//
+// NOT the host's apt, and there is no host apt to fall back to: Homebrew's
+// formula cannot build on Darwin (it pulls libcap/systemd/util-linux). See
+// third_party/apt and .claude/TODO.md item 17. Built on demand
+// (`cmake --build build --target apt`), not by a default build, so this
+// pointing at something absent is a normal first-run state rather than a bug.
+std::string resolveAptToolsDir();
+
 // Resolves the checked-in .deb cache root: $BLACKB0X_DEBCACHE_DIR if set,
 // otherwise "debcache" relative to the current working directory.
 // bakeRamdisk()'s stageDebcache() (BakeRamdisk.cpp) copies exactly the
@@ -99,10 +136,13 @@ std::string resolvePackageRoot();
 
 // Resolves `relativePath` against the bake-time asset root:
 // $BLACKB0X_MISC_DIR if set, otherwise "misc" relative to the current
-// working directory. Four consumers, nothing else:
+// working directory. Five consumers, nothing else:
 //   untether.bin / dirhelper       -> staged onto the device by stageBlackb0xTree()
 //   apt/net.tihmstar.gpg           -> staged as an on-device apt keyring
 //   prebake_package_blacklist.txt  -> read by computePreinstallEligibleFilenames()
+//                                     ("do not force-install at bake time")
+//   never_stage_debs.txt           -> read by shouldSkipStagingDeb()
+//                                     ("do not ship this .deb at all")
 //   firmware_versions.txt          -> the (device, buildID) -> ProductVersion binding
 // apt/*.gpg.key are armored keys for scripts/build_deb_cache.py's gpgv pass,
 // read by that script directly rather than through here.

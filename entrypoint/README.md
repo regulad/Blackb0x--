@@ -36,12 +36,26 @@ branches, etc.) get made on top of it.
 The original binary is genuinely freestanding — confirmed via its Mach-O
 load commands (`LC_UNIXTHREAD`, zero `LC_LOAD_DYLIB` entries): no libSystem,
 no dyld, every syscall made directly via `mov r12, #N; svc #128`, even
-`strlen`/`memcpy`/`memset` hand-rolled. This is almost certainly load-bearing
-— this binary *is* what runs as PID 1 at the earliest point of ramdisk boot,
-before it's guaranteed dyld/libSystem are even functional — so `entrypoint.c`
-replicates that: `-ffreestanding -nostdlib -static`, raw syscalls, no libc.
+`strlen`/`memcpy`/`memset` hand-rolled. `entrypoint.c` replicates that:
+`-ffreestanding -nostdlib -static`, raw syscalls, no libc.
 
-## Why it used to be containerized, and isn't now
+**The reason once given for that here was wrong, and is worth correcting
+rather than deleting.** This file used to claim freestanding was "almost
+certainly load-bearing" because dyld and libSystem might not be functional
+that early in ramdisk boot. They are. Apple's own `/sbin/launchd` on both a
+real AppleTV2,1 10B809 ramdisk and a real AppleTV3,1 12H606 ramdisk is
+`LC_MAIN` with `LC_LOAD_DYLINKER`, linking `libSystem.B.dylib` and
+`libobjc.A.dylib` — so the genuine PID 1 Apple ships for this exact boot is
+dynamically linked, and dyld demonstrably works there.
+
+Freestanding is still the right choice, for a plainer reason: it has no
+dylib closure to satisfy. The ramdisk's `/usr/lib` is a fixed, minimal set
+we do not control and which differs between firmwares, so every dynamic
+dependency is a per-firmware compatibility risk for zero benefit in a binary
+this small. See "Why this is a binary and not a shell script" below, where
+that closure problem is what actually kills the obvious alternative.
+
+## Why it used to be containerized and cross-compiled, and isn't now
 
 This build ran inside podman for as long as the build host was Linux. The
 reason was narrow and specific: producing a freestanding ARMv6 Darwin Mach-O
@@ -53,9 +67,19 @@ iPhoneOS SDK, had no business being installed on an immutable rpm-ostree
 host, so podman kept all of it out of the way.
 
 On macOS `ld64` and `as` are simply the native tools, so the container has
-nothing left to provide and is gone. What remains genuinely necessary is the
-`arm-apple-darwin11-` prefixed cross-compiler and `ldid` — see the setup
-below.
+nothing left to provide and is gone.
+
+**Neither does the cross-toolchain.** This file used to require a
+cctools-port build of `arm-apple-darwin11-clang`, which in turn required a
+real iPhoneOS 6.1 SDK extracted from a 1.7GB archive.org copy of Xcode 4.6.
+That whole chain is unnecessary on a Mac and has been dropped: cctools-port
+exists to supply Apple's `ld64`/`as` to hosts that lack them. Apple's own
+`clang` still has the ARM backend, and Apple's own `ld` still lists `armv6`
+in `ld -v`'s supported-arch line, so plain `-arch armv6` produces exactly
+the artifact needed. Verified on Apple clang 21 / ld-1267 against this
+directory's real `entrypoint.c`: Mach-O `armv6`, `LC_UNIXTHREAD`, zero
+`LC_LOAD_DYLIB`, `_entry` as the thread-state PC, `ldid`-signed as
+`com.apple.launchd`. The only remaining requirement is `ldid`.
 
 Theos was tried first and dropped — its `tool.mk` template assumes exactly
 the opposite of what this binary needs (dynamic linking against `libSystem`,
@@ -65,59 +89,111 @@ gets spliced directly into a ramdisk rather than installed via dpkg.
 
 ## One-time setup
 
-The `Makefile` expects two things on `$PATH`: `arm-apple-darwin11-clang` and
-`ldid`. Nothing else, and nothing is vendored — this is the only binary in
-the project that needs any of it.
+```
+brew install ldid
+```
 
-1. **`ldid`**, for ad-hoc signing. In homebrew-core:
-   ```
-   brew install ldid
-   ```
-   (`ldid-procursus` also provides an `ldid` and works here; the two formulae
-   conflict, so pick one.)
+That is the whole list. The `Makefile` needs `clang` and `ld` (Xcode Command
+Line Tools, which the rest of this project already requires) plus `ldid` for
+ad-hoc signing. `ldid-procursus` also provides an `ldid` and works here; the
+two formulae conflict, so pick one.
 
-2. **Get an iPhoneOS SDK.** See `entrypoint/assets/README.md` for exactly how
-   `assets/iPhoneOS6.1.sdk.tar.xz` was produced (extracted from the real
-   "Xcode 4.6" installer, archived on archive.org). Not checked into git
-   (Apple's copyrighted material); regenerate it locally per that README if
-   it's missing.
+Nothing is vendored and no SDK is needed. If you want to build with a
+cctools-port cross-toolchain anyway, `make CC=arm-apple-darwin11-clang`
+still works — it is simply no longer the documented path.
 
-   This is still required even though the host is macOS: current Xcode SDKs
-   dropped 32-bit ARM entirely, so nothing shipping with Xcode can target
-   armv6.
+This was three steps until recently: `ldid`, an iPhoneOS 6.1 SDK, and a
+cctools-port toolchain built against it. The last two are gone for the
+reasons in the section above. `entrypoint/assets/README.md` still documents
+how to produce `iPhoneOS6.1.sdk.tar.xz`, but nothing in the build reads it
+any more — keep it for the record, not as a prerequisite.
 
-3. **Build the `arm-apple-darwin11-clang` cross-compiler** against that SDK,
-   using `cctools-port`'s own `usage_examples/ios_toolchain/build.sh`:
-   ```
-   git clone --depth 1 --branch cctools-877.8-ld64-253.9-1 \
-     https://github.com/tpoechtrager/cctools-port.git
-   cd cctools-port/usage_examples/ios_toolchain
-   ./build.sh /path/to/entrypoint/assets/iPhoneOS6.1.sdk.tar.xz armv6
-   ```
-   This produces `target/bin/arm-apple-darwin11-clang` (plus `lipo`,
-   `dsymutil`). Put `target/bin` on `$PATH`.
+## What actually runs as PID 1
 
-   The tag is pinned deliberately: its bundled cctools/ld64 versions
-   (877.8 / 253.9) most closely match what BigBoss's historical "iOS
-   Toolchain" Cydia package shipped (877.5 / 253.3, per
-   https://theapplewiki.com/wiki/Dev:On-device_toolchains) — the same lineage
-   of tooling the original jailbreak-scene binaries this project replaces
-   were almost certainly built with.
+Established by disassembling real decrypted firmware, because this has been
+guessed wrong here twice. Two decrypted kernelcaches (AppleTV3,1 10B809 and
+AppleTV3,1 12H606) and two mounted RestoreRamdisks (AppleTV2,1 10B809 and
+AppleTV3,1 12H606) all agree:
 
-   **UNVERIFIED on a macOS host.** cctools-port describes itself as a port
-   "for Linux and \*BSD", and `ios_toolchain/build.sh` is documented only for
-   those hosts — reasonably, since macOS already has native cctools and the
-   script's whole purpose is to supply them where they're missing. It has not
-   been run here. If it doesn't build cleanly, the plain-cctools route
-   (`cd cctools-port/cctools && ./configure --target=arm-apple-darwin11 &&
-   make && make install`) is the documented fallback, and Xcode's own `clang`
-   can do the compiling as long as that `ld` does the linking.
+- **The kernel execs `/sbin/launchd`, and only that.** It is the sole entry
+  in XNU's `init_programs[]`, a compile-time constant. In the 12H606
+  kernelcache the string sits in `__TEXT,__cstring` in a contiguous run with
+  `-s`, `/dev/null`, `stack_guard=` and `malloc_entropy=` — `load_init_program()`
+  building its argv and apple vector, verbatim.
+- **No boot-arg redirects it.** There is no `launchdsuffix`, no
+  `launchd.debug`, no `launchd.development`; those exist only in
+  DEVELOPMENT/DEBUG kernels and these are RELEASE. Booting `-s` only sets
+  `RB_SINGLE`, which is useless here because the ramdisk has no shell to
+  drop into.
+- **`/etc/rc.boot` is never touched by the kernel.** Neither kernelcache
+  contains that string at all. It is real on 10B809, and it really is an
+  `LC_MAIN` Mach-O, which is what the earlier claim here got right — but the
+  only binary that references it is `/bin/launchctl`, and `rc.boot` itself is
+  an 8880-byte dyld-linked stub whose entire string payload is four paths:
+  `restored_external`, `restored_update`, `restored`, `ramrod`. The real
+  chain is kernel -> launchd -> launchctl -> rc.boot -> restored. On 12H606
+  `rc.boot` is gone entirely and
+  `/System/Library/LaunchDaemons/com.apple.restored_external.plist` does that
+  job instead.
+
+So targeting `/sbin/launchd` is correct, and correct for every firmware
+generation — not merely the safer of two options.
+
+**One alternative this opens up, not implemented.** That `/sbin/launchd`
+string is ordinary C string data at a known file offset, and blackb0x already
+patches this kernelcache. Overwriting it with a path of 13 bytes or fewer
+(keeping the NUL in place) would make the kernel exec our binary directly,
+leaving Apple's launchd untouched and removing the splice entirely. The cost
+is a new per-firmware kernel patch to maintain across all 95 known tuples,
+where the splice is firmware-independent today. Recorded as an option, not a
+recommendation.
+
+## Why this is a binary and not a shell script
+
+A shebang would be much less machinery than a freestanding ARM binary, so
+this was investigated properly rather than assumed. **The kernel side works.**
+The 12H606 kernelcache contains XNU's `execsw[]` dispatch strings contiguously
+— `Mach-o Binary`, `Fat Binary`, `Interpreter Script` — so `exec_shell_imgact`
+is compiled in, and PID 1 reaches it through the same `execve` path as
+everything else. A `#!` line on `/sbin/launchd` would genuinely be honored.
+
+**The interpreter is what kills it.** Neither ramdisk has a shell anywhere.
+The complete contents of `/bin` on both is `cat`, `expr`, `launchctl`, `ln`,
+`mkdir`, `mv`, `rm`. No `sh`, no `cp`, no `chmod`, no `chown`, no `find`, no
+`test`.
+
+Pointing the shebang at a shell we stage ourselves (`/blackb0x/bin/bash`, which
+the bake does put on the ramdisk) gets closer, and still does not clear it.
+Cydia's `bash_4.0.44-16` is dynamically linked with absolute install names:
+
+| bash needs | on the ramdisk? |
+|---|---|
+| `/usr/lib/libSystem.B.dylib` | present |
+| `/usr/lib/libgcc_s.1.dylib` | present |
+| `/usr/lib/libreadline.6.0.dylib` | **missing** |
+| `/usr/lib/libhistory.6.0.dylib` | **missing** |
+| `/usr/lib/libncurses.5.dylib` | **missing** |
+
+Our copies of those three land at `/blackb0x/usr/lib/`, not `/usr/lib/`, and
+there is no dyld shared cache on either ramdisk to satisfy them another way.
+As PID 1 there is no parent process to set `DYLD_FALLBACK_LIBRARY_PATH`.
+Coreutils is friendlier — every binary in `coreutils-bin` needs only
+`libSystem.B`, `libgcc_s` and `libiconv.2` — but that is still one more
+dylib to place.
+
+It is fixable, by staging those dylibs into the ramdisk's real `/usr/lib/`
+or rewriting install names at bake time. It is just not cheaper: it trades
+one self-contained static binary, built by the stock toolchain in one
+compiler invocation, for a 2009 shell plus a hand-placed dylib closure plus
+a coreutils closure, all running as PID 1 on a shell-less ramdisk under a
+patched kernel. The binary stays.
 
 ## Building entrypoint itself
 
 `bakeRamdisk()` (`src/BakeRamdisk.cpp`, see `buildEntrypointBinary()`) runs
 `make clean all` in this directory automatically on every bake, using the
-one-time toolchain setup above — there's nothing to check in, since the
+one-time setup above (`ldid`, plus the Xcode Command Line Tools the rest of
+the project already needs) — there's nothing to check in, since the
 build is cached in-process (see `buildEntrypointBinary()` — identical for
 every firmware target, so it only actually runs once per `bake-firmware`
 invocation, not once per firmware) and spliced directly into
@@ -139,21 +215,26 @@ filename).
 
 ## Status
 
-Done: SDK acquired, toolchain built, `entrypoint.c` reverse-engineered and
-verified disassembly-for-disassembly against the original `sbin/launchd`
-(six real bugs found and fixed along the way — see `docs/HISTORY.md`).
-Wired into `bakeRamdisk()` as of this writing: every bake builds this
-(cached in-process — see "Building entrypoint itself" above) and splices it
-into `/sbin/launchd` in place of the real pristine binary there.
+Done: `entrypoint.c` reverse-engineered and verified
+disassembly-for-disassembly against the original `sbin/launchd` (six real
+bugs found and fixed along the way — see `docs/HISTORY.md`), and building
+with the stock macOS toolchain (Apple clang 21 / ld-1267, real build, real
+artifact checks — see "One-time setup" above). Wired into `bakeRamdisk()`:
+every bake builds this (cached in-process — see "Building entrypoint itself"
+above) and splices it into `/sbin/launchd` in place of the real pristine
+binary there.
 
-This went through a detour and back: real disassembly of an AppleTV2,1
-10B809 RestoreRamdisk showed `/etc/rc.boot` is itself `LC_MAIN`-entered
-directly by the kernel on that firmware, so for a while this spliced into
-`rc.boot` instead, on the theory that injecting at the true first entry
-point is strictly better than injecting at `launchd`. That didn't
-generalize: a real bake against AppleTV3,1/AppleTV3,2 12H606 failed because
-that firmware's ramdisk has no `/etc/rc.boot` at all (`/etc/` is nearly
-empty there — confirmed by mounting it directly). Reverted to always
-targeting `/sbin/launchd`, the one thing guaranteed to exist and be real
-PID-1 across every known firmware generation — see `docs/HISTORY.md`'s
-"Entrypoint injection point" entry for the full account.
+The SDK and cross-toolchain this section used to list as prerequisites are
+no longer needed at all; see "What was here before, and why it is gone".
+
+This went through a detour and back. For a while it spliced into
+`/etc/rc.boot` instead of `/sbin/launchd`, on the theory that `rc.boot` was
+the true first entry point. That reverted for a good reason — a real bake
+against AppleTV3,1/AppleTV3,2 12H606 failed because that firmware's ramdisk
+has no `/etc/rc.boot` at all — but the theory behind the detour was also
+simply false, which was only established later. **The kernel never execs
+`/etc/rc.boot` on any firmware**; `rc.boot` is `LC_MAIN`, which is what the
+original disassembly correctly observed, but it is launched by `launchctl`,
+several steps downstream of PID 1. See "What actually runs as PID 1" above
+for the evidence, and `docs/HISTORY.md`'s "Entrypoint injection point" entry
+for the original account.

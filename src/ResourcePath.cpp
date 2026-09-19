@@ -112,6 +112,28 @@ std::string resolvePackageRoot() {
     return "package";
 }
 
+void chownToSudoCaller(const std::string& path) {
+    const char* uidStr = getenv("SUDO_UID");
+    const char* gidStr = getenv("SUDO_GID");
+    if (!uidStr || !gidStr || !*uidStr || !*gidStr) return;
+    char* uidEnd = nullptr;
+    char* gidEnd = nullptr;
+    unsigned long uid = strtoul(uidStr, &uidEnd, 10);
+    unsigned long gid = strtoul(gidStr, &gidEnd, 10);
+    if (uidEnd == uidStr || *uidEnd != '\0' || gidEnd == gidStr || *gidEnd != '\0') return;
+    // Return value ignored deliberately -- see the header's own comment.
+    (void)chown(path.c_str(), (uid_t)uid, (gid_t)gid);
+}
+
+std::string resolveAptToolsDir() {
+    if (const char* override_ = getenv("BLACKB0X_APT_TOOLS_DIR")) {
+        return std::string(override_);
+    }
+    std::string dir = resolveOwnExecutableDir();
+    if (!dir.empty()) return dir + "/apt-tools";
+    return "apt-tools";
+}
+
 std::string resolveDebcachePath() {
     if (const char* override_ = getenv("BLACKB0X_DEBCACHE_DIR")) {
         return std::string(override_);

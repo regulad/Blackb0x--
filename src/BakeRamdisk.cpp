@@ -29,12 +29,12 @@
 #include "BakeRamdisk.hpp"
 #include "ResourcePath.hpp"
 
-// Already a linked dependency of this target either way (see
-// CMakeLists.txt's bake-firmware target — same deps::plist IPSW.cpp
-// already uses for its own plist parsing, same plist_* C API/calling
-// convention followed here). Not wrapped in `extern "C" {}` below, matching
-// IPSW.cpp's own include of the same header.
-#include <plist/plist.h>
+// No <plist/plist.h> here any more: the only plist_* use in this file was
+// readVolumeLabel(), parsing `diskutil info -plist` output to name a freshly
+// created volume. That helper is gone along with the volume-rebuild path (see
+// the note further down), and nothing else here parses a plist. deps::plist
+// is still linked into bake-firmware for IPSW.cpp's sake; this translation
+// unit just no longer needs the header.
 
 extern "C" {
 #include <xpwntool.h>
@@ -63,6 +63,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -102,12 +103,26 @@ static bool runCommand(const std::vector<std::string>& argv, const std::string& 
     pid_t pid = fork();
     if (pid < 0) return false;
     if (pid == 0) {
-        if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(126);
+        if (!cwd.empty() && chdir(cwd.c_str()) != 0) {
+            fprintf(stderr, "runCommand: cannot chdir to %s: %s\n", cwd.c_str(), strerror(errno));
+            _exit(126);
+        }
         execvp(cargv[0], cargv.data());
+        // Diagnose rather than exiting mute. A bare `_exit(127)` here cost a
+        // real debugging session: package/build.sh shipped mode 0644, execvp()
+        // failed with EACCES, and the only thing the caller could report was
+        // its own "package/build.sh failed -- see stderr above" pointing at an
+        // empty stderr. The child is the only place that knows what went
+        // wrong, so it has to say so before it dies.
+        fprintf(stderr, "runCommand: cannot execute %s: %s\n", cargv[0], strerror(errno));
         _exit(127);
     }
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) return false;
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr, "runCommand: %s died on signal %d\n", cargv[0], WTERMSIG(status));
+        return false;
+    }
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
@@ -176,157 +191,50 @@ static uint64_t directoryContentSize(const std::string& dir) {
         if (walkEc) break;
         std::error_code typeEc;
         if (!fs::is_regular_file(entry.path(), typeEc) || typeEc) continue;
-        std::error_code sizeEc;
-        uint64_t sz = (uint64_t)fs::file_size(entry.path(), sizeEc);
-        if (!sizeEc) total += sz;
+        // st_blocks (ALLOCATED 512-byte blocks), not fs::file_size (LOGICAL
+        // length). The two diverge by design once the tree is decmpfs-
+        // compressed: a compressed file still reports its full uncompressed
+        // length through stat(), because that is what a reader will get, while
+        // occupying a fraction of it on disk. Sizing the destination volume
+        // from the logical length would size it for the uncompressed tree and
+        // undo the entire point of compressing first.
+        struct stat st;
+        if (lstat(entry.path().c_str(), &st) == 0) total += (uint64_t)st.st_blocks * 512;
     }
     return total;
 }
 
-// Reads the original ramdisk's volume label, so the freshly-created
-// replacement can be given the same name. The volume name lives in the
-// catalog (the root folder's own record), not in the fixed-size volume
-// header, so there's no header-byte-copy shortcut for it the way there is
-// for the fields in copyVolumeHeaderMetadata() below.
-//
-// `diskutil info` only works against an attached (mounted) device, not a bare
-// image file, so bakeRamdisk() calls this AFTER `hdiutil attach` rather than
-// before mounting. Parsed via libplist's C API — same plist_* calling
-// convention IPSW.cpp's own plistDictString() already established
-// project-wide.
-//
-// (There used to be a second, blkid-based reader that read
-// the raw image file directly and so could run before mounting. Gone with the
-// rest of Linux support.)
-static std::string readVolumeLabel(const std::string& mountpoint) {
-    std::string plistXml = runCommandCapture({"diskutil", "info", "-plist", mountpoint});
-    if (plistXml.empty()) return "ramdisk";
+// NOTE: three helpers used to live here and are deleted -- readVolumeLabel()
+// (diskutil/libplist volume-name reader), copyVolumeHeaderMetadata() (raw
+// volume-header field copier) and unwrapUDIFIfPresent() (koly-trailer probe +
+// extractDmg). All three existed only to make a FRESHLY SYNTHESIZED volume
+// resemble the original: name it the same, carry its header fields over, and
+// cope with hdiutil create possibly emitting UDIF structure. bakeRamdisk()
+// grows and injects into the original volume now instead of rebuilding it, so
+// the original's name, header and format are simply never lost and there is
+// nothing to restore. Referenced by nothing after that change; see
+// .claude/TODO.md item 15 and git history if the AppleTV2,1 4.x
+// recreate-from-scratch case (still unimplemented) ever needs them back.
 
-    plist_t root = nullptr;
-    plist_from_xml(plistXml.c_str(), (uint32_t)plistXml.size(), &root);
-    if (!root) return "ramdisk";
-
-    std::string label;
-    plist_t node = plist_dict_get_item(root, "VolumeName");
-    if (node) {
-        char* val = nullptr;
-        plist_get_string_val(node, &val);
-        if (val) {
-            label = val;
-            free(val);
-        }
+// Manual PATH search for whether a bare command name resolves to an
+// executable, so a missing external tool is reported up front instead of as an
+// opaque subprocess failure minutes into a bake. Same no-shell convention (and
+// same implementation) as DeviceManager.cpp's own copy; duplicated rather than
+// shared because neither file has a natural header to put it in and the
+// function is eight lines.
+static bool commandExistsOnPath(const char* name) {
+    const char* pathEnv = getenv("PATH");
+    if (!pathEnv) return false;
+    std::string path(pathEnv);
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t colon = path.find(':', start);
+        std::string dir = path.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
+        if (!dir.empty() && access((dir + "/" + name).c_str(), X_OK) == 0) return true;
+        if (colon == std::string::npos) break;
+        start = colon + 1;
     }
-    plist_free(root);
-    return label.empty() ? "ramdisk" : label;
-}
-
-// Copies a deliberately narrow set of "identity" fields from the original
-// volume's fixed-size HFS+ header into the freshly-mkfs'd replacement:
-//   - finderInfo (32 bytes): encodes blessed-folder/boot-related info. This
-//     is a bootable restore ramdisk, so this can plausibly affect boot
-//     behavior — cheap to preserve, and risky to guess is safe to drop.
-//   - createDate: the original firmware build's genuine volume-creation
-//     timestamp — meaningful provenance, not something mkfs.hfsplus can
-//     know to set correctly on its own.
-//   - lastMountedVersion: a 4-byte tag identifying what tool last wrote the
-//     volume — likewise provenance worth carrying over.
-// Deliberately NOT copied:
-//   - `attributes` (a state/journaling bitfield): copying it wholesale
-//     risks importing a stale "unmounted"/journaled bit that doesn't match
-//     the freshly-mkfs'd volume's actual, correct state.
-//   - fileCount/folderCount/blockSize/totalBlocks/free space/clump sizes:
-//     all content- or geometry-derived. mkfs.hfsplus already computed
-//     these correctly for the new volume's real size; copying the old
-//     volume's values would be actively wrong.
-//
-// This patches BOTH the primary header (fixed offset 1024, per the HFS+
-// spec) and the backup/alternate header (the second-to-last 512-byte
-// sector) so fsck.hfsplus doesn't flag a primary/alternate mismatch for the
-// fields touched here. This is a plain, fixed-offset byte copy touching
-// only the 512-byte header itself — no B-tree or catalog interaction at
-// all, unlike the catalog-growth code that broke both xpwn and libhfsp
-// (see the design-history comment on bakeRamdisk() below).
-static void copyVolumeHeaderMetadata(const std::string& origPath, const std::string& newPath) {
-    char origHeader[512] = {0};
-    {
-        std::ifstream in(origPath, std::ios::binary);
-        if (!in) return;
-        in.seekg(1024);
-        in.read(origHeader, sizeof(origHeader));
-        if (!in) return;
-    }
-
-    std::error_code ec;
-    auto newSize = fs::file_size(newPath, ec);
-    if (ec) return;
-
-    struct FieldCopy {
-        size_t offset;
-        size_t size;
-    };
-    static const FieldCopy fields[] = {
-        {offsetof(HFSPlusVolumeHeader, createDate), sizeof(uint32_t)},
-        {offsetof(HFSPlusVolumeHeader, lastMountedVersion), sizeof(uint32_t)},
-        {offsetof(HFSPlusVolumeHeader, finderInfo), sizeof(uint32_t) * 8},
-    };
-
-    std::fstream out(newPath, std::ios::binary | std::ios::in | std::ios::out);
-    if (!out) return;
-    for (const auto& f : fields) {
-        out.seekp((std::streamoff)1024 + (std::streamoff)f.offset);
-        out.write(origHeader + f.offset, (std::streamsize)f.size);
-        out.seekp((std::streamoff)newSize - 1024 + (std::streamoff)f.offset);
-        out.write(origHeader + f.offset, (std::streamsize)f.size);
-    }
-}
-
-// Detects a UDIF ("koly" trailer) wrapper on `path` and, if present,
-// rewrites `path` in place with the unwrapped raw partition bytes — the
-// same probe-then-extractDmg() technique bakeRamdisk() already runs on the
-// original decrypted firmware component near the top of this file,
-// factored out so the build sequence can apply it defensively to
-// `hdiutil create`'s own output too. Real `hdiutil create -format UDRW
-// -layout NONE`'s exact output byte layout has never been verified against
-// actual hdiutil — see bakeRamdisk()'s own caveat. This is a no-op if that
-// output
-// turns out to already be flat raw bytes (no koly trailer found), and
-// correctly unwraps it if it isn't, so it's safe to run unconditionally
-// either way — copyVolumeHeaderMetadata() right after it, and the shared
-// UDIF-rewrap step at the end of bakeRamdisk(), both need genuinely flat
-// raw bytes to work correctly.
-static bool unwrapUDIFIfPresent(const std::string& path) {
-    bool wrapped = false;
-    {
-        std::ifstream probe(path, std::ios::binary);
-        if (probe) {
-            probe.seekg(0, std::ios::end);
-            std::streamoff size = probe.tellg();
-            if (size >= 512) {
-                probe.seekg(size - 512);
-                char magic[4] = {0};
-                probe.read(magic, 4);
-                wrapped = (memcmp(magic, "koly", 4) == 0);
-            }
-        }
-    }
-    if (!wrapped) return true;
-
-    FILE* wrappedFile = fopen(path.c_str(), "rb");
-    if (!wrappedFile) return false;
-    void* rawBuffer = nullptr;
-    size_t rawSize = 0;
-    AbstractFile* wrappedAbs = createAbstractFileFromFile(wrappedFile);
-    AbstractFile* rawOut = createAbstractFileFromMemoryFile(&rawBuffer, &rawSize);
-    extractDmg(wrappedAbs, rawOut, -1);
-
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        free(rawBuffer);
-        return false;
-    }
-    out.write((const char*)rawBuffer, (std::streamsize)rawSize);
-    free(rawBuffer);
-    return true;
+    return false;
 }
 
 static std::string makeTempDir(const std::string& prefix) {
@@ -359,16 +267,20 @@ struct MountGuard {
 
 // Builds entrypoint/'s freestanding ARMv6 replacement for /sbin/launchd,
 // rather than shipping a precompiled binary — see entrypoint/README.md for
-// why. Assumes the one-time toolchain setup documented there has already
-// been done: `arm-apple-darwin11-clang` and `ldid` on $PATH. This only runs
-// the actual `make`; it doesn't bootstrap the cross-toolchain, since that
-// needs an iPhoneOS SDK deliberately not checked into this repo at all
-// (Apple's copyrighted material — see entrypoint/assets/README.md).
+// why. The only thing that has to be on $PATH beyond the Xcode Command Line
+// Tools this project already requires is `ldid`, for ad-hoc signing.
 //
 // This used to run inside a podman container, which existed solely to give
 // a LINUX host a port of Apple's own ld64/as (cctools-port). On macOS those
-// are the native tools, so the container had nothing left to provide — see
-// entrypoint/README.md for the Homebrew setup that replaced it.
+// are the native tools, so the container had nothing left to provide.
+//
+// It also used to require a cctools-port cross-compiler named
+// arm-apple-darwin11-clang, bootstrapped against a real iPhoneOS 6.1 SDK.
+// That is gone too, and for the same reason: Apple's own clang has the ARM
+// backend and Apple's own ld still lists armv6 as a supported arch, so
+// entrypoint/Makefile just passes -arch armv6 to the system compiler.
+// Verified end to end on Apple clang 21 / ld-1267 — the resulting Mach-O is
+// armv6, LC_UNIXTHREAD, zero LC_LOAD_DYLIB, signed com.apple.launchd.
 //
 // The binary is identical for every firmware target (no per-firmware
 // customization at all), so BakeFirmware.cpp's main() calls this exactly
@@ -389,8 +301,8 @@ std::string buildEntrypointBinary() {
     if (!ok) {
         fprintf(stderr,
                 "bakeRamdisk: failed to build entrypoint/ — if this is the first run, see "
-                "entrypoint/README.md's one-time toolchain setup steps (arm-apple-darwin11-clang "
-                "and ldid have to be on $PATH)\n");
+                "entrypoint/README.md's one-time setup step (`brew install ldid`; the compiler "
+                "and linker come from the Xcode Command Line Tools)\n");
         return "";
     }
     if (!fs::exists(outputPath)) {
@@ -703,62 +615,65 @@ static bool stageAptListsCache(const fs::path& blackb0xRoot, const std::string& 
     return stageDirectoryTree(blackb0xRoot, "private/var/lib/apt/lists", aptListsDir, 0, 0, 0644);
 }
 
-// .deb filename prefixes that never get staged into the ramdisk's own apt
-// cache, even when scripts/build_deb_cache.py's real dependency resolution
-// says they're needed — real, but too big for this old A4-era ramdisk's
-// 64MiB ceiling (kMaxRamdiskSize below) to absorb on top of everything else.
-// org.xbmc.kodi-atv2 alone is ~40MB; com.nito.nitotv is ~1.65MB on its own
-// (checked directly against the real vendored .deb — nowhere near
-// kodi-atv2's size, but still excluded on request). odcctools (ld64/as/
-// otool/nm/strip/etc — a native build toolchain, not something a media/
-// jailbreak ramdisk needs at runtime) was confirmed via a real bake+ncdu
-// pass to be the single largest package actually staged by default:
-// ~7.7MB unpacked, versus single-digit-KB-to-low-MB for everything else
-// (checked directly: `ar p odcctools_*.deb control.tar.gz | tar -xzO
-// ./control` shows it Depends only on openssl/uuid, and grepping every
-// other vendored .deb's own control file for "odcctools" turns up nothing
-// — no other package here declares a dependency on it, so excluding it
-// from bake-time staging can't break dependency resolution for anything
-// else). gettext (3.2MB) and curl (0.7MB) followed the same audit: built
-// the real dependency graph from every vendored .deb's own Depends:/
-// Pre-Depends: field and computed the transitive closure actually needed
-// to bootstrap postinstall.sh (bash, dpkg, coreutils(-bin), apt7(-lib),
-// and what THEY pull in — berkeleydb, bzip2, diffutils, findutils, gnupg,
-// grep, gzip, lzma, ncurses, readline, sed, tar; 20 packages total).
-// Neither gettext nor curl is in that closure. gettext's only dependent
-// among every vendored package is wget (itself outside the closure); curl's
-// dependents (org.xbmc.kodi-atv2, the tihmstar exploit-tool packages,
-// apt7-ssl) are all optional/already-excluded/not the apt7 actually
-// staged. Checked directly, not assumed: extracted apt7-lib's real
-// data.tar and ran `strings` on its actual usr/lib/apt/methods/http
-// binary — no libcurl reference at all (this old apt implements its own
-// HTTP client), and usr/lib/apt/methods/https turned out to be a plain
-// symlink to http (no TLS lib linked either), confirming apt's own
-// network fetch genuinely doesn't touch curl or, for that matter, openssl.
-// openssl itself stays regardless: openssh (a real feature — SSH access is
-// the whole point of the jailbreak, not a bootstrap-only tool) genuinely
-// Depends: on it. Not staging the .deb bytes doesn't mean the package is
-// unreachable, though: its real Packages metadata still gets staged via
-// stageAptListsCache() below, and postinstall.sh's array (see
-// package/packages.txt) still lists it — apt will fetch it over the
-// network at install time if one is reachable, and just fail to install
-// that one specific package (not the rest) if not, matching the
-// "opportunistic network, not required" design this whole staging pass is
-// built around.
-static const std::vector<std::string> kNeverStageDebs = {
-    "org.xbmc.kodi-atv2_",
-    "com.nito.nitotv_",
-    "odcctools_",
-    "gettext_",
-    "curl_",
-};
+// Which .deb archives never get copied into the ramdisk's apt cache. The list
+// itself lives in misc/never_stage_debs.txt so each entry can carry the
+// reasoning for its own exclusion; see that file's header for the distinction
+// between it and prebake_package_blacklist.txt, and for the size budget.
+//
+// The original audit behind these exclusions is worth keeping, since it is
+// what established that dropping them cannot break dependency resolution.
+// Built the real dependency graph from every vendored .deb's own
+// Depends:/Pre-Depends: field and computed the transitive closure actually
+// needed to bootstrap postinstall.sh (bash, dpkg, coreutils(-bin), apt7(-lib),
+// and what THEY pull in -- berkeleydb, bzip2, diffutils, findutils, gnupg,
+// grep, gzip, lzma, ncurses, readline, sed, tar; 20 packages total). None of
+// the excluded packages is in that closure. odcctools (ld64/as/otool/nm/strip
+// -- a native build toolchain, not something a media/jailbreak ramdisk needs
+// at runtime) Depends only on openssl/uuid, and no other vendored .deb
+// declares a dependency on it at all. gettext's only dependent among every
+// vendored package is wget, itself outside the closure. curl's dependents
+// (org.xbmc.kodi-atv2, the tihmstar exploit-tool packages, apt7-ssl) are all
+// optional, already excluded, or not the apt7 actually staged -- checked
+// directly rather than assumed: extracted apt7-lib's real data.tar and ran
+// `strings` on its actual usr/lib/apt/methods/http binary, which has no
+// libcurl reference at all (this old apt implements its own HTTP client), and
+// usr/lib/apt/methods/https turned out to be a plain symlink to http (no TLS
+// library linked either). openssl itself stays regardless: openssh genuinely
+// Depends: on it, and SSH access is a real feature rather than a
+// bootstrap-only tool.
+static const std::set<std::string>& neverStageDebPrefixes() {
+    static const std::set<std::string> prefixes = [] {
+        std::set<std::string> out;
+        std::ifstream in(resolveMiscPath("never_stage_debs.txt"));
+        if (!in) {
+            // Not fatal, and deliberately so: an empty list means everything
+            // gets staged, which fails loudly and understandably at the size
+            // check rather than silently dropping packages the operator
+            // expected to be there.
+            fprintf(stderr,
+                    "bakeRamdisk: WARNING: cannot read misc/never_stage_debs.txt -- every resolved "
+                    ".deb will be staged, which may push the ramdisk past the size limit\n");
+            return out;
+        }
+        std::string line;
+        while (std::getline(in, line)) {
+            size_t begin = line.find_first_not_of(" \t");
+            if (begin == std::string::npos || line[begin] == '#') continue;
+            size_t last = line.find_last_not_of(" \t\r");
+            out.insert(line.substr(begin, last - begin + 1));
+        }
+        return out;
+    }();
+    return prefixes;
+}
 
 static bool shouldSkipStagingDeb(const std::string& filename) {
-    for (const auto& prefix : kNeverStageDebs) {
+    for (const auto& prefix : neverStageDebPrefixes()) {
         if (filename.rfind(prefix, 0) == 0) return true;
     }
     return false;
 }
+
 
 // ---------------------------------------------------------------------------
 // Bake-time package preinstallation — for packages with no postinst (or a
@@ -815,7 +730,7 @@ static bool readDebControlInfo(const std::string& debPath, DebControlInfo& out) 
     // read_deb_control_info().
     std::vector<std::string> controlMembers;
     if (ok) {
-        std::string listing = runCommandCapture({"tar", "--auto-compress", "-tf", controlTar});
+        std::string listing = runCommandCapture({"tar", "-tf", controlTar});
         std::istringstream listingStream(listing);
         std::string member;
         while (std::getline(listingStream, member)) {
@@ -852,7 +767,7 @@ static bool readDebControlInfo(const std::string& debPath, DebControlInfo& out) 
 
     std::string controlMember = findControlMember("control");
     if (ok) ok = !controlMember.empty();
-    if (ok) ok = runCommand({"tar", "--auto-compress", "-xf", controlTar, controlMember}, tempDir);
+    if (ok) ok = runCommand({"tar", "-xf", controlTar, controlMember}, tempDir);
     std::ifstream in(tempDir + "/control");
     if (!ok || !in) {
         std::error_code rmEc;
@@ -916,18 +831,35 @@ static bool stripPreinstFromDeb(const std::string& srcDebPath, const std::string
     if (ok) {
         std::error_code mkEc;
         fs::create_directories(extractDir, mkEc);
-        ok = runCommand({"tar", "--auto-compress", "-xf", controlTar, "-C", extractDir});
+        ok = runCommand({"tar", "-xf", controlTar, "-C", extractDir});
     }
     if (ok) {
         std::error_code rmEc2;
         fs::remove(fs::path(extractDir) / "preinst", rmEc2);
     }
     std::string newControlTar = tempDir + "/" + fs::path(controlTar).filename().string();
+    // --auto-compress survives here, and ONLY here: on a create it picks the
+    // compressor from newControlTar's extension, which is what preserves the
+    // original control.tar.*'s format. macOS's tar is bsdtar, where -a is
+    // create-only -- it hard-errors under -t ("Option -a is not permitted in
+    // mode -t") and warns-and-ignores under -x. Every read-mode call above
+    // dropped it for that reason; none of them needed it, since tar detects
+    // compression from the stream on read.
     if (ok) ok = runCommand({"tar", "--auto-compress", "-cf", newControlTar, "-C", extractDir, "."});
     if (ok) {
         std::error_code rmDestEc;
         fs::remove(destDebPath, rmDestEc);
-        ok = runCommand({"ar", "rc", fs::absolute(destDebPath).string(), debianBinary, newControlTar, dataTar});
+        // `rcS`, not `rc`: macOS's `ar` is Apple's cctools ar, which runs
+        // ranlib on every archive it creates and prepends a
+        // `__.SYMDEF SORTED` member. A .deb whose first member is not
+        // `debian-binary` is not a .deb -- confirmed directly, dpkg-deb
+        // rejects an `ar rc`-built one outright ("is not a Debian binary
+        // archive"), and this file's own readDebControlInfo() cannot find
+        // control.tar.* in it either. `S` suppresses the symbol table, which
+        // is meaningless for an archive of tarballs anyway. GNU ar happened
+        // to do the right thing here without being asked, which is why this
+        // only ever surfaced on macOS.
+        ok = runCommand({"ar", "rcS", fs::absolute(destDebPath).string(), debianBinary, newControlTar, dataTar});
     }
     std::error_code rmEc;
     fs::remove_all(tempDir, rmEc);
@@ -1650,19 +1582,51 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
         outResult = cached;
         return false;
     }
-    // No container runtime on macOS (confirmed directly — not just podman,
-    // no viable alternative either), so a real apt-get dependency solve in a
-    // Debian sandbox is off the table.
-    // scripts/build_deb_cache_experimental_no_container.py does the job
-    // without one: a plain local transitive-closure walk over debcache/
-    // instead of a real apt solve — see that script's own module docstring
-    // for its real, accepted gaps. It has no notion of firmware-version-gated
-    // Depends: at all (parse_dependency_groups() strips version constraints
-    // outright), so it takes no --firmware-version flag.
-    bool ok = runCommand(
-        {"python3", "scripts/build_deb_cache_experimental_no_container.py", "--output-dir", tempDir});
+    // REAL apt does the solve now. No container is involved and none is
+    // available on macOS -- this is Debian's own solver, built for the host
+    // from third_party/apt (see CMakeLists.txt's apt_ext target), running
+    // against a synthetic root over the locally-vendored debcache/.
+    //
+    // It replaced scripts/build_deb_cache_experimental_no_container.py, whose
+    // documented gaps were not academic. On this project's own package list,
+    // for a 6.1.3 target, the two disagree in exactly the ways that resolver
+    // warned about:
+    //
+    //   * it put BOTH apt7-lib and apt7-ssl in the picklist, which genuinely
+    //     Conflict with each other, because it had no Conflicts: handling;
+    //   * it picked NEITHER persistence payload, while apt correctly selects
+    //     p0sixspwn for 6.1.3 and rejects net.tihmstar.etasonuntether, which
+    //     is pinned to `firmware (= 8.4.1)`.
+    //
+    // That second one is only possible because the firmware version is passed
+    // through: the script declares a synthetic `firmware` package at this
+    // tuple's real ProductVersion, the same synthetic package
+    // build_deb_cache.py and kPreinstallInnerScript already rely on. The old
+    // resolver stripped version constraints outright and so could not have
+    // asked the question, which is precisely why this cache is keyed by
+    // firmware version (see this function's own comment above).
+    //
+    // --allow-drops: packages.txt is one flat, firmware-independent list, but
+    // a few of its entries are not (the apt7-lib/apt7-ssl conflict, and the
+    // two era-specific persistence payloads). Real apt refuses the whole solve
+    // over them rather than picking; the script drops those top-level entries
+    // one at a time, reporting each to stderr. See .claude/TODO.md item 18 for
+    // fixing packages.txt properly.
+    std::string aptToolsDir = resolveAptToolsDir();
+    if (!fs::exists(aptToolsDir + "/apt-get")) {
+        fprintf(stderr,
+                "bakeRamdisk: no apt at %s -- build it once with:\n"
+                "    cmake --build build --target apt\n"
+                "  (it is deliberately not part of a default build; see CMakeLists.txt)\n",
+                aptToolsDir.c_str());
+        outResult = cached;
+        return false;
+    }
+    bool ok = runCommand({"python3", "scripts/build_deb_cache_apt.py", "--output-dir", tempDir,
+                           "--apt-tools", aptToolsDir, "--firmware-version", firmwareVersion,
+                           "--allow-drops"});
     if (!ok) {
-        fprintf(stderr, "bakeRamdisk: scripts/build_deb_cache_experimental_no_container.py failed\n");
+        fprintf(stderr, "bakeRamdisk: scripts/build_deb_cache_apt.py failed\n");
         outResult = cached;
         return false;
     }
@@ -1992,7 +1956,7 @@ static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const s
             break;
         }
     }
-    if (dataTar.empty() || !runCommand({"tar", "--auto-compress", "-xf", dataTar}, result.tempDir)) {
+    if (dataTar.empty() || !runCommand({"tar", "-xf", dataTar}, result.tempDir)) {
         fprintf(stderr, "bakeRamdisk: WARNING: failed to extract %s's data.tar.* — %s not staged\n", debPath.c_str(),
                 labelForLogging.c_str());
         return result;
@@ -2005,7 +1969,7 @@ static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const s
             break;
         }
     }
-    if (controlTar.empty() || !runCommand({"tar", "--auto-compress", "-xf", controlTar}, result.tempDir)) {
+    if (controlTar.empty() || !runCommand({"tar", "-xf", controlTar}, result.tempDir)) {
         fprintf(stderr, "bakeRamdisk: WARNING: failed to extract %s's control.tar.* — dpkg state not staged\n",
                 debPath.c_str());
     } else {
@@ -2385,13 +2349,16 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
 // top-level directory, `/blackb0x`, via stageBlackb0xTree() above. Every
 // file the pristine ramdisk already shipped, including launchd's own
 // permissions/ownership/timestamps, is either left completely untouched or
-// has only its content overwritten in place. Since /blackb0x's real size
-// isn't known ahead of time and generally doesn't fit in the pristine
-// volume's own free space, the destination is actually a freshly created,
-// correctly-sized volume (not the original, grown in place — see the
-// "growing HFS+ in place is fundamentally broken on Linux" note further
-// below), populated with the original content via `cp -a` before either of
-// the two changes above are made.
+// has only its content overwritten in place. /blackb0x does not fit in the
+// pristine volume's own free space, so the image is GROWN first: measure the
+// staged payload, `hdiutil resize` the decrypted image to fit it, then mount
+// that and write into it. The original volume is never rebuilt and its
+// content is never copied out, which is what keeps Apple's ownership, decmpfs
+// compression, hard links and volume identity intact for free. The "growing
+// HFS+ in place is fundamentally broken" note further below is about
+// Linux-side write tooling (xpwn's grow_hfs(), libhfsp, the kernel driver)
+// and does not apply to Apple's own hdiutil -- which is a large part of why
+// this project is macOS-only.
 bool bakeRamdisk(const std::string& path, const std::string& key, const std::string& iv,
                   const std::string& productVersion, const std::string& outputPath,
                   const std::string& entrypointBinaryPath, bool& outSizeWarning) {
@@ -2446,6 +2413,37 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     decrypt(const_cast<char*>(path.c_str()), const_cast<char*>(decDMG.c_str()), const_cast<char*>(key.c_str()),
             const_cast<char*>(iv.c_str()), (char*)"FALSE", nullptr);
 
+    // WHY THE PRISTINE APPLE CONTENT IS KEPT, RATHER THAN DELETED FOR SPACE
+    //
+    // Tempting idea, measured and rejected: entrypoint.c is freestanding, so
+    // almost nothing Apple ships on this ramdisk is referenced at boot. Its
+    // entire dependency on the pristine tree is /dev (an empty directory the
+    // kernel mounts devfs onto itself), /mnt1 as a mountpoint, and
+    // /usr/sbin/nvram, which set_auto_boot() execs. Both filesystem mounts go
+    // through sys_mount() directly, so mount_hfs and friends are unused, and
+    // nothing ever reads /bin, /System/Library/LaunchDaemons,
+    // restored_external, asr or sed.
+    //
+    // Deleting "everything except what entrypoint needs" nonetheless frees
+    // almost nothing, because nvram is not a cheap dependency. Measured
+    // against a real AppleTV3,1 12H606 RestoreRamdisk, its transitive dylib
+    // closure is 43 files totalling 14.22 MiB of a 15 MiB volume:
+    // CoreFoundation (4.5 MB), libobjc (2.1 MB), libicucore (2.1 MB), IOKit,
+    // dyld and the whole of /usr/lib/system. Keeping a 36 KB binary means
+    // keeping essentially the entire ramdisk, so the saving is under a
+    // megabyte and not worth the risk of deleting something load-bearing that
+    // only shows up as a device that will not boot.
+    //
+    // The version of this that WOULD pay is dropping nvram itself, since it
+    // exists only for set_auto_boot(). The host can do that job instead --
+    // DeviceManager.cpp already sends `setenv auto-boot false` + `saveenv` to
+    // iBEC in sendStockRestoreTail(), so issuing the auto-boot=1 equivalent
+    // before bootx would move it off the device entirely and make the whole
+    // 14.22 MiB closure deletable. Deliberately not done here: it is a real
+    // behavioural change to the boot chain, unverifiable without hardware,
+    // and a mistake in it presents as an exploit failure rather than a size
+    // problem. Recorded so the measurement does not have to be redone.
+    //
     // NOTE: the original's "AppleTV2,1_4." branch rebuilds the ramdisk from
     // scratch via `hdiutil create ... -format UDRW` for the oldest ATV2 4.x
     // firmware — a materially different problem (no pre-existing content at
@@ -2558,44 +2556,53 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // against an ordinary host directory, so the assembled
     // original+launchd+/blackb0x content is staged straight onto one
     // instead of a second mounted volume.
-    MountGuard origMount;
-    origMount.mountpoint = makeTempDir("blackb0x-origmnt-");
-    if (origMount.mountpoint.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create a temp mountpoint\n");
-        return false;
-    }
-    if (!runCommand(
-            {"hdiutil", "attach", "-mountpoint", origMount.mountpoint, "-nobrowse", "-readonly", rawImgPath})) {
-        fprintf(stderr, "bakeRamdisk: failed to attach original ramdisk via hdiutil\n");
-        return false;
-    }
-    origMount.mounted = true;
+    // ---------------------------------------------------------------------
+    // Grow the original volume and inject into it. Do NOT rebuild it.
+    //
+    // This used to attach the original read-only, `cp -a` its whole content
+    // out to a plain host directory, stage there, and synthesize a brand new
+    // volume with `hdiutil create -srcfolder`. That was a porting mistake,
+    // and an expensive one. The pre-port Objective-C original
+    // (origin/main:Blackb0x/Source/Patcher.mm, patchRamdisk:ssh:) did it the
+    // way this does now: `hdiutil resize` the decrypted image, `hdiutil
+    // attach` it, write new content straight into the mounted original,
+    // detach. Its one `hdiutil create -srcfolder` call lived inside
+    // `if([path containsString:@"AppleTV2,1_4."])` -- the legacy case where
+    // there is genuinely no content to preserve. This port generalized that
+    // special case into the main mechanism, and separately refuses the 4.x
+    // case, which is the one place it was correct.
+    //
+    // What the round trip cost, all measured against real decrypted ramdisks:
+    //
+    //   * Ownership, silently. The read-only attach passed no `-owners on`,
+    //     so Darwin maps every file to the invoking user. Same image, two
+    //     attaches: without the flag /sbin/launchd reads as uid 501; with it,
+    //     root:wheel. This function requires root so its chown()s work, then
+    //     copied the mapped uid anyway -- baking Apple's entire tree owned by
+    //     the build user.
+    //   * HFS+ compression, worth ~19 MiB. Apple ships this content
+    //     decmpfs-compressed (ZLIB types 3/4 on every firmware, plus LZVN
+    //     type 8 on the 8.4.x ones). `du` on the mounted original: 15 MB.
+    //     After `cp -a` to a plain directory: 34 MB, with the `compressed`
+    //     flag gone. Against the 64 MiB ceiling enforced at the end of this
+    //     function, that was the single largest waste in the bake.
+    //   * Hard links. /sbin/halt and /sbin/reboot are one inode; BSD `cp -R`
+    //     writes two copies.
+    //   * Volume identity. A new volume means new CNIDs, a new UUID and a new
+    //     header -- which is the only reason copyVolumeHeaderMetadata() had to
+    //     exist. Growing in place keeps the original's, so that call and
+    //     unwrapUDIFIfPresent() are both gone from this path.
+    //
+    // `-imagekey diskimage-class=CRawDiskImage` is REQUIRED on both hdiutil
+    // calls: by this point rawImgPath is a bare HFS+ volume with no partition
+    // map, and without the hint `attach` fails outright with "image not
+    // recognized". Verified directly.
+    // ---------------------------------------------------------------------
 
-    // No blkid equivalent on Darwin — read back via `diskutil info -plist`
-    // instead, which only works against an attached device, so (unlike
-    // and so can run before mounting) this has to run after the attach
-    // above.
-    std::string label = readVolumeLabel(origMount.mountpoint);
-
-    // A plain host directory — no second mounted HFS+ volume needed here,
-    // see this branch's own header comment above. Reuses this file's own
-    // makeTempDir() helper, same as every other scratch directory
-    // bakeRamdisk() creates.
-    std::string stagingDir = makeTempDir("blackb0x-stage-");
-    if (stagingDir.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create staging dir\n");
-        return false;
-    }
-    if (!runCommand({"cp", "-a", origMount.mountpoint + "/.", stagingDir + "/"})) {
-        fprintf(stderr, "bakeRamdisk: failed to copy original ramdisk contents\n");
-        return false;
-    }
-    if (!runCommand({"hdiutil", "detach", origMount.mountpoint})) {
-        fprintf(stderr, "bakeRamdisk: failed to detach original ramdisk\n");
-        return false;
-    }
-    origMount.mounted = false;
-
+    // Staged before the resize, because its real size is what decides how far
+    // to grow. Unlike the old flow this is the ONLY thing measured -- the
+    // original content is already on the volume and already accounted for by
+    // the image's existing size, so there is nothing to re-measure.
     std::string blackb0xStagingDir = makeTempDir("blackb0x-payload-");
     if (blackb0xStagingDir.empty()) {
         fprintf(stderr, "bakeRamdisk: cannot create /blackb0x staging dir\n");
@@ -2606,73 +2613,155 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
         return false;
     }
 
-    // The one and only content change to anything the pristine ramdisk
-    // already shipped — see spliceFileContentInPlace()'s own comment for
-    // why a blind overwrite isn't good enough. The `cp -a` above already
-    // carried over launchd's real permissions onto this staged copy, so
-    // splicing against a plain directory here works exactly as it would
-    // against a mounted volume.
-    if (!spliceFileContentInPlace(stagingDir + "/sbin/launchd", entrypointBinaryPath)) {
+    // Compress BEFORE measuring, so the volume is grown to fit the compressed
+    // tree rather than the uncompressed one. Order matters more than it looks:
+    // compressing after the copy (the obvious arrangement, and the first one
+    // tried) reclaims almost nothing, because HFS+ can only shrink down to its
+    // highest allocated block. Measured on a real bake-shaped tree: usage fell
+    // from 62 MiB to 31 MiB, and `hdiutil resize -size min` still could not go
+    // below 73 MiB, since in-place compression frees blocks scattered through
+    // the volume without relocating anything. Growing the right amount once is
+    // the only arrangement that actually pays.
+    //
+    // -T ZLIB is NOT optional, and must never be relaxed to whatever the host
+    // prefers. decmpfs codecs are per-kernel, and the oldest firmware this
+    // project targets cannot read the modern default:
+    //
+    //   * The 10B329a (6.1.3) kernelcache ships AppleFSCompressionTypeZlib.kext
+    //     declaring `providesType3` and `providesType4`, and carries NO LZVN or
+    //     LZFSE compressor at all. Confirmed by reading the prelinked kext
+    //     Info.plists out of the decrypted kernelcache, not inferred.
+    //   * Its RestoreRamdisk uses only types 3 and 4. The 8.4.x ramdisks also
+    //     carry type 8 (LZVN), so support genuinely varies across the range.
+    //   * `ditto --hfsCompression` on a current macOS produces type 8. Using it
+    //     here would bake something that boots on 8.4.x and fails on 6.1.x --
+    //     silently, and only on hardware.
+    //
+    // afsctool already defaults to ZLIB; passing -T makes that a stated
+    // requirement rather than a default this project happens to rely on. It
+    // skips files that do not compress (the staged .deb bytes, already gzip/
+    // lzma) rather than inflating them.
+    if (!commandExistsOnPath("afsctool")) {
+        fprintf(stderr,
+                "bakeRamdisk: afsctool not found on PATH -- required to HFS+-compress the staged\n"
+                "  payload (brew install afsctool). Without it the finished ramdisk is far larger\n"
+                "  and will not fit under the 64 MiB limit.\n");
         return false;
     }
-    if (!runCommand({"cp", "-a", blackb0xStagingDir + "/blackb0x", stagingDir + "/blackb0x"})) {
-        fprintf(stderr, "bakeRamdisk: failed to move staged /blackb0x into place\n");
+    if (!runCommand({"afsctool", "-c", "-T", "ZLIB", blackb0xStagingDir})) {
+        fprintf(stderr, "bakeRamdisk: afsctool failed to compress the staged /blackb0x\n");
+        return false;
+    }
+
+    uint64_t payloadSize = directoryContentSize(blackb0xStagingDir);
+    uint64_t currentImageSize = 0;
+    {
+        std::error_code szEc;
+        currentImageSize = (uint64_t)fs::file_size(rawImgPath, szEc);
+        if (szEc) {
+            fprintf(stderr, "bakeRamdisk: cannot stat %s to size the resize\n", rawImgPath.c_str());
+            return false;
+        }
+    }
+    // Margin covers HFS+'s own metadata growth (catalog/extents B-trees,
+    // allocation bitmap) for the files about to be added, which is not part of
+    // payloadSize. Same shape of margin the old create path used.
+    constexpr uint64_t kFlatSizeMargin = 4ull * 1024 * 1024;
+    uint64_t margin = std::max(kFlatSizeMargin, payloadSize / 10);
+    uint64_t targetSize = currentImageSize + payloadSize + margin;
+    // hdiutil resize takes 512-byte sectors; round up so the request is never
+    // short of the computed target.
+    uint64_t targetSectors = (targetSize + 511) / 512;
+
+    if (!runCommand({"hdiutil", "resize", "-sectors", std::to_string(targetSectors), "-imagekey",
+                      "diskimage-class=CRawDiskImage", rawImgPath})) {
+        fprintf(stderr, "bakeRamdisk: hdiutil resize to %llu sectors failed on %s\n",
+                (unsigned long long)targetSectors, rawImgPath.c_str());
+        return false;
+    }
+
+    // `-owners on` is load-bearing, not decoration: without it Darwin mounts
+    // the volume ignoring on-disk ownership, every file reads back as the
+    // invoking user, and anything this function writes would be recorded with
+    // the wrong uid. See this block's header comment.
+    MountGuard mount;
+    mount.mountpoint = makeTempDir("blackb0x-rdmnt-");
+    if (mount.mountpoint.empty()) {
+        fprintf(stderr, "bakeRamdisk: cannot create a temp mountpoint\n");
+        return false;
+    }
+    if (!runCommand({"hdiutil", "attach", "-mountpoint", mount.mountpoint, "-nobrowse", "-owners", "on",
+                      "-imagekey", "diskimage-class=CRawDiskImage", rawImgPath})) {
+        fprintf(stderr, "bakeRamdisk: failed to attach the grown ramdisk via hdiutil\n");
+        return false;
+    }
+    mount.mounted = true;
+
+    // The one and only content change to anything the pristine ramdisk already
+    // shipped -- see spliceFileContentInPlace()'s own comment for why a blind
+    // overwrite is not good enough. Now genuinely in place, against the real
+    // volume: the target keeps its inode, mode, owner and timestamps.
+    //
+    // Note the pristine /sbin/launchd is itself decmpfs-compressed on every
+    // firmware checked, and is mode 0555 (no write bit at all) on the 6.1-era
+    // ones. Both are fine and were verified directly: opening it O_WRONLY|
+    // O_TRUNC transparently drops the compression (the `compressed` flag and
+    // the com.apple.decmpfs xattr both go away, and the file reads back
+    // byte-identical to what was written), and root bypasses the missing write
+    // bit. A non-root writer gets EACCES here, which is one of the reasons
+    // this function checks geteuid() up front.
+    if (!spliceFileContentInPlace(mount.mountpoint + "/sbin/launchd", entrypointBinaryPath)) {
+        return false;
+    }
+
+    // `ditto`, NOT `cp -a`, and that is load-bearing rather than stylistic:
+    // ditto carries decmpfs compression across the copy, cp does not. Measured
+    // on the same tree, APFS staging dir -> HFS+ volume: ditto lands 3.3 MB and
+    // the destination still reports `compressed`; `cp -a` lands 10 MB with the
+    // flag gone, because cp reads through the VFS and gets decompressed bytes.
+    // (A `tar` pipe preserves it too, but ditto is one process and is Apple's
+    // own tool for exactly this.) ditto also preserves mode, owner, group,
+    // extended attributes and ACLs by default, which is what `cp -a` was here
+    // for in the first place.
+    //
+    // Only the new tree moves. Apple's own content is never read or rewritten,
+    // which is what preserves ITS compression, hard links and ownership for
+    // free.
+    if (!runCommand({"ditto", blackb0xStagingDir + "/blackb0x", mount.mountpoint + "/blackb0x"})) {
+        fprintf(stderr, "bakeRamdisk: failed to copy staged /blackb0x onto the ramdisk\n");
         return false;
     }
     std::error_code stagingRmEc;
     fs::remove_all(blackb0xStagingDir, stagingRmEc);
 
-    // The real number: how much space the assembled content actually
-    // needs — see directoryContentSize()'s own comment. Measured against
-    // this plain staging directory rather than a live HFS+ mount.
-    uint64_t realContentSize = directoryContentSize(stagingDir);
-    constexpr uint64_t kFlatSizeMargin = 4ull * 1024 * 1024;
-    uint64_t percentSizeMargin = realContentSize / 10;
-    uint64_t newVolumeSize = realContentSize + std::max(kFlatSizeMargin, percentSizeMargin);
-
-    std::string newRawImgPath = decDMG + ".new-raw.hfs";
-    std::error_code newRawRmEc;
-    fs::remove(newRawImgPath, newRawRmEc);
-    // UNVERIFIED against real hdiutil — this was written and read over, but
-    // never actually run, on a build host with no macOS available at all.
-    // Two specific things here to check against
-    // real hardware before trusting this blindly:
-    //   1. The exact -fs argument string for case-sensitive HFS+.
-    //      "Case-sensitive HFS+" is believed correct (it's the display
-    //      name macOS's own Disk Utility/hdiutil use for this format on
-    //      modern macOS), but if a real bake on real macOS hardware
-    //      rejects it, check `hdiutil create -help`'s own -fs listing on
-    //      that machine and correct it here. Case sensitivity itself is
-    //      NOT optional, though: real ncurses terminfo e/E collisions occur
-    //      under case-insensitive lookup, which is why the since-removed
-    //      Linux path passed mkfs.hfsplus -s for the same reason.
-    //   2. Whether `-format UDRW -layout NONE`'s real output is genuinely
-    //      flat raw bytes (what copyVolumeHeaderMetadata() below, and the
-    //      shared UDIF-rewrap step further down, both assume) or itself
-    //      carries additional UDIF structure beyond a trailing "koly"
-    //      block. unwrapUDIFIfPresent() right below is a defensive,
-    //      no-op-if-already-raw safety net for exactly that uncertainty,
-    //      reusing the same probe+extractDmg() technique this function
-    //      already runs on the original decrypted firmware component
-    //      above.
-    if (!runCommand({"hdiutil", "create", "-srcfolder", stagingDir, "-volname", label, "-fs",
-                      "Case-sensitive HFS+", "-format", "UDRW", "-layout", "NONE", "-size",
-                      std::to_string(newVolumeSize) + "b", newRawImgPath})) {
-        fprintf(stderr, "bakeRamdisk: hdiutil create failed on %s\n", newRawImgPath.c_str());
+    if (!runCommand({"hdiutil", "detach", mount.mountpoint})) {
+        fprintf(stderr, "bakeRamdisk: failed to detach the ramdisk\n");
         return false;
     }
-    if (!unwrapUDIFIfPresent(newRawImgPath)) {
-        fprintf(stderr, "bakeRamdisk: failed to unwrap hdiutil's own output at %s\n", newRawImgPath.c_str());
-        return false;
+    mount.mounted = false;
+
+    // Final tidy: give back whatever trailing slack the margin left over.
+    // `-size min` is the correct spelling and does the arithmetic itself.
+    //
+    // Do NOT reach for `hdiutil resize -limits` here. For a bare raw HFS+ image
+    // its first field is not a usable minimum -- it reports the image's
+    // ORIGINAL size (19440 sectors on a real AppleTV3,2 ramdisk) regardless of
+    // how much is now allocated, and resizing to it fails with EINVAL. That
+    // exact mistake silently defeated an entire bake: the shrink failed, the
+    // warning scrolled past, and the finished ramdisk carried the full grown
+    // image. `-alllimits` reports the real per-image minimum if a number is
+    // ever needed; `-size min` is simpler and is what this wants.
+    //
+    // This only reclaims the margin now, not the compression saving. The tree
+    // is already compressed before the volume is grown, so there is no large
+    // gap left to close -- which is the point.
+    if (!runCommand({"hdiutil", "resize", "-size", "min", "-imagekey", "diskimage-class=CRawDiskImage",
+                      rawImgPath})) {
+        // Not fatal: an unshrunk image is oversized, not corrupt, and the size
+        // check at the end of this function reports that clearly rather than
+        // this producing a duplicate failure.
+        fprintf(stderr, "bakeRamdisk: WARNING: could not shrink the finished image to its minimum\n");
     }
-    copyVolumeHeaderMetadata(rawImgPath, newRawImgPath);
-
-    std::error_code stagingDirRmEc;
-    fs::remove_all(stagingDir, stagingDirRmEc);
-
-    std::error_code oldRawRmEc;
-    fs::remove(rawImgPath, oldRawRmEc);
-    rawImgPath = newRawImgPath;
 
     // Write the modified image back out, overwriting the decrypted file in
     // place (replaces `hdiutil detach`) — rewrapped into UDIF only if the
@@ -2717,6 +2806,14 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
 
     decrypt(const_cast<char*>(decDMG.c_str()), const_cast<char*>(patchedDMG.c_str()), const_cast<char*>(key.c_str()),
             const_cast<char*>(iv.c_str()), (char*)"FALSE", const_cast<char*>(path.c_str()));
+
+    // Same reason as the bootchain half's publish(): this function requires
+    // root, but its output is a build artifact the invoking user owns in
+    // practice. Done before the size check below, so an oversized ramdisk that
+    // gets deleted is deleted by a process that could have handed it over --
+    // no ordering subtlety either way, just no reason to wait.
+    chownToSudoCaller(fs::path(patchedDMG).parent_path().string());
+    chownToSudoCaller(patchedDMG);
 
     // Hard size limit on the finished, baked ramdisk.
     //

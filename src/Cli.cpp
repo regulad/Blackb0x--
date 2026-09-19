@@ -563,32 +563,51 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // can never authorize blackb0x's own patched kernel/ramdisk), so in
     // practice --stock-recovery never appears here without
     // --stock-firmware also stocking the rest of the suite.
-    downloadAndPatch("iBSS", manifest->iBSSPath, [&](const std::string& path) {
-        if (stockRecovery) {
-            patcher.useStockIBSS(path, stockSecurerom);
-        } else {
-            patcher.patchiBSS(path);
-        }
-    });
-
-    downloadAndPatch("iBEC", manifest->iBECPath, [&](const std::string& path) {
-        if (stockRecovery) {
-            patcher.useStockIBEC(path);
+    // blackb0x does not patch. Anything not explicitly being stocked comes out
+    // of dist/ exactly as bake-firmware produced it, which is what removed
+    // iBoot32Patcher and CBPatcher from this binary entirely -- patchiBSS(),
+    // patchiBEC() and patchKernel() were their only callers here.
+    //
+    // The IPSW downloader stays, and is still reached: a --stock-* run needs
+    // Apple's own unmodified component for whichever piece it is stocking, and
+    // that can only come from the IPSW. So those branches download (populating
+    // the usual cache under ipswDataRoot()) while every other component is
+    // taken from the bake.
+    const std::string bakedSuffix = "-" + device.deviceModel + "_" + manifest->realBuildID;
+    auto takeBaked = [&](const char* label, const std::string& name, auto&& setter) {
+        const std::string path = "dist/" + name + bakedSuffix;
+        if (!fs::exists(path)) {
+            fprintf(stderr,
+                    "%s: no baked component at %s.\n"
+                    "  Bake it first:\n"
+                    "    sudo ./build/bake-firmware --device '%s' --build %s\n",
+                    label, path.c_str(), device.deviceModel.c_str(), manifest->realBuildID.c_str());
             return;
         }
-        patcher.patchiBEC(path);
-    });
+        setter(path);
+    };
 
-    downloadAndPatch("KernelCache", manifest->kernelCachePath, [&](const std::string& path) {
-        if (stockFirmware) {
-            patcher.useStockKernel(path, stockRecovery);
-        } else {
-            patcher.patchKernel(path, manifest->productVersion);
-        }
-    });
+    if (stockRecovery) {
+        downloadAndPatch("iBSS", manifest->iBSSPath,
+                          [&](const std::string& path) { patcher.useStockIBSS(path, stockSecurerom); });
+        downloadAndPatch("iBEC", manifest->iBECPath,
+                          [&](const std::string& path) { patcher.useStockIBEC(path); });
+    } else {
+        takeBaked("iBSS", "iBSS", [&](const std::string& p) { patcher.setBakedIBSSPath(p); });
+        takeBaked("iBEC", "iBEC", [&](const std::string& p) { patcher.setBakedIBECPath(p); });
+    }
 
-    downloadAndPatch("DeviceTree", manifest->deviceTreePath,
-                      [&](const std::string& path) { patcher.setDeviceTreePath(path); });
+    if (stockFirmware) {
+        downloadAndPatch("KernelCache", manifest->kernelCachePath,
+                          [&](const std::string& path) { patcher.useStockKernel(path, stockRecovery); });
+    } else {
+        takeBaked("KernelCache", "KernelCache", [&](const std::string& p) { patcher.setBakedKernelPath(p); });
+    }
+
+    // DeviceTree was never patched (see Patcher::setDeviceTreePath()), so the
+    // baked copy is byte-identical to Apple's -- bake-firmware publishes it
+    // verbatim precisely so this does not need a download either.
+    takeBaked("DeviceTree", "DeviceTree", [&](const std::string& p) { patcher.setDeviceTreePath(p); });
 
     // required=false: confirmed genuinely optional, not just "usually
     // present" -- idevicerestore's own recovery_send_applelogo() checks
@@ -597,15 +616,30 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // ManifestInfo::restoreLogoPath's own comment). downloadAndPatch()
     // skips the callback entirely when the path is empty either way, so
     // this is a silent no-op wherever it's absent -- correctly so here.
-    downloadAndPatch(
-        "RestoreLogo", manifest->restoreLogoPath, [&](const std::string& path) { patcher.setRestoreLogoPath(path); },
-        /*required=*/false);
+    //
+    // Preferred from the bake, which publishes it verbatim, and downloaded only
+    // as a fallback -- a dist/ produced before bake-firmware started publishing
+    // the unmodified components will not have it.
+    if (fs::exists("dist/RestoreLogo" + bakedSuffix)) {
+        patcher.setRestoreLogoPath("dist/RestoreLogo" + bakedSuffix);
+    } else {
+        downloadAndPatch(
+            "RestoreLogo", manifest->restoreLogoPath,
+            [&](const std::string& path) { patcher.setRestoreLogoPath(path); },
+            /*required=*/false);
+    }
 
     // Almost always empty (see ManifestInfo::loadedByIBootComponents' own
     // comment) -- one downloadAndPatch() call per manifest entry flagged
     // Info.IsLoadedByiBoot, matching idevicerestore's own generic
     // iteration instead of a fixed component list.
+    // Same bake-first, download-as-fallback rule as RestoreLogo above.
     for (const auto& [name, remotePath] : manifest->loadedByIBootComponents) {
+        const std::string baked = "dist/" + name + bakedSuffix;
+        if (fs::exists(baked)) {
+            patcher.addLoadedByIBootComponent(name, baked);
+            continue;
+        }
         downloadAndPatch(name.c_str(), remotePath,
                           [&](const std::string& path) { patcher.addLoadedByIBootComponent(name, path); });
     }

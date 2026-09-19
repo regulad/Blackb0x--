@@ -129,7 +129,7 @@ bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildI
     // to catch "someone edited ramdisk/ and forgot to re-bake" -- that whole
     // system is gone (fragile, and it only ever guessed at staleness). Use
     // bake-firmware --force to rebuild an output that already exists.
-    const std::string patchedDMG = "dist/" + deviceModel + "_" + buildID + "-Ramdisk.dmg";
+    const std::string patchedDMG = "dist/RestoreRamDisk-" + deviceModel + "_" + buildID + ".dmg";
     return !fs::exists(patchedDMG);
 }
 
@@ -581,7 +581,7 @@ bool Patcher::patchRamdisk() {
         return false;
     }
 
-    const std::string patchedDMG = "dist/" + deviceModel_ + "_" + buildID_ + "-Ramdisk.dmg";
+    const std::string patchedDMG = "dist/RestoreRamDisk-" + deviceModel_ + "_" + buildID_ + ".dmg";
     if (!fs::exists(patchedDMG)) {
         // dist/ may have *something* in it (or, since Cli.cpp's runCli() can
         // now self-bake on demand, may still be entirely empty at this
@@ -596,12 +596,11 @@ bool Patcher::patchRamdisk() {
         // actually printed.
         fprintf(stderr,
                 "blackb0x: PANIC: no baked ramdisk for %s %s (%s doesn't exist).\n"
-                "Either update the device to the latest firmware Apple currently signs (the\n"
-                "one bake-firmware --signed-only would have picked up), or bake every known\n"
-                "combination instead, including older/unsigned ones, by re-running:\n"
-                "  ./bake-firmware --only ramdisk\n"
-                "(without --signed-only)\n",
-                deviceModel_.c_str(), buildID_.c_str(), patchedDMG.c_str());
+                "Bake it by re-running:\n"
+                "  ./bake-firmware --only ramdisk --device %s --build %s\n"
+                "Or drop the filters to bake every known combination at once.\n",
+                deviceModel_.c_str(), buildID_.c_str(), patchedDMG.c_str(),
+                deviceModel_.c_str(), buildID_.c_str());
         std::exit(1);
     }
 
@@ -666,6 +665,26 @@ bool Patcher::useStockRamdisk(const std::string& path, bool stockRecovery) {
     outputs_.ramdisk = outPath;
     checkPatching();
     return true;
+}
+
+void Patcher::setBakedIBSSPath(const std::string& path) {
+    outputs_.iBSS = path;
+    checkPatching();
+}
+
+void Patcher::setBakedIBECPath(const std::string& path) {
+    outputs_.iBEC = path;
+    checkPatching();
+}
+
+void Patcher::setBakedKernelPath(const std::string& path) {
+    outputs_.kernel = path;
+    checkPatching();
+}
+
+void Patcher::setBakedRamdiskPath(const std::string& path) {
+    outputs_.ramdisk = path;
+    checkPatching();
 }
 
 void Patcher::setDeviceTreePath(const std::string& path) {

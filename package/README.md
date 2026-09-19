@@ -23,10 +23,9 @@ invisible to apt.
 ## Why Theos, and which half of it
 
 `dm.pl` builds a correct `.deb` without root and without fakeroot, and it is
-the tool this ecosystem actually uses. Not needing root matters here:
-nothing else in the bake needs root any more (the one thing that did, the
-Linux HFS+ loop mount, is gone), and reintroducing a reason to need it just
-to build a package would be a step backwards.
+the tool this ecosystem actually uses. It works either way now — see the
+ownership section below — which matters because `bake-firmware` runs as root
+and calls this script from inside that run.
 
 We use **none** of Theos's compilation half. This package is pure data — apt
 sources, gpg keys, a plist, shell scripts, and the bundled `.deb`s. Nothing is
@@ -47,26 +46,35 @@ immediately before `dm.pl` tars it, then re-marks the maintainer scripts and
 `postinstall.sh` executable. Modes are asserted; a `.deb` records them per
 entry and a checkout's umask is not a spec.
 
-Ownership is **not** chown'd, and `build.sh` refuses to run as root. `dm.pl`
-picks entry ownership off its own euid:
+`dm.pl` picks entry ownership off its own real uid (verified by reading
+`$THEOS/bin/dm.pl` directly, not assumed):
 
 ```perl
 if ($< == 0) { $tf->chown($stat[4], $stat[5]); }   # root: preserve on-disk
 else         { $tf->chown("root", "wheel"); }      # non-root: force 0:0
 ```
 
-So a non-root `dm.pl` stamps `root:wheel` on everything by construction —
-exactly what this package wants — and running as root is the broken case,
-because it would record whatever the staging tree happens to carry. An
-ordinary user cannot chown a file to root anyway, so there is no way to
-prepare a correct tree for the root path.
+`build.sh` handles both branches and they converge on identical output. Run as
+an ordinary user, nothing is chown'd and `dm.pl` forces `root:wheel` by
+construction. Run as root, `build.sh` asserts `chown -R 0:0` on the staging
+tree first and `dm.pl` preserves exactly that. Same `.deb` either way.
 
-The containerized build hit exactly that: `dm.pl` ran as container root, so it
-needed an explicit `chown -R 0:0` to put the ownership back. Before that was
-added it only *looked* right — under rootless podman the container's root maps
-to the invoking host user, so a host-owned bind mount appeared root-owned
-inside and `tar` recorded `0/root` by accident. Running natively removes the
-whole class of problem.
+**`build.sh` used to refuse to run as root outright, and that deadlocked the
+bake.** `bakeRamdisk()` requires root — it chown()s staged content to
+root:wheel and writes into root-owned files on the mounted ramdisk — and it
+invokes this script through `stageBlackb0xPackage()`. Root required on one
+side, root refused on the other, so the ramdisk bake could never finish. The
+refusal was right about `dm.pl`'s behaviour and wrong that there was nothing to
+correct: the `chown -R 0:0` is the correction, and it is the same one the old
+containerized build already used.
+
+That containerized build is worth remembering for a different reason. `dm.pl`
+ran as container root there, so it needed the same explicit `chown -R 0:0` —
+and before that was added it only *looked* right, because under rootless podman
+the container's root maps to the invoking host user, so a host-owned bind mount
+appeared root-owned inside and `tar` recorded `0/root` by accident. Nothing
+here uses podman any more; the remaining mentions are history, not a
+dependency.
 
 Everything is `root:wheel` (0:0), which is correct for all of it — `/etc/apt`
 sources and keyrings, the LaunchDaemon plist, root's own `.profile`, and

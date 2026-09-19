@@ -5,8 +5,9 @@
 //  The single ahead-of-time baker: for every (device model, firmware build)
 //  combination this port has decryption keys for, download and patch the
 //  whole firmware suite — iBSS, iBEC, KernelCache and DeviceTree into
-//  dist/bootchain/<device>_<buildID>/, and the jailbreak ramdisk into
-//  dist/<device>_<buildID>-Ramdisk.dmg.
+//  dist/ as flat <Component>-<device>_<buildID> entries (Apple's own
+//  BuildManifest component keys), the ramdisk as
+//  dist/RestoreRamDisk-<device>_<buildID>.dmg.
 //
 //  This was two binaries, bake-all-bootloaders and bake-all-ramdisks, and
 //  the split was load-bearing for exactly one reason: on Linux the ramdisk
@@ -17,7 +18,7 @@
 //  is native `hdiutil` now, which needs neither a loop mount nor root, so
 //  both halves are ordinary unprivileged work over the same target list and
 //  there is nothing left to separate. Everything else they had in common —
-//  the target enumeration, the --signed-only/--device/--build filters, the
+//  the target enumeration, the --device/--build filters, the
 //  skip-unless---force rule — was duplicated verbatim between the two files
 //  and is now written once.
 //
@@ -35,7 +36,7 @@
 //  instruction-pattern search fails on some specific build shows up here as
 //  a plain failure row instead of as a device that will not boot.
 //
-//  Usage: ./bake-firmware [--signed-only] [--device <model>] [--build <buildID>]
+//  Usage: ./bake-firmware [--device <model>] [--build <buildID>]
 //                         [--only bootchain|ramdisk] [--bootchain-out <dir>]
 //                         [--force] [--stop-early]
 //
@@ -47,12 +48,20 @@
 //
 //  --build <buildID> restricts the run to just that one firmware build (e.g.
 //  "12H606"), across whichever known device(s) have it. Combines with
-//  --device (and --signed-only) to pin the run down to exactly one pair.
+//  --device to pin the run down to exactly one pair.
 //
-//  --signed-only restricts the run to builds ipsw.me still reports Apple as
-//  actively signing for that device right now — typically just the latest
-//  one or two per device (7 out of 92 known builds, checked live 2026-09-11),
-//  which is what the vast majority of real devices will actually be on.
+//  There used to be a --signed-only flag here, which asked ipsw.me which
+//  builds Apple is still actively signing and baked only those. It is gone,
+//  because the question it answered is not one this tool has any stake in.
+//  What blackb0x can jailbreak is decided entirely by what has a .keys file
+//  under keys/ and patches that work against it — and the live path pins
+//  kJailbreakTargetBuild (Cli.cpp) regardless. Apple's current signing
+//  window neither adds a bakeable target nor removes one, so filtering on it
+//  only ever hid targets that were still perfectly valid to bake, at the
+//  cost of a network round trip per device. Use --device/--build to narrow a
+//  run. signedBuildsForDevice() (IPSW.hpp) itself stays: the --stock-*
+//  diagnostic routes are real consumers of it, since a TSS ticket genuinely
+//  can only be issued for a build Apple is still signing.
 //
 //  --only bootchain|ramdisk runs just that half. `--only bootchain` is the
 //  fast iteration loop for patch logic: no entrypoint cross-compile, no
@@ -60,7 +69,7 @@
 //  when a live run finds the dist/ entry it needs is missing.
 //
 //  --bootchain-out <dir> overrides the bootchain output root (default
-//  dist/bootchain). The ramdisk output location is NOT configurable: it is
+//  dist). The ramdisk output location is NOT configurable: it is
 //  the dist/ layout Patcher::patchRamdisk() looks in by name.
 //
 //  --force rebuilds targets whose output already exists. Without it an
@@ -94,9 +103,9 @@ extern "C" {
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -203,6 +212,15 @@ static void addNote(std::string& note, const std::string& what) {
 // error_code with the copy: the two fail for completely different reasons,
 // and conflating them turns "your output directory is not writable" into a
 // misleading per-file ENOENT on every component.
+static std::string joinNames(const std::vector<std::string>& names) {
+    std::string out;
+    for (const auto& n : names) {
+        if (!out.empty()) out += ", ";
+        out += n;
+    }
+    return out;
+}
+
 static bool publish(const std::string& from, const std::string& toDir, const std::string& name,
                      std::string& noteOut) {
     std::error_code dirEc;
@@ -212,11 +230,17 @@ static bool publish(const std::string& from, const std::string& toDir, const std
         return false;
     }
     std::error_code copyEc;
-    fs::copy_file(from, fs::path(toDir) / name, fs::copy_options::overwrite_existing, copyEc);
+    const fs::path dest = fs::path(toDir) / name;
+    fs::copy_file(from, dest, fs::copy_options::overwrite_existing, copyEc);
     if (copyEc) {
         addNote(noteOut, "could not publish " + name + ": " + copyEc.message());
         return false;
     }
+    // This process is root (see main()'s geteuid() check), so everything it
+    // writes would otherwise land root-owned. dist/ is ordinary build output
+    // the invoking user wants to read, move and delete without sudo.
+    chownToSudoCaller(toDir);
+    chownToSudoCaller(dest.string());
     return true;
 }
 
@@ -227,14 +251,29 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
     result.buildID = buildID;
     result.bootchainRequested = true;
 
-    const std::string outDir = outRoot + "/" + device + "_" + buildID;
+    // dist/ is FLAT. Components are named <Component>-<device>_<buildID>, using
+    // Apple's own BuildManifest component keys (iBSS, iBEC, KernelCache,
+    // DeviceTree, RestoreRamDisk) rather than lowercase inventions of ours, so
+    // a file here is recognisable as the thing the manifest calls it.
+    //
+    // This used to be dist/bootchain/<device>_<buildID>/{iBSS,iBEC,
+    // kernelcache,devicetree} -- a directory per tuple, plus a separate
+    // dist/<device>_<buildID>-Ramdisk.dmg sitting outside it. Two layouts for
+    // one firmware suite, with the ramdisk the odd one out. One flat directory
+    // keyed by component and tuple is easier to glob, easier to publish
+    // (.claude/TODO.md item 7), and puts every artifact for a tuple next to
+    // its siblings.
+    const std::string outDir = outRoot;
+    const std::string tupleSuffix = std::string("-") + device + "_" + buildID;
 
     // Four files, all present, is what "already done" means. A partial
     // directory from an interrupted or half-failing earlier run is NOT
     // treated as done -- that would make a failure sticky and invisible on
     // the next run, which is the opposite of what this tool is for.
-    if (!force && fs::exists(outDir + "/iBSS") && fs::exists(outDir + "/iBEC") &&
-        fs::exists(outDir + "/kernelcache") && fs::exists(outDir + "/devicetree")) {
+    if (!force && fs::exists(outDir + "/iBSS" + tupleSuffix) &&
+        fs::exists(outDir + "/iBEC" + tupleSuffix) &&
+        fs::exists(outDir + "/KernelCache" + tupleSuffix) &&
+        fs::exists(outDir + "/DeviceTree" + tupleSuffix)) {
         printf("already built, skipping (use --force to rebuild)\n");
         result.bootchainSkipped = true;
         result.downloaded = true;
@@ -325,16 +364,71 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
         return true;
     });
 
-    const PatchedComponents& out = patcher.components();
-    if (result.iBSS && out.iBSS) result.iBSS = publish(*out.iBSS, outDir, "iBSS", result.note);
-    if (result.iBEC && out.iBEC) result.iBEC = publish(*out.iBEC, outDir, "iBEC", result.note);
-    if (result.kernel && out.kernel) result.kernel = publish(*out.kernel, outDir, "kernelcache", result.note);
-    if (result.deviceTree && out.deviceTree)
-        result.deviceTree = publish(*out.deviceTree, outDir, "devicetree", result.note);
+    // Components this tool does not need to modify are still published, byte
+    // for byte as Apple shipped them. blackb0x consumes dist/ and nothing else
+    // now -- it has no IPSW downloader, no decryption keys and no network --
+    // so anything it might need to send has to be here, whether or not the
+    // bake had a reason to touch it.
+    //
+    // RestoreLogo is genuinely optional (idevicerestore's own
+    // recovery_send_applelogo() returns success outright when the manifest
+    // has no logo at all), and loadedByIBootComponents is usually empty. Both
+    // are published when present and simply omitted when not; the index below
+    // is what tells blackb0x which of them exist, so it never has to guess or
+    // parse a BuildManifest it no longer downloads.
+    auto publishVerbatim = [&](const std::string& name, const std::string& remotePath) -> bool {
+        if (remotePath.empty()) return false;
+        std::string localPath = workDir + "/" + fs::path(remotePath).filename().string();
+        if (!fs::exists(localPath) && !downloader.downloadComponent(remotePath, localPath, nullptr)) {
+            addNote(result.note, name + ": download failed");
+            return false;
+        }
+        return publish(localPath, outDir, name + tupleSuffix, result.note);
+    };
+    std::vector<std::string> extraComponents;
+    if (publishVerbatim("RestoreLogo", manifest->restoreLogoPath)) {
+        extraComponents.push_back("RestoreLogo");
+    }
+    for (const auto& [name, remotePath] : manifest->loadedByIBootComponents) {
+        if (publishVerbatim(name, remotePath)) extraComponents.push_back(name);
+    }
 
-    printf("iBSS %s, iBEC %s, kernel %s, devicetree %s%s%s\n", mark(result.iBSS), mark(result.iBEC),
-           mark(result.kernel), mark(result.deviceTree), result.note.empty() ? "" : " -- ",
-           result.note.c_str());
+    const PatchedComponents& out = patcher.components();
+    if (result.iBSS && out.iBSS) result.iBSS = publish(*out.iBSS, outDir, "iBSS" + tupleSuffix, result.note);
+    if (result.iBEC && out.iBEC) result.iBEC = publish(*out.iBEC, outDir, "iBEC" + tupleSuffix, result.note);
+    if (result.kernel && out.kernel)
+        result.kernel = publish(*out.kernel, outDir, "KernelCache" + tupleSuffix, result.note);
+    if (result.deviceTree && out.deviceTree)
+        result.deviceTree = publish(*out.deviceTree, outDir, "DeviceTree" + tupleSuffix, result.note);
+
+    // The index. blackb0x reads this instead of a BuildManifest: it names every
+    // component present for this tuple, so optional pieces (RestoreLogo) and
+    // manifest-driven ones (loadedByIBoot) need no out-of-band agreement
+    // between the two binaries beyond the file format itself.
+    //
+    // Written last, and only when the four required components all succeeded,
+    // so its presence is exactly the "this tuple is complete" signal. A
+    // half-baked tuple leaves no index and blackb0x refuses it by name.
+    if (result.iBSS && result.iBEC && result.kernel && result.deviceTree) {
+        std::ofstream index(outDir + "/Manifest" + tupleSuffix + ".txt");
+        if (index) {
+            index << "# Components baked for " << device << " " << buildID << ".\n"
+                  << "# One name per line; the file is <name>" << tupleSuffix << ".\n"
+                  << "# Read by Cli.cpp's loadComponentsFromDist(). RestoreRamDisk is\n"
+                  << "# listed here but baked separately by the ramdisk half.\n"
+                  << "iBSS\niBEC\nKernelCache\nDeviceTree\n";
+            for (const auto& name : extraComponents) index << name << "\n";
+        }
+        index.close();
+        chownToSudoCaller(outDir + "/Manifest" + tupleSuffix + ".txt");
+    }
+
+    printf("iBSS %s, iBEC %s, kernel %s, devicetree %s%s%s%s\n", mark(result.iBSS), mark(result.iBEC),
+           mark(result.kernel), mark(result.deviceTree),
+           extraComponents.empty() ? "" : " (+verbatim: ",
+           extraComponents.empty() ? "" : joinNames(extraComponents).c_str(),
+           extraComponents.empty() ? "" : ")");
+    if (!result.note.empty()) printf("  note: %s\n", result.note.c_str());
     return result;
 }
 
@@ -459,7 +553,9 @@ static RamdiskOutcome bakeRamdiskForTarget(const std::string& device, const std:
                                             std::map<std::string, std::string>& newestVersionCache,
                                             std::string& noteOut) {
     const std::string label = device + " " + buildID;
-    const std::string outputPath = "dist/" + device + "_" + buildID + "-Ramdisk.dmg";
+    // Same flat convention as the bootchain half above, and the same Apple
+    // manifest key: RestoreRamDisk, not "Ramdisk".
+    const std::string outputPath = "dist/RestoreRamDisk-" + device + "_" + buildID + ".dmg";
 
     // Existence is the whole check -- see --force in this file's header for
     // why there is no staleness detection any more.
@@ -605,25 +701,22 @@ static const char* ramdiskMark(RamdiskOutcome outcome) {
 
 static void usage() {
     fprintf(stderr,
-            "usage: bake-firmware [--signed-only] [--device <model>] [--build <buildID>]\n"
+            "usage: bake-firmware [--device <model>] [--build <buildID>]\n"
             "                     [--only bootchain|ramdisk] [--bootchain-out <dir>]\n"
             "                     [--force] [--stop-early]\n");
 }
 
 int main(int argc, char** argv) {
-    bool signedOnly = false;
     bool force = false;
     bool stopEarly = false;
     bool doBootchain = true;
     bool doRamdisk = true;
     std::string deviceFilter;
     std::string buildFilter;
-    std::string bootchainOut = "dist/bootchain";
+    std::string bootchainOut = "dist";
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--signed-only") == 0) {
-            signedOnly = true;
-        } else if (strcmp(argv[i], "--force") == 0) {
+        if (strcmp(argv[i], "--force") == 0) {
             force = true;
         } else if (strcmp(argv[i], "--stop-early") == 0) {
             stopEarly = true;
@@ -705,33 +798,39 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (signedOnly) {
-        size_t before = targets.size();
-        // One ipsw.me lookup per unique device, not per (device, buildID)
-        // pair — every build of the same device shares one signed-set query.
-        std::map<std::string, std::set<std::string>> signedByDevice;
-        std::vector<std::pair<std::string, std::string>> filtered;
-        for (auto& [device, buildID] : targets) {
-            auto found = signedByDevice.find(device);
-            if (found == signedByDevice.end()) {
-                found = signedByDevice.emplace(device, signedBuildsForDevice(device)).first;
-            }
-            if (found->second.count(buildID)) filtered.push_back({device, buildID});
-        }
-        targets = std::move(filtered);
-        printf("--signed-only: %zu of %zu known combinations are currently signed by Apple.\n", targets.size(),
-               before);
-        if (targets.empty()) {
-            fprintf(stderr, "%s: nothing to do (ipsw.me reports nothing currently signed)\n", kProg);
-            return 1;
-        }
-    }
-
     printf("Found %zu known (device, firmware) combinations.\n", targets.size());
     printf("Baking: %s.\n", doBootchain && doRamdisk ? "bootchain and ramdisk"
                             : doBootchain           ? "bootchain only"
                                                     : "ramdisk only");
-    printf("No root needed: every step here is download, decrypt, file patching and hdiutil.\n");
+    // Root, unconditionally, checked here rather than per-half.
+    //
+    // The ramdisk half genuinely cannot work without it, and the reasons are
+    // measured rather than assumed: chown() to root:wheel/mobile:staff returns
+    // EPERM for a normal user; the pristine /sbin/launchd this splices into is
+    // root-owned and mode 0555 on some firmwares, so even opening it O_WRONLY
+    // fails with EACCES without root's mode bypass; and files created by a
+    // non-root writer land owned by the invoking user, which would silently
+    // bake a ramdisk whose entire tree belongs to uid 501. hdiutil itself needs
+    // no privilege at all -- attach and resize both work fine unprivileged --
+    // so it is specifically the ownership work that forces this.
+    //
+    // The bootchain half needs none of that, and this used to be split
+    // accordingly. Requiring it for both is the deliberate choice: the two
+    // halves run together by default, a bake takes minutes, and discovering
+    // the requirement only when the ramdisk half starts means having already
+    // paid for every download and patch. One uniform rule up front beats a
+    // conditional one that lets a long run fail late. bakeRamdisk() keeps its
+    // own identical check, since it is callable on its own.
+    if (geteuid() != 0) {
+        fprintf(stderr,
+                "%s: must run as root (try: sudo %s ...)\n"
+                "  The ramdisk half chown()s staged content to root:wheel and writes into\n"
+                "  root-owned files on the mounted volume; neither is possible unprivileged.\n"
+                "  hdiutil itself needs no privilege -- the ownership work does.\n",
+                kProg, kProg);
+        return 1;
+    }
+    printf("Running as root (required: staged content is chown()ed to root:wheel).\n");
 
     // Checked once, up front, rather than discovered per component after
     // every download and patch has already been paid for -- an unwritable
@@ -882,7 +981,7 @@ int main(int argc, char** argv) {
                    "devicetree %zu.\n",
                    iBSSFail, iBECFail, kernelFail, dtFail);
         }
-        printf("Bootchain output: %s/<device>_<buildID>/\n", bootchainOut.c_str());
+        printf("Bootchain output: %s/<Component>-<device>_<buildID>\n", bootchainOut.c_str());
     }
     if (doRamdisk) {
         printf("Ramdisk: %zu baked", ramdiskOk + ramdiskWarned);
@@ -891,7 +990,7 @@ int main(int argc, char** argv) {
         if (ramdiskNoDownload) printf(", %zu skipped (could not download from apple, see stderr above)", ramdiskNoDownload);
         if (ramdiskFailed) printf(", %zu FAILED to bake", ramdiskFailed);
         printf(".\n");
-        printf("Ramdisk output: dist/<device>_<buildID>-Ramdisk.dmg\n");
+        printf("Ramdisk output: dist/RestoreRamDisk-<device>_<buildID>.dmg\n");
     }
 
     // A target that could not be downloaded is not this tool's failure --

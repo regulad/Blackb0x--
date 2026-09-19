@@ -1,10 +1,30 @@
 # Plain Makefile — no Theos (see README.md for why: this binary is
 # freestanding, Theos's tool.mk assumes dynamic linking against libSystem).
-# Expects `arm-apple-darwin11-clang` (built by cctools-port's
-# usage_examples/ios_toolchain/build.sh — see README.md step 3) on $PATH.
-
-CC := arm-apple-darwin11-clang
-LDID := ldid
+#
+# Builds with the STOCK macOS toolchain. Apple's own clang still has the ARM
+# backend and Apple's own ld still advertises armv6 in its supported-arch
+# list (`ld -v`), so `-arch armv6` produces exactly the artifact this needs
+# with nothing installed beyond Xcode Command Line Tools and ldid. Verified
+# on Apple clang 21 / ld-1267: Mach-O armv6, LC_UNIXTHREAD, zero
+# LC_LOAD_DYLIB, _entry as the thread-state PC.
+#
+# This used to demand a cctools-port cross-toolchain named
+# `arm-apple-darwin11-clang`, which in turn needed a real iPhoneOS 6.1 SDK
+# extracted from a 1.7GB archive.org copy of Xcode 4.6. None of that is
+# required: cctools-port exists to supply Apple's ld64/as on hosts that lack
+# them, and this host is a Mac. Override CC if you want to use such a
+# toolchain anyway (`make CC=arm-apple-darwin11-clang`) — it still works,
+# it is just no longer the documented path.
+# `CC ?= clang` would NOT work here: make predefines CC as `cc`, so `?=`
+# sees it already set and never assigns. Testing $(origin CC) is the
+# idiomatic way to say "default to clang, but let the caller override" --
+# `make CC=arm-apple-darwin11-clang` still wins. (On macOS `cc` is clang
+# anyway, so the old spelling worked by accident; this just makes the
+# documented default the real one.)
+ifeq ($(origin CC),default)
+CC := clang
+endif
+LDID ?= ldid
 
 CFLAGS := -arch armv6 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -Wall -Wextra -O2
 LDFLAGS := -static -Wl,-e,_entry -nostartfiles
@@ -13,12 +33,10 @@ LDFLAGS := -static -Wl,-e,_entry -nostartfiles
 # BakeRamdisk.cpp's spliceFileContentInPlace() call), so it's signed under
 # launchd's own well-known identifier rather than ldid's default (the
 # binary's own filename). A mid-rewrite detour signed this as `com.apple.rc`
-# and targeted /etc/rc.boot instead, on the strength of real disassembly
-# showing that file was LC_MAIN-entered directly by the kernel on an
-# AppleTV2,1 10B809 RestoreRamdisk — but that turned out to be firmware-
-# specific: AppleTV3,1/3,2 12H606 has no /etc/rc.boot at all. Backstepped to
-# always targeting /sbin/launchd, the one thing guaranteed present as real
-# PID-1 across every firmware generation — see docs/HISTORY.md.
+# and targeted /etc/rc.boot instead. That was reverted, and the reasoning
+# recorded for it turned out to be wrong as well — the kernel never execs
+# /etc/rc.boot on any firmware; launchctl does, downstream. See README.md's
+# "What actually runs as PID 1" for the disassembly-backed account.
 LAUNCHD_IDENTIFIER := com.apple.launchd
 
 TARGET := entrypoint

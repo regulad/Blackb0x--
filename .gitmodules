@@ -57,3 +57,10 @@
 [submodule "third_party/CBPatcher"]
 	path = third_party/CBPatcher
 	url = https://github.com/zzanehip/CBPatcher.git
+[submodule "third_party/apt"]
+	path = third_party/apt
+	url = https://github.com/regulad/apt.git
+	branch = blackb0x
+[submodule "third_party/triehash"]
+	path = third_party/triehash
+	url = https://github.com/julian-klode/triehash.git

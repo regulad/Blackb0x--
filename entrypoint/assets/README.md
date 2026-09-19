@@ -9,11 +9,18 @@ how to reproduce them instead of shipping them.
 
 ## `iPhoneOS6.1.sdk.tar.xz`
 
-The iPhoneOS 6.1 SDK, needed to bootstrap `cctools-port`'s cross-toolchain
-build (`entrypoint/README.md` step 3) — it hard-requires a real
-`libSystem.dylib`/`.tbd` on disk to construct the `arm-apple-darwin11-clang`
-wrapper, even though `entrypoint.c` itself is freestanding and won't link
-against it.
+**No longer required by anything. Kept as a record, not a prerequisite.**
+This SDK existed solely to bootstrap a `cctools-port` cross-toolchain, which
+in turn existed solely to give a *Linux* host Apple's own `ld64`/`as`. On a
+Mac those are the system tools, and `entrypoint/Makefile` now builds with
+stock Apple `clang` and `ld` (`-arch armv6`, verified on clang 21 / ld-1267).
+Note that even then the SDK was never needed to *compile* `entrypoint.c` —
+that is freestanding and links against nothing; `cctools-port` just wanted a
+real `libSystem.dylib` on disk to construct its compiler wrapper.
+
+Reproduce it only if you specifically want to rebuild that cross-toolchain
+(`make CC=arm-apple-darwin11-clang` still works). Nothing in a normal build
+or bake reads this directory.
 
 **Source**: [Xcode 4.6](https://archive.org/details/xcode460417218a) on
 archive.org — the official Apple developer tools DMG (1.7GB), preserved

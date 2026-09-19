@@ -1326,9 +1326,9 @@ add_test(NAME RamdiskOverlayTests
 # ever CHECKS for a dist/ entry and names this binary in its error message;
 # it never execs it, and bake-firmware never calls patchRamdisk().
 #
-# No Apple frameworks are linked pre-emptively — add whatever a real macOS
-# link actually demands, the same way blackb0x's own `if(APPLE)` framework
-# block below was arrived at from a real link error rather than a guess.
+# The Apple frameworks below were arrived at from a real macOS link error,
+# the same way blackb0x's own framework block was — not guessed. See that
+# block for the full list of undefined symbols and their sources.
 #
 # No Personalize.cpp: that is TSS/SHSH personalization for the
 # --stock-securerom diagnostic route only, and Patcher itself never calls it
@@ -1358,6 +1358,23 @@ target_link_libraries(bake-firmware PRIVATE
     deps::wolfssl
     ZLIB::ZLIB)
 
+# Real macOS link failure, resolved from the actual undefined-symbol list
+# rather than by copying blackb0x's line: wolfSSL's own
+# DoAppleNativeCertValidation/LoadSystemCaCertsMac (its native macOS
+# cert-store support) pulls in CoreFoundation and Security, and curl's
+# Curl_macos_init (proxy detection) pulls in SystemConfiguration's
+# SCDynamicStoreCopyProxies. Both are baked into those libraries' own Darwin
+# code paths, not conditional on anything this project passes them.
+#
+# NO IOKit here, unlike blackb0x: this target links neither libirecovery nor
+# anything else that talks to USB, which is the only thing that needed it.
+# Adding it "for symmetry" would link a framework nothing in this binary
+# references.
+target_link_libraries(bake-firmware PRIVATE
+    "-framework CoreFoundation"
+    "-framework Security"
+    "-framework SystemConfiguration")
+
 # iBoot32Patcher: not linked (it is GPLv3 — see its own block above), but it
 # IS fork/exec'd by Patcher.cpp at runtime, so it has to exist next to this
 # binary for the tool to do anything. A build dependency rather than a link
@@ -1367,3 +1384,170 @@ add_dependencies(bake-firmware
     libplist_ext libfragmentzip_ext libgeneral_ext
     wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
 
+
+# ---------------------------------------------------------------------------
+# apt — a HOST BUILD TOOL, never linked into anything this project ships
+#
+# Debian's real apt, so bake-time dependency resolution can use a real solver
+# over debcache/ instead of scripts/build_deb_cache_experimental_no_container.py
+# (a naive transitive walk by bare package name, with no version-constraint
+# comparison and no real Provides:/Conflicts:/Breaks: semantics -- see its own
+# docstring). Nothing links against apt; bake-firmware execs it, the same way
+# it already execs iBoot32Patcher and CBPatcher.
+#
+# WHY A SUBMODULE AND A FORK: see .claude/TODO.md item 17 for the full trail.
+# The short version is that saurik's apt7 (the 0.7.25.3 the device itself runs)
+# is unobtainable -- git.saurik.com is down, telesphoreo.org is gone, and the
+# GitHub user "apt7" is an unrelated person's coursework -- and Homebrew's apt
+# formula cannot build on Darwin because it pulls libcap/systemd/util-linux.
+# regulad/apt@blackb0x is upstream 2.9.4 plus Procursus' own Darwin patch set
+# plus one fix of ours; apt itself needs none of those Linux-only libraries.
+#
+# Deliberately NOT part of `all`: this is EXCLUDE_FROM_ALL and has to be asked
+# for by name (`cmake --build build --target apt`). It is a large C++ build
+# that most work in this repo never touches, and it needs Homebrew formulae the
+# rest of the project does not -- making an ordinary `cmake --build build` fail
+# on a machine missing berkeley-db@5 would be a bad trade for a tool only the
+# ramdisk bake uses.
+# ---------------------------------------------------------------------------
+
+# Homebrew prefixes, resolved at configure time rather than hardcoded: these
+# are keg-only formulae whose paths differ between Intel and Apple Silicon, and
+# apt's own FindBerkeley.cmake does not know Homebrew's layout at all.
+find_program(BREW_EXECUTABLE brew)
+function(_blackb0x_brew_prefix formula outvar)
+    if(BREW_EXECUTABLE)
+        execute_process(COMMAND ${BREW_EXECUTABLE} --prefix ${formula}
+                        OUTPUT_VARIABLE _p OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET RESULT_VARIABLE _rc)
+        if(_rc EQUAL 0)
+            set(${outvar} "${_p}" PARENT_SCOPE)
+        endif()
+    endif()
+endfunction()
+_blackb0x_brew_prefix(berkeley-db@5 BREW_BERKELEY)
+_blackb0x_brew_prefix(openssl@3 BREW_OPENSSL)
+_blackb0x_brew_prefix(gettext BREW_GETTEXT)
+_blackb0x_brew_prefix(dpkg BREW_DPKG)
+
+# triehash is a build-time code generator apt's CMakeLists hard-requires, and
+# it is a single MIT-licensed Perl script. Vendored (third_party/triehash)
+# rather than left as a "fetch this by hand" step. apt looks for it on PATH
+# under the bare name `triehash`, so it gets a tiny bin/ shim directory rather
+# than being invoked directly.
+set(TRIEHASH_BIN_DIR ${CMAKE_BINARY_DIR}/triehash-bin)
+file(MAKE_DIRECTORY ${TRIEHASH_BIN_DIR})
+file(CREATE_LINK ${CMAKE_SOURCE_DIR}/third_party/triehash/triehash.pl
+     ${TRIEHASH_BIN_DIR}/triehash SYMBOLIC)
+
+# Dpkg.pm lives in dpkg's own libexec tree, which is NOT on perl's default
+# @INC -- apt's configure step runs a Perl helper that `use`s it and dies with
+# "Can't locate Dpkg.pm in @INC" otherwise.
+set(APT_PERL5LIB "${BREW_DPKG}/libexec/lib/perl5")
+
+# One predictable location for everything the bake execs, so BakeRamdisk.cpp
+# never has to know an ExternalProject prefix path.
+set(APT_TOOLS_DIR ${CMAKE_BINARY_DIR}/apt-tools)
+
+# USE_NLS=1, not 0: with NLS disabled, apt's generated apti18n.h declares
+# stubs whose exception specifications clash with the system headers'
+# ("exception specification in declaration does not match previous
+# declaration") across most of apt-pkg. Procursus builds with NLS on too.
+ExternalProject_Add(apt_ext
+    EXCLUDE_FROM_ALL 1
+    SOURCE_DIR      ${CMAKE_SOURCE_DIR}/third_party/apt
+    CMAKE_ARGS      -DCMAKE_BUILD_TYPE=Release
+                    -DUSE_NLS=1
+                    -DWITH_DOC=0
+                    -DWITH_DOC_MANPAGES=0
+                    -DWITH_TESTS=0
+                    -DROOT_GROUP=wheel
+                    -DCMAKE_PREFIX_PATH=${BREW_OPENSSL}$<SEMICOLON>${BREW_BERKELEY}$<SEMICOLON>${BREW_GETTEXT}
+                    -DBERKELEY_INCLUDE_DIRS=${BREW_BERKELEY}/include
+                    -DBERKELEY_LIBRARIES=${BREW_BERKELEY}/lib/libdb-5.3.dylib
+    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env
+                        "PATH=${TRIEHASH_BIN_DIR}:$ENV{PATH}"
+                        "PERL5LIB=${APT_PERL5LIB}"
+                        ${CMAKE_COMMAND} <SOURCE_DIR> -B <BINARY_DIR>
+                        -DCMAKE_BUILD_TYPE=Release -DUSE_NLS=1 -DWITH_DOC=0
+                        -DWITH_DOC_MANPAGES=0 -DWITH_TESTS=0 -DROOT_GROUP=wheel
+                        "-DCMAKE_PREFIX_PATH=${BREW_OPENSSL};${BREW_BERKELEY};${BREW_GETTEXT}"
+                        -DBERKELEY_INCLUDE_DIRS=${BREW_BERKELEY}/include
+                        -DBERKELEY_LIBRARIES=${BREW_BERKELEY}/lib/libdb-5.3.dylib
+    BUILD_COMMAND   ${CMAKE_COMMAND} -E env
+                        "PATH=${TRIEHASH_BIN_DIR}:$ENV{PATH}"
+                        "PERL5LIB=${APT_PERL5LIB}"
+                        ${CMAKE_COMMAND} --build <BINARY_DIR> -j
+    # Not a real `make install` -- apt would want to lay out a whole prefix
+    # (etc/apt, var/lib/apt, man pages) and this is a build tool, not something
+    # being installed onto a system. Instead the handful of binaries the bake
+    # actually execs are copied to one predictable place, since the
+    # ExternalProject's own <BINARY_DIR> is an implementation detail nobody
+    # should have to spell out:
+    #
+    #   build/apt-tools/apt-get  apt-cache  apt-config  apt-ftparchive
+    #   build/apt-tools/methods/...
+    #
+    # methods/ has to come along: apt shells out to methods/file for a
+    # file:// source, and without Dir::Bin::methods pointing at a directory
+    # that contains it every fetch fails with "The method driver .../file
+    # could not be found".
+    INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory ${APT_TOOLS_DIR}
+            COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/cmdline/apt-get ${APT_TOOLS_DIR}/
+            COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/cmdline/apt-cache ${APT_TOOLS_DIR}/
+            COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/cmdline/apt-config ${APT_TOOLS_DIR}/
+            COMMAND ${CMAKE_COMMAND} -E copy <BINARY_DIR>/ftparchive/apt-ftparchive ${APT_TOOLS_DIR}/
+            COMMAND ${CMAKE_COMMAND} -E copy_directory <BINARY_DIR>/methods ${APT_TOOLS_DIR}/methods
+    BUILD_BYPRODUCTS ${APT_TOOLS_DIR}/apt-get
+                     ${APT_TOOLS_DIR}/apt-cache
+                     ${APT_TOOLS_DIR}/apt-config
+                     ${APT_TOOLS_DIR}/apt-ftparchive
+)
+
+# A friendlier name than the _ext convention the linked dependencies use, since
+# this one is asked for by hand: `cmake --build build --target apt`.
+add_custom_target(apt DEPENDS apt_ext)
+
+# ---------------------------------------------------------------------------
+# Two build groups
+#
+# `jailbreak` is what an end user needs to jailbreak a device they already have
+# baked firmware for, and nothing else:
+#
+#     blackb0x       the CLI
+#     blackb0x-pwn   the checkm8/SHAtter exploit binary it spawns
+#
+# That is the whole list. blackb0x used to fork/exec iBoot32Patcher and
+# CBPatcher to patch iBSS/iBEC/kernel live, inside the window the device was
+# already sitting in pwned DFU. It consumes bake-firmware's output from dist/
+# now and patches nothing, so both patchers moved to `authoring` along with the
+# IPSW downloader and keys/ that only ever existed to serve patching.
+#
+# `authoring` is everything used to PRODUCE that firmware and to work on the
+# project: the baker, the vendored apt the baker resolves with, the test
+# target, and xpwn's own command-line tools.
+#
+# The split is by who runs it, not by how it is built. bake-firmware requires
+# root, needs Theos/afsctool/ldid/python3, and takes minutes; blackb0x needs
+# none of that. Keeping them apart means a machine that only ever runs the
+# jailbreak does not need the authoring toolchain installed at all.
+#
+# Note blackb0x does spawn bake-firmware (Cli.cpp) when a live run finds no
+# dist/ entry for the connected device's firmware. That is a convenience path,
+# not the main one -- the documented flow bakes ahead of time -- and it already
+# reports a clear error if the binary is absent. Building `jailbreak` alone is
+# therefore a real, supported configuration, not a broken one.
+#
+# `all` still builds everything, so a plain `cmake --build build` is unchanged.
+# The one exception stays apt (EXCLUDE_FROM_ALL, see its own block above): it
+# is a large C++ build needing Homebrew formulae nothing else here wants, so it
+# is pulled in by `authoring` explicitly rather than by `all`.
+# ---------------------------------------------------------------------------
+
+add_custom_target(jailbreak
+    DEPENDS blackb0x blackb0x-pwn
+    COMMENT "Built the jailbreak binaries (blackb0x and blackb0x-pwn)")
+
+add_custom_target(authoring
+    DEPENDS bake-firmware apt blackb0x_tests xpwntool iBoot32Patcher CBPatcher
+    COMMENT "Built the authoring tools (bake-firmware, vendored apt, tests, xpwntool)")

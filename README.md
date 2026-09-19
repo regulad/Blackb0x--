@@ -30,8 +30,13 @@ building.
 To build and run the jailbreak:
 
 ```sh
-brew install cmake autoconf automake libtool pkg-config
+brew install cmake autoconf automake libtool pkg-config gh
 ```
+
+`gh` is GitHub's CLI, and it is what lets `blackb0x` fetch a prebuilt firmware
+suite instead of baking one. Sign in once with `gh auth login`. Without it you
+can still jailbreak, but you have to bake the firmware yourself, which needs
+root and everything in the next list.
 
 To additionally build the authoring tools (firmware baker, vendored apt, tests):
 
@@ -75,15 +80,41 @@ user who invoked `sudo`, so you will not need `sudo` to read or delete your own
 build artifacts. The IPSW download cache is not covered by that; clean it with
 `sudo chown -R "$USER" ~/.local/share/blackb0x` if a root-owned cache gets in the way.
 
+## Firmware
+
+`blackb0x` sends a prepared firmware suite from `dist/`. It never patches anything
+itself. When `dist/` has no suite for the device and build it needs, it resolves one
+in this order and stops at the first that works:
+
+1. **Already in `dist/`.** Nothing is ever re-fetched or re-baked over an existing
+   suite, so a hand-built one always wins.
+2. **Downloaded from CI.** If `gh` is on your `PATH`, it pulls the suite published by
+   `.github/workflows/ci.yml`. No root, no Theos, no apt, no waiting. This is the
+   normal path and needs nothing from the authoring list.
+3. **Baked locally.** With no `gh` but running as root, it shells out to
+   `bake-firmware` and builds the suite itself. Minutes, and the full authoring
+   toolchain.
+
+Neither `gh` nor root is the one combination that cannot work, and it says so, with
+both fixes spelled out.
+
+Point it at a different repository's artifacts with `BLACKB0X_ARTIFACT_REPO`
+(`owner/name`), for a fork or a private mirror.
+
+CI currently bakes `AppleTV3,2` only. The other two devices have to be baked
+locally; `.claude/TODO.md` item 12 explains why.
+
 ## Jailbreaking
 
 0. **(3,1 only)** Pwn DFU with the Arduino first.
-1. Bake the firmware once:
+1. **(Optional.)** Nothing to do here if you have `gh` — `blackb0x` fetches the
+   firmware it needs on its first run, as described under "Firmware" above. To bake
+   it yourself instead:
    ```sh
    sudo env "PATH=$PATH" "THEOS=$THEOS" ./build/bake-firmware
    ```
    That does every known device/firmware combination. Narrow it with
-   `--device AppleTV3,2` and `--build 12H606`. Existing output is skipped unless you
+   `--device AppleTV3,2` and `--build 10B329a`. Existing output is skipped unless you
    pass `--force`.
 2. Connect the Apple TV by micro-USB **and** plug in its power cable.
 3. Run `./build/blackb0x`. Add `--dry-run` to preview without touching the device.
@@ -96,10 +127,6 @@ build artifacts. The IPSW download cache is not covered by that; clean it with
    It tunnels to the device's sshd over `usbmuxd` and installs your
    `~/.ssh/authorized_keys`, like `ssh-copy-id`. The device's default password is
    `root`/`alpine`. Needs no root. See its `--help` for options.
-
-`blackb0x` refuses to run against an empty `dist/`, and refuses any device/firmware
-with no matching entry. Bake the tuple you need rather than working around either
-check.
 
 ## Development
 

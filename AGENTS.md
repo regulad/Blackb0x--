@@ -264,6 +264,20 @@ same fix would apply, but that is a cache rather than build output.
   already exists. If it doesn't, `Cli.cpp` spawns `bake-firmware --only ramdisk` for
   that one tuple in the background. Re-running is cheap: any output that already
   exists is skipped unless you pass `--force`.
+**Where the firmware comes from.** `blackb0x` patches nothing and downloads no
+IPSW on the normal path; it sends a suite out of `dist/`. When one is missing,
+`ensureBakedFirmware()` (`Cli.cpp`) resolves it in a fixed order and stops at the
+first that works: already present, then `gh run download` of the artifact
+`.github/workflows/ci.yml` publishes, then — only if running as root — shelling
+out to `bake-firmware`. Neither `gh` nor root is the one case that cannot work,
+and it errors with both fixes spelled out rather than a bare failure.
+`$BLACKB0X_ARTIFACT_REPO` overrides which repository's artifacts are pulled.
+
+Nothing is ever re-fetched or re-baked over an existing `dist/` entry, so a
+hand-built suite always wins. This replaced a background `bake-firmware` spawn
+that ran concurrently with the download/patch pipeline; that pipeline no longer
+exists, so there was nothing left to overlap it with.
+
 - **`blackb0x`** drives everything else (DFU discovery, the exploit, uploads, checking
   jailbreak status over AFC2). No `geteuid() != 0` gate in `Cli.cpp`, and none needed —
   a real permission failure surfaces clearly from `libirecovery`'s own

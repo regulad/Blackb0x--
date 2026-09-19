@@ -389,39 +389,134 @@ bool checkExploit(DeviceManager& deviceManager, const AppleTVDevice& device, boo
 // spawns, streams output, and waits for the child before returning), this
 // needs to let the rest of downloadAndPatchComponents() keep running
 // concurrently with the bake — see that function's own call site for why.
-// The caller waitpid()s the returned pid later, at the actual join point.
-// Returns -1 only if fork() itself failed (reported here); a bad exec
-// (e.g. bake-firmware not found alongside blackb0x) instead surfaces
-// as an ordinary nonzero exit status once the caller waits on it, same as
-// any other missing-binary failure elsewhere in this codebase.
-//
-// --only ramdisk, not a full bake: this path exists solely because
-// patchRamdisk() needs a dist/ entry that isn't there. The bootchain half
-// would be pure waste here — this run patches iBSS/iBEC/kernel/DeviceTree
-// live itself (see below), and paying for a second, download-and-patch-heavy
-// pass would only slow down the bake that is actually blocking.
-static pid_t spawnBakeFirmwareBackground(const std::string& deviceModel, const std::string& buildID) {
-    std::string binPath = resolveBakeFirmwarePath();
-    std::vector<std::string> argvStrings = {binPath,     "--only",  "ramdisk", "--device",
-                                            deviceModel, "--build", buildID};
+// Manual PATH search for an executable, matching the no-shell convention used
+// elsewhere in this project (DeviceManager.cpp has the same helper).
+static bool commandExistsOnPath(const char* name) {
+    const char* pathEnv = getenv("PATH");
+    if (!pathEnv) return false;
+    std::string path(pathEnv);
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t colon = path.find(':', start);
+        std::string dir = path.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
+        if (!dir.empty() && access((dir + "/" + name).c_str(), X_OK) == 0) return true;
+        if (colon == std::string::npos) break;
+        start = colon + 1;
+    }
+    return false;
+}
+
+// fork/exec, wait, report. No shell, same as everywhere else here.
+static bool runForeground(const std::vector<std::string>& argv) {
     std::vector<char*> cargv;
-    cargv.reserve(argvStrings.size() + 1);
-    for (auto& a : argvStrings) cargv.push_back(const_cast<char*>(a.c_str()));
+    cargv.reserve(argv.size() + 1);
+    for (const auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
     cargv.push_back(nullptr);
 
     pid_t pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "Failed to fork() for a background bake-firmware run: %s\n", strerror(errno));
-        return -1;
+        fprintf(stderr, "Failed to fork() for %s: %s\n", argv[0].c_str(), strerror(errno));
+        return false;
     }
     if (pid == 0) {
-        execvp(binPath.c_str(), cargv.data());
-        // Only reached if exec itself failed (binary missing/not
-        // executable) — no fallback, the parent's later waitpid() will see
-        // this as a normal nonzero exit.
+        execvp(cargv[0], cargv.data());
+        fprintf(stderr, "Cannot execute %s: %s\n", cargv[0], strerror(errno));
         _exit(127);
     }
-    return pid;
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// Which repository's CI artifacts to pull a prebuilt firmware suite from.
+// Overridable so a fork, or a private mirror, does not need a code change.
+static std::string artifactRepo() {
+    if (const char* override_ = getenv("BLACKB0X_ARTIFACT_REPO")) return std::string(override_);
+    return "regulad/Blackb0x--";
+}
+
+// Makes sure dist/ holds a complete baked suite for this tuple, by whichever
+// of three routes is actually available. Returns false only when none of them
+// can produce one.
+//
+// The ordering is about what the user has to supply, cheapest first:
+//
+//   1. Already baked. Nothing to do -- and nothing is ever re-fetched or
+//      re-baked over an existing suite, so a hand-built dist/ always wins.
+//   2. `gh` on PATH. Download the suite .github/workflows/ci.yml already
+//      published. This is the normal end-user path and is the entire reason
+//      that pipeline exists: no root, no Theos, no apt, no ~30-minute bake.
+//   3. Running as root. Bake locally, which needs the whole authoring
+//      toolchain but no network beyond Apple's own servers.
+//
+// Not root and no gh is the one combination that cannot work, and it gets a
+// real explanation rather than a bare failure: the two things that would fix
+// it are genuinely different (install a CLI vs. re-run under sudo) and the
+// user has to pick.
+//
+// Deliberately synchronous. This used to fork a background bake and join it
+// later, overlapping it with the download/patch pipeline -- but that pipeline
+// is gone (blackb0x patches nothing now), so there is no concurrent work left
+// to hide it behind, and a jailbreak silently turning into a multi-minute
+// root-requiring bake was never a good surprise anyway.
+static bool ensureBakedFirmware(const std::string& deviceModel, const std::string& buildID) {
+    const std::string suffix = "-" + deviceModel + "_" + buildID;
+    auto present = [&]() {
+        return fs::exists("dist/Manifest" + suffix + ".txt") &&
+               fs::exists("dist/RestoreRamDisk" + suffix + ".dmg");
+    };
+
+    if (present()) return true;
+
+    printf("No baked firmware in dist/ for %s %s.\n", deviceModel.c_str(), buildID.c_str());
+    fflush(stdout);
+
+    if (commandExistsOnPath("gh")) {
+        const std::string artifact = "firmware-" + deviceModel;
+        printf("Fetching the prebuilt suite published by CI (%s, artifact %s)...\n",
+               artifactRepo().c_str(), artifact.c_str());
+        fflush(stdout);
+        std::error_code mkEc;
+        fs::create_directories("dist", mkEc);
+        // `gh run download` with no run id takes the most recent run that has
+        // an artifact by this name, which is what the monthly refresh
+        // produces. It unpacks the artifact's contents directly into -D, and
+        // the artifact is the flat dist/ layout already, so no rearranging.
+        if (runForeground({"gh", "run", "download", "--repo", artifactRepo(), "-n", artifact, "-D", "dist"}) &&
+            present()) {
+            printf("Downloaded a complete suite for %s %s.\n", deviceModel.c_str(), buildID.c_str());
+            return true;
+        }
+        fprintf(stderr,
+                "The published artifact did not yield a complete suite for %s %s.\n"
+                "  It may not have been baked for this device/build yet -- see the bake matrix in\n"
+                "  .github/workflows/ci.yml.\n",
+                deviceModel.c_str(), buildID.c_str());
+    }
+
+    if (geteuid() != 0) {
+        fprintf(stderr,
+                "\nCannot obtain a firmware suite for %s %s. Two ways forward:\n"
+                "\n"
+                "  Download one built by CI (no root, no toolchain):\n"
+                "    install GitHub's CLI and sign in --  brew install gh && gh auth login\n"
+                "    then re-run this command.\n"
+                "\n"
+                "  Or bake one yourself (needs root and the authoring tools):\n"
+                "    cmake --build build --target authoring -j$(sysctl -n hw.ncpu)\n"
+                "    sudo ./build/bake-firmware --device '%s' --build %s\n",
+                deviceModel.c_str(), buildID.c_str(), deviceModel.c_str(), buildID.c_str());
+        return false;
+    }
+
+    printf("Running as root and no gh available -- baking locally instead. This takes a few minutes.\n");
+    fflush(stdout);
+    if (!runForeground({resolveBakeFirmwarePath(), "--device", deviceModel, "--build", buildID}) || !present()) {
+        fprintf(stderr, "bake-firmware did not produce a complete suite for %s %s.\n",
+                deviceModel.c_str(), buildID.c_str());
+        return false;
+    }
+    return true;
 }
 
 // ManifestInfo / parseManifest() now live in IPSW.hpp/.cpp — shared with
@@ -475,39 +570,22 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     patcher.setBuildIdentity(manifest->buildIdentity);
     patcher.setBuildID(manifest->realBuildID);
 
-    // On the real jailbreak path (not stockRamdisk/stockFirmware's
-    // diagnostic routes below, which still
-    // need a real download+decrypt of RestoreRamdisk via useStockRamdisk()),
-    // patcher.patchRamdisk() below never actually reads a downloaded
-    // RestoreRamdisk at all -- it only ever looks at
-    // dist/<deviceModel>_<buildID>-Ramdisk.dmg (see its own comment in
-    // Patcher.cpp). Downloading RestoreRamdisk from Apple's servers for
-    // this path has therefore always been wasted work; it's skipped
-    // entirely now (see the RestoreRamdisk dispatch near the end of this
-    // function). Instead, check as early as possible -- right here, before
-    // any of the iBSS/iBEC/KernelCache/DeviceTree/RestoreLogo downloads
-    // below -- whether a fresh bake is actually needed for this exact
-    // (device, firmware) tuple, and kick one off in the background right
-    // now if so. That lets it run concurrently with this function's own
-    // remaining downloads/patches instead of blocking them --
-    // backgroundBakePid is only waitpid()'d much later, at the point
-    // RestoreRamdisk would previously have been dispatched, by which point
-    // it's had this entire function's remaining wall-clock time to finish.
+    // Resolve the firmware suite before touching any component, so a missing
+    // one fails here rather than several layers down as a generic "component
+    // not patched". ensureBakedFirmware() does the real work: already-present,
+    // else downloaded from CI, else baked locally if root -- see its own
+    // comment.
     //
-    // Self-baking is unconditional: it is native `hdiutil` (BakeRamdisk.cpp),
-    // needing neither a loop-mount nor root. It used to be gated on a
-    // predicate that existed only for the Linux loop-mount path's root
-    // requirement, falling through to patchRamdisk()'s own dist/-missing
-    // hard-exit when it said no; with Linux gone there is nothing to gate on.
+    // This used to kick off a background bake here and waitpid() it much later,
+    // overlapping it with this function's own downloads and patches. That
+    // pipeline is gone (blackb0x patches nothing now), so there is nothing left
+    // to overlap, and a synchronous call says plainly what is happening.
+    // Make sure a complete baked suite exists before touching any component.
+    // Skipped when a --stock-* route is stocking everything this would supply:
+    // those download Apple's own unmodified files instead and need no bake.
     bool needsRealRamdisk = !stockRamdisk && !stockFirmware;
-    pid_t backgroundBakePid = -1;
-    if (needsRealRamdisk && ramdiskBakeNeeded(device.deviceModel, manifest->realBuildID)) {
-        printf(
-            "No up-to-date baked ramdisk for %s %s -- building it now in the background while the rest of "
-            "this run continues.\n",
-            device.deviceModel.c_str(), manifest->realBuildID.c_str());
-        fflush(stdout);
-        backgroundBakePid = spawnBakeFirmwareBackground(device.deviceModel, manifest->realBuildID);
+    if (needsRealRamdisk && !ensureBakedFirmware(device.deviceModel, manifest->realBuildID)) {
+        return std::nullopt;
     }
 
     std::optional<PatchedComponents> result;
@@ -653,40 +731,10 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
         downloadAndPatch("RestoreRamdisk", manifest->restoreRamdiskPath,
                           [&](const std::string& path) { patcher.useStockRamdisk(path, stockRecovery); });
     } else {
-        // Real jailbreak path: nothing to download here at all (see the
-        // comment above where backgroundBakePid was set, right after
-        // this build's manifest was parsed). Join the background bake
-        // now, if one was started -- this is the actual join point: by
-        // now it's had this whole function's remaining download/patch
-        // pipeline as concurrent wall-clock time to finish, so this
-        // wait is often brief or immediate.
-        if (backgroundBakePid > 0) {
-            printf("Waiting for the background bake-firmware run (pid %d) to finish...\n",
-                   (int)backgroundBakePid);
-            fflush(stdout);
-            int status = 0;
-            if (waitpid(backgroundBakePid, &status, 0) < 0) {
-                fprintf(stderr, "Failed to wait for background bake-firmware (pid %d): %s\n",
-                        (int)backgroundBakePid, strerror(errno));
-            } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-                // Not necessarily fatal here -- patcher.patchRamdisk()
-                // right below does its own authoritative dist/
-                // existence + staleness check and will produce the
-                // real error/exit behavior if this genuinely didn't
-                // produce what's needed. Still worth surfacing loudly
-                // rather than swallowing, since a silent background
-                // failure would otherwise be indistinguishable from
-                // "nothing was needed" until that later check fires.
-                std::string how = WIFEXITED(status) ? ("exit code " + std::to_string(WEXITSTATUS(status)))
-                                                      : std::string("killed/crashed");
-                fprintf(stderr,
-                        "Background bake-firmware did not finish successfully (%s) -- continuing; the "
-                        "next step will fail clearly if it genuinely didn't produce what this run needs.\n",
-                        how.c_str());
-            } else {
-                printf("Background bake-firmware finished successfully.\n");
-            }
-        }
+        // Real jailbreak path: nothing to download here at all. The suite
+        // was resolved up front by ensureBakedFirmware() -- downloaded from
+        // CI, baked locally as root, or already present -- so this only has
+        // to point patchRamdisk() at it.
         patcher.patchRamdisk();
     }
 

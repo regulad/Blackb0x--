@@ -504,7 +504,50 @@ constant (see item 4a's own history, and item 8 below) — a bad pin for
 one specific device model could silently break every tuple of that
 model's dependency resolution without showing up anywhere else.
 
-## 7. CI/CD system for prebuilt, patched firmware suite
+## 7. CI/CD system for prebuilt, patched firmware suite (BUILT, unrun)
+
+**Done, in `.github/workflows/ci.yml`.** Two halves, matching the two build
+targets:
+
+- **`build`**, on every push and PR. `macos-15`, no root, no Theos, no bake.
+  Builds `jailbreak` then `authoring` separately so a failure reads as one or
+  the other, runs `ctest` plus the resolver's own tests, then asserts the
+  invariants that actually broke during the macOS port: no `/opt/homebrew` or
+  `/usr/local` in any shipped binary's `otool -L`, `entrypoint` still armv6 +
+  `LC_UNIXTHREAD` + no dyld, and the vendored apt actually runs.
+- **`bake`**, on schedule and manual dispatch only. Needs root, Theos and the
+  network -- exactly the requirements this exists to keep off an end user's
+  machine. One runner per device, `fail-fast: false`, so one device's failure
+  does not deny the other two their artifacts. Uploads `dist/` with 90-day
+  retention.
+
+**The 45-day cadence is a gate, not a cron.** Cron cannot express 45 days, so
+the schedule fires monthly and a separate `should_bake` job checks the age of
+the newest published `firmware-*` artifact, skipping unless it is 45 days or
+older. Firing more often and skipping is the safe direction; every two months
+would let artifacts go stale past the 45 days asked for. Monthly also stays
+clear of GitHub disabling schedules after 60 days of inactivity.
+
+**It bakes one build, not 95.** `kJailbreakTargetBuild` (`Cli.cpp`) pins
+`10B329a` as the ramdisk vehicle for every real run regardless of device, and
+all three devices have keys for it. Baking the full 95 would spend hours
+producing artifacts nothing requests. Widen the `--build` filter if that pin
+moves.
+
+**Unrun.** Written and validated with `actionlint` (which caught a real bug: a
+leading `!` on the dyld check disabled errexit, so a regression would have
+passed silently), and every check it performs was run locally against the real
+tree. But no GitHub runner has executed it. First real run is the test.
+
+Still open from the original note: whether publishing prebuilt jailbreak
+components anywhere public raises different considerations than this project's
+current "you build it yourself" posture. The workflow publishes to Actions
+artifacts, not a public release, which is the conservative end of that
+question but not an answer to it.
+
+Original note follows.
+
+## 7 (original). CI/CD system for prebuilt, patched firmware suite
 
 Not started. Every patched component this project produces (`dist/*.dmg`
 ramdisks, and whatever else `Patcher`'s patch* functions touch) is built

@@ -1,0 +1,218 @@
+# Build on every push; refresh the prebuilt firmware artifacts periodically.
+#
+# The point of the bake job is that an end user should never need root, Theos,
+# apt or a ~30-minute bake to jailbreak a device. bake-firmware produces
+# dist/, blackb0x consumes it, and the two halves have completely different
+# dependency sets -- see CMakeLists.txt's `jailbreak`/`authoring` targets.
+# This publishes dist/ so the authoring half never has to run on their machine.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force_bake:
+        description: "Bake even if the last artifacts are younger than 45 days"
+        type: boolean
+        default: false
+  schedule:
+    # Cron cannot express "every 45 days", so this fires monthly and the bake
+    # job's own age gate below decides whether there is anything to do. Firing
+    # more often than needed and skipping is the safe direction: the opposite
+    # (every two months) would let artifacts go stale past the 45 days asked
+    # for. Note GitHub disables scheduled workflows in repos with no activity
+    # for 60 days, which a monthly cadence stays clear of.
+    - cron: "0 5 1 * *"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Every push. Cheap: no root, no Theos, no network beyond the submodules.
+  build:
+    name: Build and test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # debcache/ is LFS. Without this the checkout is 107 pointer files
+          # and the failure only surfaces much later, as a bake that cannot
+          # read any package.
+          lfs: true
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake autoconf automake libtool pkg-config \
+                       ldid afsctool dpkg \
+                       berkeley-db@5 openssl@3 xxhash lz4 xz gettext
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      # Built separately and first so a failure here is legible as "the
+      # jailbreak half broke" rather than being buried in the authoring half's
+      # much longer output.
+      - name: Build jailbreak
+        run: cmake --build build --target jailbreak -j"$(sysctl -n hw.ncpu)"
+
+      - name: Build authoring
+        run: cmake --build build --target authoring -j"$(sysctl -n hw.ncpu)"
+
+      - name: Test
+        run: |
+          ctest --test-dir build --output-on-failure
+          python3 scripts/test_build_deb_cache_experimental_no_container.py
+
+      # Guards the invariants that actually broke during the macOS port, so a
+      # regression shows up here rather than on a device. See the commit that
+      # introduced them.
+      - name: Check the built artifacts
+        run: |
+          set -eux
+          # Nothing from Homebrew or /usr/local may reach the final binaries --
+          # every dependency is vendored and statically linked.
+          for bin in build/blackb0x build/blackb0x-pwn build/bake-firmware; do
+            if otool -L "$bin" | grep -qE '/opt/homebrew|/usr/local'; then
+              echo "$bin links something outside the system frameworks" >&2
+              otool -L "$bin" >&2
+              exit 1
+            fi
+          done
+          # entrypoint must stay a freestanding armv6 Mach-O: LC_UNIXTHREAD,
+          # and no dyld/libSystem at all. It runs as PID 1 on the ramdisk.
+          make -C entrypoint clean all
+          file entrypoint/entrypoint | grep -q 'Mach-O executable arm_v6'
+          otool -l entrypoint/entrypoint | grep -q LC_UNIXTHREAD
+          # Not `! otool ... | grep`: a leading ! disables errexit for that
+          # command (shellcheck SC2251), so a regression would scroll past and
+          # the step would still pass.
+          if otool -l entrypoint/entrypoint | grep -qE 'LC_LOAD_DYLIB|LC_LOAD_DYLINKER'; then
+            echo "entrypoint is no longer freestanding" >&2
+            exit 1
+          fi
+          # The vendored apt has to actually run, not just link.
+          # stderr is discarded on purpose: with no APT_CONFIG pointing at a
+          # synthetic root, apt correctly complains it cannot find a packaging
+          # system. --version still prints, which is all this asserts.
+          ./build/apt-tools/apt-get --version 2>/dev/null | grep -q 'darwin-arm'
+
+  # Whether the bake job has anything to do. Split out so the matrix below does
+  # not spin up three runners just to have each decide it should skip.
+  should_bake:
+    name: Check artifact age
+    # Same gate as the bake job below, so an ordinary push does not spin up a
+    # runner purely to decide there is nothing to bake.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      stale: ${{ steps.age.outputs.stale }}
+    steps:
+      - id: age
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run: baking regardless of age."
+            exit 0
+          fi
+          # Age of the newest firmware artifact this workflow has published.
+          # Artifacts expire, so "none found" correctly means "bake".
+          latest=$(gh api "repos/$REPO/actions/artifacts?per_page=100" \
+                     --jq '[.artifacts[] | select(.name | startswith("firmware-")) | .created_at] | max // empty')
+          if [ -z "$latest" ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "No firmware artifacts found: baking."
+            exit 0
+          fi
+          age_days=$(( ( $(date -u +%s) - $(date -u -d "$latest" +%s) ) / 86400 ))
+          echo "Newest firmware artifact is ${age_days} days old (published ${latest})."
+          if [ "$age_days" -ge 45 ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            echo "Younger than 45 days: nothing to refresh."
+          fi
+
+  # Scheduled and manual only. Needs root, Theos and the network, which is
+  # exactly the set of requirements this job exists to keep off end users'
+  # machines.
+  bake:
+    name: Bake ${{ matrix.device }}
+    needs: [build, should_bake]
+    if: needs.should_bake.outputs.stale == 'true'
+    runs-on: macos-15
+    strategy:
+      # One device per runner. The tuples are independent, and a failure on one
+      # device should not deny the other two their artifacts.
+      fail-fast: false
+      matrix:
+        device: ["AppleTV2,1", "AppleTV3,1", "AppleTV3,2"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          lfs: true
+
+      - name: Install build and bake dependencies
+        run: |
+          brew install cmake autoconf automake libtool pkg-config \
+                       ldid afsctool dpkg \
+                       berkeley-db@5 openssl@3 xxhash lz4 xz gettext
+
+      # build.sh only ever calls bin/dm.pl, which is a standalone Perl script
+      # using core modules only (checked: English, File::Find, File::Spec, Cwd,
+      # Getopt::Long, Pod::Usage, Archive::Tar, IPC::Open2). No toolchain, no
+      # submodules, so a shallow clone is enough.
+      - name: Install Theos (dm.pl only)
+        run: git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+
+      - name: Build the authoring tools
+        run: |
+          cmake -S . -B build
+          cmake --build build --target authoring -j"$(sysctl -n hw.ncpu)"
+
+      # Only the build blackb0x actually requests. kJailbreakTargetBuild
+      # (Cli.cpp) pins one fixed ramdisk-vehicle build for every real run
+      # regardless of device model, so baking all 95 known tuples would spend
+      # hours producing artifacts nothing asks for. Widen the --build filter
+      # here if that pin ever moves.
+      #
+      # sudo env: bake-firmware requires root, and sudo does not preserve PATH,
+      # so Homebrew's ldid/afsctool/dpkg-scanpackages would vanish. THEOS is
+      # passed explicitly for the same reason.
+      - name: Bake
+        run: |
+          sudo env "PATH=$PATH" "THEOS=$HOME/theos" \
+            ./build/bake-firmware --device '${{ matrix.device }}' --build 10B329a
+
+      - name: Check the bake produced a complete, uploadable suite
+        run: |
+          set -eux
+          suffix="-${{ matrix.device }}_10B329a"
+          for c in iBSS iBEC KernelCache DeviceTree; do
+            test -s "dist/${c}${suffix}"
+          done
+          test -s "dist/RestoreRamDisk${suffix}.dmg"
+          test -s "dist/Manifest${suffix}.txt"
+          # The 64 MiB ceiling is a real hardware limit (a live AppleTV3,2
+          # short-writes at exactly 0x4000000), and bake-firmware already
+          # hard-fails past it. Re-checked here so an artifact that cannot be
+          # uploaded to a device never reaches a release.
+          size=$(stat -f%z "dist/RestoreRamDisk${suffix}.dmg")
+          echo "ramdisk is $size bytes ($((size / 1048576)) MiB)"
+          test "$size" -le $((64 * 1024 * 1024))
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.device }}
+          path: dist/
+          # Comfortably longer than the 45-day refresh cadence, so there is
+          # always a published set even if a scheduled run fails.
+          retention-days: 90
+          if-no-files-found: error

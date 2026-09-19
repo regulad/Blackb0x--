@@ -151,6 +151,22 @@ static const unsigned char fbtext_font8x8[95][8] = {
  * throughout — see the header comment on why nothing here blends. */
 #define FBTEXT_WHITE 0xFFFFFFFFu
 #define FBTEXT_BLACK 0xFF000000u
+/* NOT A COLOUR — a sentinel meaning "leave this pixel exactly as it is".
+ *
+ * Used as a console's background. With it, a row clear does nothing and a
+ * glyph writes only the pixels the glyph is actually made of, so text lands
+ * ON TOP of whatever the display already shows — the Apple logo, a progress
+ * bar, another layer's content — instead of inside a rectangle we painted.
+ *
+ * This exists because the alternative was measured. Clearing rows to opaque
+ * black turned a transparent compositor layer into a solid black sheet over
+ * nearly the whole frame, and the TV went black. Not writing is strictly
+ * safer than writing any colour, because there is no colour that is correct
+ * on a surface whose contents belong to another process.
+ *
+ * The value is a BGRA one no caller would ever mean (alpha 0, blue 1), so a
+ * real colour can never collide with it. */
+#define FBTEXT_NOFILL 0x00000001u
 #define FBTEXT_RED   0xFFFF3B30u
 #define FBTEXT_AMBER 0xFFFFCC00u
 
@@ -163,7 +179,9 @@ typedef struct {
 } fbtext_surface;
 
 /* One glyph, scaled by an integer factor, clipped to the surface edge.
- * Writes every pixel of the scale*8 x scale*8 cell. */
+ * Writes every pixel of the scale*8 x scale*8 cell — unless `bg` is
+ * FBTEXT_NOFILL, in which case only the lit pixels of the glyph are written
+ * and the rest of the cell keeps whatever was already on the display. */
 static void fbtext_glyph(const fbtext_surface *s, int px, int py, int scale,
                          unsigned char c, uint32_t fg, uint32_t bg)
 {
@@ -180,7 +198,10 @@ static void fbtext_glyph(const fbtext_surface *s, int px, int py, int scale,
             if (y < 0 || (uint32_t)y >= s->height) continue;
             p = (uint32_t *)(s->base + (size_t)y * s->stride);
             for (col = 0; col < 8; col++) {
-                uint32_t v = (g[row] & (1u << col)) ? fg : bg;
+                int lit = (g[row] & (1u << col)) != 0;
+                uint32_t v;
+                if (!lit && bg == FBTEXT_NOFILL) continue;
+                v = lit ? fg : bg;
                 for (sx = 0; sx < scale; sx++) {
                     x = px + col * scale + sx;
                     if (x < 0 || (uint32_t)x >= s->width) continue;
@@ -262,10 +283,18 @@ static int fbtext_scale_for(uint32_t width)
     return scale;
 }
 
-/* Paint one glyph-row band of the text area to `colour`. */
+/* Paint one glyph-row band of the text area to `colour`, or do nothing at all
+ * if that "colour" is FBTEXT_NOFILL — which is the normal case now. Not
+ * clearing means a reused row overdraws the one before it rather than
+ * replacing it; that is accepted, because the scrolling region is about forty
+ * rows and a diagnostic run prints well under that, while the status row
+ * rewrites itself with a CONSTANT string, so its repeats land on identical
+ * pixels. Blanking the display is the worse failure by a wide margin. */
 static void fbtext_clear_row(const fbtext_console *c, int row, uint32_t colour)
 {
     int cell = 8 * c->scale;
+
+    if (colour == FBTEXT_NOFILL) return;
     int wpx  = c->cols * cell;
     int y;
     for (y = c->y0 + row * cell; y < c->y0 + (row + 1) * cell; y++) {
@@ -287,7 +316,7 @@ static int fbtext_console_init(fbtext_console *c, const fbtext_surface *s)
     c->x0    = (int)(s->width  / FBTEXT_INSET_DIVISOR);
     c->y0    = (int)(s->height / FBTEXT_INSET_DIVISOR);
     c->fg    = FBTEXT_WHITE;
-    c->bg    = FBTEXT_BLACK;
+    c->bg    = FBTEXT_NOFILL;   /* draw over what is there; see the sentinel */
     c->line  = 0;
 
     cell      = 8 * c->scale;

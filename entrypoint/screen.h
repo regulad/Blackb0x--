@@ -179,6 +179,7 @@ enum { SCREEN_SEARCHING = 0, SCREEN_ATTACHED = 1, SCREEN_GAVE_UP = -1 };
 static int            g_screenState = SCREEN_SEARCHING;
 static IOSurfaceRef   g_screenSurface[SCREEN_MAX_TARGETS];
 static fbtext_console g_screenCon[SCREEN_MAX_TARGETS];
+static unsigned       g_screenAlpha[SCREEN_MAX_TARGETS];
 static int            g_screenCount;
 static time_t         g_screenDeadline;
 static time_t         g_screenLastTry;
@@ -244,7 +245,8 @@ reject:
  * between them — see "WHICH SURFACE" in the header comment for why choosing
  * was the bug. Returns how many were kept; `refs` and `out` are filled in
  * parallel and the caller owns each ref. */
-static int screen_find(IOSurfaceRef *refs, fbtext_surface *out, int max)
+static int screen_find(IOSurfaceRef *refs, fbtext_surface *out, unsigned *alphas,
+                       int max)
 {
     int n = 0;
     IOSurfaceID id;
@@ -254,8 +256,9 @@ static int screen_find(IOSurfaceRef *refs, fbtext_surface *out, int max)
         unsigned alpha0 = 0;
         IOSurfaceRef s = screen_probe(id, &cand, &alpha0);
         if (!s) continue;
-        refs[n] = s;
-        out[n]  = cand;
+        refs[n]   = s;
+        out[n]    = cand;
+        alphas[n] = alpha0;
         n++;
     }
     return n;
@@ -307,6 +310,7 @@ static void screen_attach_try(void)
     int lastChance;
     fbtext_surface surf[SCREEN_MAX_TARGETS];
     IOSurfaceRef refs[SCREEN_MAX_TARGETS];
+    unsigned alpha[SCREEN_MAX_TARGETS];
     int found, i, kept = 0;
 
     if (g_screenState != SCREEN_SEARCHING) return;
@@ -315,7 +319,7 @@ static void screen_attach_try(void)
     if (!lastChance && now == g_screenLastTry) return;  /* at most 1/sec */
     g_screenLastTry = now;
 
-    found = screen_find(refs, surf, SCREEN_MAX_TARGETS);
+    found = screen_find(refs, surf, alpha, SCREEN_MAX_TARGETS);
 
     if (found == 0) {
         if (lastChance) {
@@ -327,7 +331,21 @@ static void screen_attach_try(void)
         return;
     }
 
-    /* Keep the ones a console actually fits in; release the rest. */
+    /* Keep the ones a console actually fits in; release the rest.
+     *
+     * NOTHING HERE PAINTS A BACKGROUND — see FBTEXT_NOFILL, which every
+     * console now uses. That is the lesson of the second hardware run:
+     * painting all the layers was right, but every console also cleared its
+     * rows to OPAQUE BLACK, which turned a transparent compositor layer into
+     * a solid black sheet over nearly the whole frame and took the TV to
+     * black. The text was doing its job; the rectangle behind it was not.
+     * Glyphs are drawn on top of whatever is already on screen and every
+     * other pixel is left alone, so the failure mode "our debug channel
+     * blanked the display" is gone rather than mitigated.
+     *
+     * The alpha read at (0,0) no longer decides anything, and is kept only
+     * because it is the one cheap observation we have of how these layers are
+     * actually composited — it goes on screen below. */
     for (i = 0; i < found; i++) {
         if (!fbtext_console_init(&g_screenCon[kept], &surf[i])) {
             printf("screen: IOSurface id=%u is %ux%u, too small for a console — skipped\n",
@@ -335,6 +353,7 @@ static void screen_attach_try(void)
             CFRelease(refs[i]);
             continue;
         }
+        g_screenAlpha[kept]   = alpha[i];
         g_screenSurface[kept] = refs[i];
         kept++;
     }
@@ -351,6 +370,25 @@ static void screen_attach_try(void)
 
     printf("screen: attached to %d surface(s), %dx%d chars at scale %d\n",
            kept, g_screenCon[0].cols, g_screenCon[0].rows, g_screenCon[0].scale);
+
+    /* And say the same thing ON THE SCREEN, one line per target. Everything
+     * this file has ever reported about which surfaces it found went to
+     * stdout, i.e. to /dev/console, i.e. — as two hardware runs established —
+     * nowhere. The layer layout is the single fact that would most change
+     * what we do next, so it goes where it can actually be read. */
+    {
+        char note[SCREEN_LINE_MAX];
+        snprintf(note, sizeof(note), "screen: %d surface(s), %dx%d chars, scale %d",
+                 kept, g_screenCon[0].cols, g_screenCon[0].rows, g_screenCon[0].scale);
+        SCREEN_FOR_EACH(fbtext_console_line(con, note));
+        for (i = 0; i < kept; i++) {
+            snprintf(note, sizeof(note), "  id=%u %ux%u stride=%u alpha=0x%02x",
+                     (unsigned)IOSurfaceGetID(g_screenSurface[i]),
+                     g_screenCon[i].s.width, g_screenCon[i].s.height,
+                     (unsigned)g_screenCon[i].s.stride, g_screenAlpha[i]);
+            SCREEN_FOR_EACH(fbtext_console_line(con, note));
+        }
+    }
 
     /* Replay everything said before the display existed. This is why the
      * poll does not have to block. */

@@ -576,9 +576,10 @@ and 64 MiB was confirmed against a live AppleTV3,2 as at-or-very-near the real l
 `.github/workflows/ci.yml`. `build` runs on every push: both build groups, both
 test suites, plus assertions on the invariants that broke during the macOS port
 (no Homebrew paths in any shipped binary, `entrypoint` still freestanding
-armv6, vendored apt actually runs). `bake` runs on a schedule and on manual
-dispatch only, one runner per device, and publishes `dist/` as artifacts so end
-users never need root or the authoring toolchain.
+armv6, vendored apt actually runs). `bake` runs on every push (plus the schedule
+and manual dispatch, but never on a pull request, since it runs the branch's
+code under sudo), one runner per device, and publishes `dist/` as artifacts so
+end users never need root or the authoring toolchain.
 
 Artifacts refresh on the 23rd of every month.
 

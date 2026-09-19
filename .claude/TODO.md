@@ -515,11 +515,12 @@ targets:
   invariants that actually broke during the macOS port: no `/opt/homebrew` or
   `/usr/local` in any shipped binary's `otool -L`, `entrypoint` still armv6 +
   `LC_UNIXTHREAD` + no dyld, and the vendored apt actually runs.
-- **`bake`**, on schedule and manual dispatch only. Needs root, Theos and the
-  network -- exactly the requirements this exists to keep off an end user's
-  machine. One runner per device, `fail-fast: false`, so one device's failure
-  does not deny the other two their artifacts. Uploads `dist/` with 90-day
-  retention.
+- **`bake`**, on every push plus the monthly schedule and manual dispatch.
+  Needs root, Theos and the network -- exactly the requirements this exists to
+  keep off an end user's machine. One runner per device, `fail-fast: false`,
+  so one device's failure does not deny the other two their artifacts. Uploads
+  `dist/` with 90-day retention. Skipped on `pull_request` only: it runs the
+  branch's code under sudo, and a fork PR is untrusted by definition.
 
 **Refreshed on the 23rd of every month** (`cron: "0 5 23 * *"`). An earlier
 draft approximated a 45-day interval with a monthly cron plus a job that

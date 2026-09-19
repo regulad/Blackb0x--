@@ -1,4 +1,4 @@
-# Build on every push; refresh the prebuilt firmware artifacts periodically.
+# Build and bake on every push; refresh the artifacts monthly besides.
 #
 # The point of the bake job is that an end user should never need root, Theos,
 # apt or a ~30-minute bake to jailbreak a device. bake-firmware produces
@@ -90,13 +90,17 @@ jobs:
           # system. --version still prints, which is all this asserts.
           ./build/apt-tools/apt-get --version 2>/dev/null | grep -q 'darwin-arm'
 
-  # Scheduled and manual only. Needs root, Theos and the network, which is
-  # exactly the set of requirements this job exists to keep off end users'
-  # machines.
+  # Runs on every push, plus the monthly schedule and manual dispatch. Needs
+  # root, Theos and the network, which is exactly the set of requirements this
+  # job exists to keep off end users' machines.
+  #
+  # Not on pull_request: this executes the branch's own code under sudo, and a
+  # fork PR is untrusted by definition. Pushes to this repo are not, and the
+  # schedule covers refreshing artifacts when nothing has been pushed.
   bake:
     name: Bake ${{ matrix.device }}
     needs: build
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     runs-on: macos-15
     strategy:
       # One device per runner. The tuples are independent, and a failure on one

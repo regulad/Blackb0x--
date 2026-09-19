@@ -6,7 +6,7 @@ everything from it worth keeping for provenance/reference lives instead.
 No original source tarball is needed going forward anymore — see
 "Original tarballs" below: every one, including `tihmstar-untether.tar`
 (now superseded by the real `net.tihmstar.etasonuntether-1.3.1.deb` in
-`Blackb0x/Debs/` — see "etasonATV / tihmstar-untether provenance" below)
+`debcache/` — see "etasonATV / tihmstar-untether provenance" below)
 and `RamdiskBins.tar` (unpacked into `bin/`), has been dropped — with one
 exception: `untether.bin` itself, kept standalone (see below), since it's
 an open forensic question in its own right, not just install-time payload.
@@ -64,8 +64,8 @@ this is where its provenance/behavior is explained. It's the resolved
 output of running `Blackb0x/Misc/packages.txt` (a flat package-name list)
 through real `apt` dependency resolution against this project's own
 `*.list` sources: the exact, deduplicated set of `.deb` filenames under
-`Blackb0x/Debs/` that actually get copied into the ramdisk overlay's
-`files/debs/` — not the whole (append-only, never-pruned) `Blackb0x/Debs/`
+`debcache/` that actually get copied into the ramdisk overlay's
+`files/debs/` — not the whole (append-only, never-pruned) `debcache/`
 directory, which accumulates every version ever fetched.
 
 Running it against the current `packages.txt` resolves all but one name
@@ -86,7 +86,7 @@ Two more names never even attempt live apt resolution at all —
 `Blackb0x/Misc/local_only_debs.txt`'s own mechanism, a real local
 `file://` repo built from `.deb`s this project already has:
 `essential`, genuinely not found in any of the five configured repos
-today despite `Blackb0x/Debs/essential_0-1_iphoneos-arm.deb` already
+today despite `debcache/essential_0-1_iphoneos-arm.deb` already
 existing here from some earlier, no-longer-reachable source; and
 `net.tihmstar.etasonuntether`, whose real Packages stanza on
 `repo.tihmstar.net` *does* exist (it would genuinely resolve there,
@@ -109,7 +109,7 @@ warn on every future build forever.
 
 `ssh.tar`, `p0sixspwn.tgz`, `tihmstar-untether.tar`, `Debs.tar`,
 `ATV-Cydia.tgz`, `RamdiskBins.tar` — each one's only still-relevant content
-is already preserved elsewhere, individually, below or in `Blackb0x/Debs/`:
+is already preserved elsewhere, individually, below or in `debcache/`:
 
 - `ssh.tar` — its only known content was static SSH host keys, already
   deleted for real (not just here) as a security fix: shipping identical
@@ -118,12 +118,12 @@ is already preserved elsewhere, individually, below or in `Blackb0x/Debs/`:
   instead (see `docs/HISTORY.md`).
 - `p0sixspwn.tgz` — its persistence payload is superseded by the real
   `com.ih8sn0w-squiffy-winocm.p0sixspwn_1.4-1_iphoneos-arm.deb` in
-  `Blackb0x/Debs/`.
+  `debcache/`.
 - `tihmstar-untether.tar` — tihmstar's EtasonATV untether payload (see
   "etasonATV / tihmstar-untether provenance" below), long believed to have
   no independently re-downloadable source. Superseded once the real,
   long-lost `net.tihmstar.etasonuntether-1.3.1.deb` itself turned up (now
-  in `Blackb0x/Debs/`) — `BakeRamdisk.cpp`'s `stageEtasonatv()` extracts the
+  in `debcache/`) — `BakeRamdisk.cpp`'s `stageEtasonatv()` extracts the
   same four files straight out of that `.deb` instead of this tarball now.
   One file from it — `untether/untether.bin` — is kept as a standalone copy
   at `Blackb0x/Misc/untether.bin` even though nothing installs it anymore:
@@ -136,7 +136,7 @@ is already preserved elsewhere, individually, below or in `Blackb0x/Debs/`:
   `orig_untether.bin` (its unpatched 2021-04-17 predecessor, differing in
   15 branch-immediate bytes) is not duplicated here — recoverable from this
   same tarball via git history (`git show <pre-removal commit>:Blackb0x/Files/tihmstar-untether.tar`) if that comparison needs re-running.
-- `Debs.tar` — originally seeded `Blackb0x/Debs/`'s `.deb` set; that
+- `Debs.tar` — originally seeded `debcache/`'s `.deb` set; that
   directory is the real, current source of truth now, not the tarball.
 - `ATV-Cydia.tgz` — its only content still in use by anything (4 files) is
   extracted individually below; the rest of this ~15MB tarball was a flat,
@@ -202,11 +202,11 @@ missing from a real device in the first place, so there was never
 anything for a package to provide.
 
 **`ldid` and `otool` deliberately excluded**: the real `ldid` .deb
-(`Blackb0x/Debs/ldid_1.2.1_iphoneos-arm.deb`, already in
+(`debcache/ldid_1.2.1_iphoneos-arm.deb`, already in
 `packages.txt`) provides `ldid`, and saurik's `odcctools` package
 (confirmed by extracting `odcctools_286-8_iphoneos-arm.deb` directly from
 `apt.saurik.com` — real `./usr/bin/otool` inside) provides `otool` — added
-to `packages.txt`, not yet fetched into `Blackb0x/Debs/` (that happens
+to `packages.txt`, not yet fetched into `debcache/` (that happens
 automatically, the next time `scripts/build_deb_cache.py` runs, the same as
 any other name added there). Nothing needs a raw copy of either before
 `postinstall.sh` gets a chance to install the real packages — see
@@ -241,7 +241,7 @@ reads and its only consumer swaps into `/usr/libexec/dirhelper` as the
 iOS7/8.x-(non-8.4) persistence exploit itself — real Apple/Cydia code
 never touches that path at all. Don't confuse it with `p0sixspwn`'s own,
 entirely separate `dirhelper` payload
-(`Blackb0x/Debs/com.ih8sn0w-squiffy-winocm.p0sixspwn`'s own
+(`debcache/com.ih8sn0w-squiffy-winocm.p0sixspwn`'s own
 `usr/libexec/dirhelper`, installed via a different call for the 6.1.4
 branch — confirmed genuinely different files, not the same binary shared
 by coincidence: a real 50KB Mach-O vs. p0sixspwn's own 262-byte bash
@@ -375,7 +375,7 @@ listing that also holds unrelated payloads.
   against `Release.gpg` using this exact key — "Good signature".
 - `apt/saurik.list` — `deb http://apt.saurik.com/ ios/8.0 main`, saurik's own
   default Cydia/Telesphoreo repo (this is where `dpkg`, `syslogd`, and most
-  of the rest of the base package set in `Blackb0x/Debs/` actually came
+  of the rest of the base package set in `debcache/` actually came
   from — confirmed, not assumed: `dists/ios/8.0/main/binary-iphoneos-arm/
   Packages` lists `dpkg_1.18.10-12_iphoneos-arm.deb`, byte-identical to what's
   already vendored here). `ios/8.0` (not `ios/6.0`/`ios/7.0`) specifically:
@@ -461,7 +461,7 @@ listing that also holds unrelated payloads.
   `com.nito.nitotv_0.8.7-33_iphoneos-arm.deb` (the current latest),
   `com.nito.tssagent_1.3-18_iphoneos-arm.deb` (a dependency), and
   `com.firecore.freemem-watcher_1.0-2_iphoneos-arm.deb` (another dependency)
-  to `Blackb0x/Debs/` and `com.nito.nitotv`/`com.nito.tssagent`/
+  to `debcache/` and `com.nito.nitotv`/`com.nito.tssagent`/
   `com.firecore.freemem-watcher` to `packages.txt` — all downloaded and
   byte-verified against `apt.awkwardtv.org`'s own `Packages` index (MD5
   match), and structurally verified (`ar`/`tar` extract cleanly).
@@ -474,7 +474,7 @@ listing that also holds unrelated payloads.
   actual `syslogd` binary is Apple's own, already on the device; this
   package exists purely to satisfy the dependency by name) by saurik
   himself, at `http://apt.saurik.com/debs/syslogd_1.1.1_iphoneos-arm.deb`
-  (found by the user). Added `Blackb0x/Debs/syslogd_1.1.1_iphoneos-arm.deb`
+  (found by the user). Added `debcache/syslogd_1.1.1_iphoneos-arm.deb`
   and `syslogd` to `packages.txt`, byte-verified against that URL, and
   confirmed present with an identical MD5 in `saurik.list`'s own `Packages`
   index too (see below) — with `syslogd` no longer missing, `0.8.7-33`'s
@@ -677,7 +677,7 @@ uses — since finding it alive at all this many years on was already a
 surprise, there's no telling how long that stays true. All 35 entries in
 its `Packages`/`Packages.gz` index returned a real `200` (nothing 40x'd),
 and every one MD5- and size-verified against the index's own manifest
-before being added to `Blackb0x/Debs/`. Beyond the four already documented
+before being added to `debcache/`. Beyond the four already documented
 above (`net.tihmstar.etasonuntether-1.3.1.deb`,
 `net.tihmstar.daemonloader-1.0.0.deb`, `net.tihmstar.untetherhomedepot.deb`,
 `net.tihmstar.untetherhomedepotoffsets.deb`), this pulled in tihmstar's
@@ -773,9 +773,9 @@ of anything `postinstall.sh` or the new C++ code does later:
 
 The binary does an exact filename match before it will move a `.deb` into
 place — it doesn't glob or fuzzy-match. Comparing its 8 pinned filenames
-against what's actually in `Blackb0x/Debs/` today:
+against what's actually in `debcache/` today:
 
-| pinned by `sbin/launchd` | currently in `Blackb0x/Debs/` | same content? |
+| pinned by `sbin/launchd` | currently in `debcache/` | same content? |
 |---|---|---|
 | `beigelist_2.2.6-30_iphoneos-arm.deb` | same | yes, exact match |
 | `com.nito.updatebegone_0.2-1_iphoneos-arm.deb` | same | yes, exact match |

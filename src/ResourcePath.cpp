@@ -112,11 +112,11 @@ std::string resolvePackageRoot() {
     return "package";
 }
 
-std::string resolveDebsPath() {
-    if (const char* override_ = getenv("BLACKB0X_DEBS_DIR")) {
+std::string resolveDebcachePath() {
+    if (const char* override_ = getenv("BLACKB0X_DEBCACHE_DIR")) {
         return std::string(override_);
     }
-    return "Blackb0x/Debs";
+    return "debcache";
 }
 
 std::string resolveMiscPath(const std::string& relativePath) {

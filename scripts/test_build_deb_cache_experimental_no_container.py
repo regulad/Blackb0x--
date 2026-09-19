@@ -187,7 +187,7 @@ class ResolveAlgorithmTests(unittest.TestCase):
 
 
 class EndToEndCliTests(unittest.TestCase):
-    """Runs main() against a fully synthetic Blackb0x/Debs/-equivalent
+    """Runs main() against a fully synthetic debcache/-equivalent
     fixture, monkeypatching the module's own path constants -- validates
     the real file I/O and output format, not just the algorithm."""
 

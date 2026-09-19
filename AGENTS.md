@@ -87,11 +87,17 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   `/var/.blackb0x/local-debs`, for anything no live repo serves). The package
   needs no state beyond this tree — `bakeRamdisk()` builds it and installs the
   resulting `.deb` rather than hand-staging its contents.
-- `Blackb0x/Debs/` — loose `.deb` packages the bake consumes: the source for both
-  the bundled local repo and the apt debcache staged onto the ramdisk. Real
-  package archives, not loose files mirroring a destination path. The eventual
-  goal is to source these from real Cydia repos rather than checking in the
-  `.deb` bytes.
+- `debcache/` — the checked-in `.deb` cache (107 packages, ~58MB), at the repo
+  root because it is a build input in its own right, not Blackb0x app data.
+  The bake consumes it for both the bundled local repo and the apt cache staged
+  onto the ramdisk; real package archives, not loose files mirroring a
+  destination path. **Generated on Linux, consumed everywhere.**
+  `scripts/build_deb_cache.py` grows it with a real apt-get dependency solve
+  inside podman and hard-refuses to run off Linux; a GitHub Action is the
+  intended way to run it. No bake ever calls it — every bake reads the
+  committed bytes, resolving the closure over them with
+  `scripts/build_deb_cache_experimental_no_container.py`, which only reads.
+  It used to be `Blackb0x/Debs/`.
 - `dist/` — bake-firmware's output (gitignored, not checked in): one
   `<device>_<buildID>-Ramdisk.dmg` per known firmware, plus
   `bootchain/<device>_<buildID>/` holding that firmware's patched
@@ -227,7 +233,7 @@ host something macOS already has natively: Apple's `ld64`/`as` (via `cctools-por
 for `entrypoint/`, a box with Theos on it for the `.deb`, and `p7zip` for the
 by-hand extraction helpers. `scripts/build_deb_cache.py` is the one thing that still
 wants podman — it is a Linux-only maintenance tool, never invoked by a build or a
-bake, kept only because growing `Blackb0x/Debs/` needs a real apt-get solve. See its
+bake, kept only because growing `debcache/` needs a real apt-get solve. See its
 own header.
 - `usbmuxd` — macOS's own built-in daemon; Normal-mode discovery has nothing to talk
   to without it. (Linux additionally needed it run with `--no-preflight` via a systemd

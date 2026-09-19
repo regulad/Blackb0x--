@@ -56,15 +56,15 @@ static void testResolveImageKeyPathOverride() {
     unsetenv("BLACKB0X_IMAGEKEYS_DIR");
 }
 
-static void testResolveDebsPathDefault() {
-    unsetenv("BLACKB0X_DEBS_DIR");
-    expect(resolveDebsPath() == "Blackb0x/Debs", "resolveDebsPath() defaults to Blackb0x/Debs");
+static void testResolveDebcachePathDefault() {
+    unsetenv("BLACKB0X_DEBCACHE_DIR");
+    expect(resolveDebcachePath() == "debcache", "resolveDebcachePath() defaults to debcache");
 }
 
-static void testResolveDebsPathOverride() {
-    setenv("BLACKB0X_DEBS_DIR", "/tmp/some-debs-override", 1);
-    expect(resolveDebsPath() == "/tmp/some-debs-override", "resolveDebsPath honors BLACKB0X_DEBS_DIR");
-    unsetenv("BLACKB0X_DEBS_DIR");
+static void testResolveDebcachePathOverride() {
+    setenv("BLACKB0X_DEBCACHE_DIR", "/tmp/some-debs-override", 1);
+    expect(resolveDebcachePath() == "/tmp/some-debs-override", "resolveDebcachePath honors BLACKB0X_DEBCACHE_DIR");
+    unsetenv("BLACKB0X_DEBCACHE_DIR");
 }
 
 static void testDecryptedDMGFor() {
@@ -91,11 +91,11 @@ static void testOverlayHasRequiredFiles() {
 // setup.sh's hardcoded `mv`/`dpkg -i` targets — if a deb ever gets renamed
 // without updating setup.sh (or vice versa), this catches the drift
 // immediately instead of failing silently on-device. Debs live in their
-// own Blackb0x/Debs/ root (see ResourcePath::resolveDebsPath()), not inside
+// own debcache/ root (see ResourcePath::resolveDebcachePath()), not inside
 // the ramdisk/ overlay tree — bakeRamdisk() merges both into /files/.
-static void testDebsHasRequiredFiles() {
-    unsetenv("BLACKB0X_DEBS_DIR");
-    fs::path root = resolveDebsPath();
+static void testDebcacheHasRequiredFiles() {
+    unsetenv("BLACKB0X_DEBCACHE_DIR");
+    fs::path root = resolveDebcachePath();
     const std::vector<std::string> required = {
         "rtadvd_307.0.1-3_iphoneos-arm.deb",
         "sqlite3-dylib_3.5.9-2_iphoneos-arm.deb",
@@ -107,7 +107,7 @@ static void testDebsHasRequiredFiles() {
         "com.nito.updatebegone_0.2-1_iphoneos-arm.deb",
     };
     for (const auto& rel : required) {
-        expect(fs::exists(root / rel), "Blackb0x/Debs is missing " + rel);
+        expect(fs::exists(root / rel), "debcache is missing " + rel);
     }
 }
 
@@ -150,7 +150,7 @@ static void testNoDeadDirhelperDuplicate() {
 // Regression guard: files/cydia and files/p0sixspwn used to be an unrolled
 // snapshot of every file a dpkg .list claimed, including dpkg's own state
 // directory. All of that is now supplied at bake time from the real .deb
-// packages in Blackb0x/Debs/ (see bakeRamdisk()), so none of it belongs in
+// packages in debcache/ (see bakeRamdisk()), so none of it belongs in
 // the checked-in overlay tree.
 static void testOverlayHasNoDebOwnedFiles() {
     unsetenv("BLACKB0X_RAMDISK_DIR");
@@ -162,7 +162,7 @@ static void testOverlayHasNoDebOwnedFiles() {
         "files/p0sixspwn/usr/libexec/dirhelper",
     };
     for (const auto& rel : mustNotExist) {
-        expect(!fs::exists(root / rel), "ramdisk overlay has a deb-owned file that should come from Blackb0x/Debs/ instead: " + rel);
+        expect(!fs::exists(root / rel), "ramdisk overlay has a deb-owned file that should come from debcache/ instead: " + rel);
     }
 }
 
@@ -187,11 +187,11 @@ int main() {
     testResolveRamdiskPathOverride();
     testResolveImageKeyPathDefault();
     testResolveImageKeyPathOverride();
-    testResolveDebsPathDefault();
-    testResolveDebsPathOverride();
+    testResolveDebcachePathDefault();
+    testResolveDebcachePathOverride();
     testDecryptedDMGFor();
     testOverlayHasRequiredFiles();
-    testDebsHasRequiredFiles();
+    testDebcacheHasRequiredFiles();
     testOverlayHasNoSshdRemnants();
     testNoDeadDirhelperDuplicate();
     testOverlayHasNoDebOwnedFiles();

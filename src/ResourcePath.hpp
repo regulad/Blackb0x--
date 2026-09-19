@@ -69,14 +69,16 @@ std::string resolveIBoot32PatcherPath();
 // iBoot32Patcher above: GPL-3.0. Patcher.cpp fork/execs it.
 std::string resolveCBPatcherPath();
 
-// Resolves the loose .deb root: $BLACKB0X_DEBS_DIR if set, otherwise
-// "Blackb0x/Debs" relative to the current working directory. bakeRamdisk()'s
-// stageDebcache() (BakeRamdisk.cpp) copies exactly the subset
-// scripts/build_deb_cache.py resolved from here into
-// /blackb0x/var/.blackb0x/debs/ at bake time — not the whole
-// (append-only, never-pruned) directory. The eventual goal is to source
-// these from real Cydia repos directly rather than checking them in at all.
-std::string resolveDebsPath();
+// Resolves the checked-in .deb cache root: $BLACKB0X_DEBCACHE_DIR if set,
+// otherwise "debcache" relative to the current working directory.
+// bakeRamdisk()'s stageDebcache() (BakeRamdisk.cpp) copies exactly the
+// resolved subset from here into /blackb0x/var/.blackb0x/debs/ at bake time
+// — not the whole (append-only, never-pruned) directory.
+//
+// Read-only from this process's point of view. The directory is GENERATED on
+// Linux by scripts/build_deb_cache.py (real apt-get in podman; it refuses to
+// run anywhere else) and committed; a bake only ever consumes it.
+std::string resolveDebcachePath();
 
 // Resolves `relativePath` against package/layout/ -- the xyz.regulad.blackb0x
 // package's own source tree, laid out at the FINAL on-device paths

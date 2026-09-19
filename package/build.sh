@@ -7,8 +7,8 @@
 #
 # Environment:
 #   THEOS                Theos checkout (default $HOME/theos).
-#   BLACKB0X_DEBS_DIR    where the local-only .deb files live
-#                        (default Blackb0x/Debs).
+#   BLACKB0X_DEBCACHE_DIR    where the local-only .deb files live
+#                        (default debcache).
 #   LOCAL_ONLY_LIST      overrides package/local_only_debs.txt.
 #
 # <staging-dir> is a complete, ready-to-package tree: DEBIAN/ plus the payload
@@ -85,14 +85,14 @@ fi
 # it.
 #
 # That is what keeps the package buildable on its own: everything it needs is
-# checked in -- this list, packages.txt, layout/, and Blackb0x/Debs.
+# checked in -- this list, packages.txt, layout/, and debcache.
 #
 # The Packages index is generated below by the real dpkg-scanpackages -- apt
 # needs a real index, not just loose .deb bytes, to resolve these by name. The
 # index is unsigned, which is why postinstall.sh installs with
 # --allow-unauthenticated.
 : "${LOCAL_ONLY_LIST:=$(dirname "$0")/local_only_debs.txt}"
-: "${BLACKB0X_DEBS_DIR:=$(dirname "$0")/../Blackb0x/Debs}"
+: "${BLACKB0X_DEBCACHE_DIR:=$(dirname "$0")/../debcache}"
 LOCAL_DEBS_DEST="$STAGING/var/.blackb0x/local-debs"
 
 if [ -f "$LOCAL_ONLY_LIST" ]; then
@@ -102,11 +102,11 @@ if [ -f "$LOCAL_ONLY_LIST" ]; then
         echo "$0: note: $LOCAL_ONLY_LIST lists nothing; local repo will be empty" >&2
     fi
     for f in $WANTED; do
-        if [ ! -f "$BLACKB0X_DEBS_DIR/$f" ]; then
-            echo "$0: $LOCAL_ONLY_LIST lists $f but $BLACKB0X_DEBS_DIR/$f is missing" >&2
+        if [ ! -f "$BLACKB0X_DEBCACHE_DIR/$f" ]; then
+            echo "$0: $LOCAL_ONLY_LIST lists $f but $BLACKB0X_DEBCACHE_DIR/$f is missing" >&2
             exit 1
         fi
-        cp "$BLACKB0X_DEBS_DIR/$f" "$LOCAL_DEBS_DEST/$f"
+        cp "$BLACKB0X_DEBCACHE_DIR/$f" "$LOCAL_DEBS_DEST/$f"
         echo "$0: local repo <- $f" >&2
     done
 else

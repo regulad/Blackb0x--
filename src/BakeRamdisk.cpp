@@ -805,7 +805,7 @@ static bool readDebControlInfo(const std::string& debPath, DebControlInfo& out) 
     // The control archive's own member names aren't consistently
     // "./control"/"./postinst"/"./preinst" — confirmed directly against
     // real, already-vendored data: 14 org.tihmstar.* .debs in
-    // Blackb0x/Debs/ store these as plain "control"/"postinst"/"preinst"
+    // debcache/ store these as plain "control"/"postinst"/"preinst"
     // (no "./" prefix) instead, and which spelling a given .deb uses isn't
     // consistent even within that same set (whatever tool originally built
     // each one). Listing the archive first and matching whichever spelling
@@ -1414,7 +1414,7 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
         "conffiles", "md5sums", "triggers", "shlibs", "templates", "config",
     };
 
-    std::string debsRoot = resolveDebsPath();
+    std::string debsRoot = resolveDebcachePath();
     std::string statusOut;
     for (const auto& filename : eligibleFilenames) {
         std::string debPath = fs::absolute(debsRoot + "/" + filename).string();
@@ -1654,7 +1654,7 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
     // no viable alternative either), so a real apt-get dependency solve in a
     // Debian sandbox is off the table.
     // scripts/build_deb_cache_experimental_no_container.py does the job
-    // without one: a plain local transitive-closure walk over Blackb0x/Debs/
+    // without one: a plain local transitive-closure walk over debcache/
     // instead of a real apt solve — see that script's own module docstring
     // for its real, accepted gaps. It has no notion of firmware-version-gated
     // Depends: at all (parse_dependency_groups() strips version constraints
@@ -1672,7 +1672,7 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
         outResult = cached;
         return false;
     }
-    std::string debsRoot = resolveDebsPath();
+    std::string debsRoot = resolveDebcachePath();
     std::string line;
     while (std::getline(picklist, line)) {
         if (line.empty() || line[0] == '#') continue;
@@ -1745,7 +1745,7 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
         return false;
     }
 
-    std::string debsRoot = resolveDebsPath();
+    std::string debsRoot = resolveDebcachePath();
     bool allOk = true;
     for (const auto& filename : result.allFilenames) {
         if (result.preinstallFilenames.count(filename)) continue;  // handled by mergePreinstalledPackages() instead
@@ -1867,7 +1867,7 @@ static bool stageManualDpkgInstall(const fs::path& blackb0xRoot, const std::stri
 // two firmware-version-gated callers. Every other real field (Version,
 // Architecture, Maintainer, Section, Description, ...) is copied exactly as
 // the real .deb's own control file has it, so this stanza can't silently
-// drift from whatever .deb is actually sitting in Blackb0x/Debs/ the way a
+// drift from whatever .deb is actually sitting in debcache/ the way a
 // hand-typed literal duplicating those same fields could.
 //
 // `dropRelationshipFields=false` is for computePreinstalledPackages()'s
@@ -1884,7 +1884,7 @@ static bool stageManualDpkgInstall(const fs::path& blackb0xRoot, const std::stri
 // doesn't care how that word got there, so precomputing it here at bake
 // time is equivalent to running the real tool, without needing a live
 // device to actually run it against (apt-mark is a real ARM binary, see
-// Blackb0x/Debs/apt7_*.deb — the build host cannot execute it). stageEtasonatv() passes true: this project's own untether.bin
+// debcache/apt7_*.deb — the build host cannot execute it). stageEtasonatv() passes true: this project's own untether.bin
 // deliberately differs from the real .deb's own payload (see that
 // function's own comment), so letting postinstall.sh's later `apt-get
 // upgrade`/`autoremove` ever silently "fix" this package back to a real
@@ -1938,7 +1938,7 @@ static std::string buildStatusStanzaFromControl(const std::string& controlPath, 
 // into a dpkg status stanza via buildStatusStanzaFromControl().
 //
 // Why this is hand-rolled at all, instead of the normal dpkg-based install
-// pipeline every other .deb in Blackb0x/Debs/ goes through
+// pipeline every other .deb in debcache/ goes through
 // (stageDebcache() -> computePreinstallEligibleFilenames() -> a real `dpkg
 // --unpack`/`--configure` in a container, or else a plain apt-cache entry
 // for postinstall.sh's own apt-get to install on-device): both
@@ -2049,7 +2049,7 @@ static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const s
 // elsewhere in this branch had (fixed to real 0755 here rather than
 // propagated).
 static bool stageEtasonatv(const fs::path& blackb0xRoot) {
-    std::string debPath = fs::absolute(resolveDebsPath() + "/net.tihmstar.etasonuntether-1.3.1.deb").string();
+    std::string debPath = fs::absolute(resolveDebcachePath() + "/net.tihmstar.etasonuntether-1.3.1.deb").string();
     ExtractedDeb extracted = extractDebAndBuildStanza(debPath, "blackb0x-etasonatv-", "8.4 untether payload",
                                                         /*hold=*/true);
     if (!extracted.ok) {
@@ -2134,7 +2134,7 @@ static bool stageIos7Tether(const fs::path& blackb0xRoot) {
 // the 6.1.3/6.1.4-era AppleTV2,1 hardware this branch targets to verify
 // against.
 static bool stageP0sixspwn(const fs::path& blackb0xRoot) {
-    std::string debPath = fs::absolute(resolveDebsPath() + "/com.ih8sn0w-squiffy-winocm.p0sixspwn_1.4-1_iphoneos-arm.deb").string();
+    std::string debPath = fs::absolute(resolveDebcachePath() + "/com.ih8sn0w-squiffy-winocm.p0sixspwn_1.4-1_iphoneos-arm.deb").string();
     ExtractedDeb extracted = extractDebAndBuildStanza(debPath, "blackb0x-p0sixspwn-", "6.1.4 untether payload");
     if (!extracted.ok) {
         if (!extracted.tempDir.empty()) {
@@ -2236,7 +2236,7 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
     // package/local_only_debs.txt, and generates its Packages index with the
     // real dpkg-scanpackages inside the container. Only the .deb source
     // directory has to be pointed at, since it is not under package/.
-    setenv("BLACKB0X_DEBS_DIR", fs::absolute(resolveDebsPath()).c_str(), 1);
+    setenv("BLACKB0X_DEBCACHE_DIR", fs::absolute(resolveDebcachePath()).c_str(), 1);
 
     std::string debPath = outDir + "/xyz.regulad.blackb0x.deb";
     if (!runCommand({resolvePackageRoot() + "/build.sh", stagingDir, debPath, productVersion}, ".")) {

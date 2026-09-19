@@ -171,5 +171,5 @@ Two structural problems NEO_FLOW exists to fix, both confirmed by the above:
   package install.** `files/cydia/` is pre-extracted `.deb` content with no
   `dpkg` database entries created for any of it at install time — `dpkg`
   itself doesn't know these packages exist even though their files are
-  present. `Blackb0x/Debs/` is a separate, actually-`dpkg`-installed set that
+  present. `debcache/` is a separate, actually-`dpkg`-installed set that
   only covers a handful of packages `setup.sh` explicitly `dpkg -i`'s.

@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
 """
 build_deb_cache.py — resolve package/packages.txt's flat package-name
-list against this project's real apt sources (Blackb0x/Misc/apt/*.list),
-fetch the full dependency closure, and grow Blackb0x/Debs/ with whatever's
+list against this project's real apt sources
+(package/layout/etc/apt/sources.list.d/*.list),
+fetch the full dependency closure, and grow debcache/ with whatever's
 new.
 
-*** LINUX-ONLY MAINTENANCE TOOL. THE BAKE NEVER RUNS THIS. ***
+*** LINUX-ONLY. REFUSES TO RUN ANYWHERE ELSE. THE BAKE NEVER CALLS IT. ***
 
-It needs podman, and podman does not exist on macOS — which is this
-project's only supported platform now. bakeRamdisk()'s
-computeGlobalDebcacheOnce() calls
-scripts/build_deb_cache_experimental_no_container.py instead,
-unconditionally; nothing in the build or the bake invokes this file at all.
+This is the generator for the checked-in debcache/ directory, and it is CI
+work, not bake work. It needs podman and a real apt-get, and neither exists
+on macOS — which is this project's only supported build platform. It hard-
+exits on any non-Linux host rather than failing obscurely part-way through
+(see require_linux() below). A GitHub Action is the intended way to run it.
 
-It is kept, rather than deleted with the rest of the podman machinery,
-because it is the only thing that can correctly GROW Blackb0x/Debs/: that
-needs a real apt-get dependency solve with real version constraints and
-GPG-verified fetches from live repos, and the no-container stand-in
-explicitly cannot do any of that (see its own docstring's "Known gaps").
-It is also the reference this project's debcache contract is defined
-against, cited by name throughout BakeRamdisk.cpp and Blackb0x/Misc/README.md.
+Nothing in the build or the bake invokes this file. bakeRamdisk()'s
+computeGlobalDebcacheOnce() resolves its closure from the .deb bytes already
+in debcache/ via scripts/build_deb_cache_experimental_no_container.py; that
+script only ever READS debcache/, it never grows it.
 
-So: run this by hand, on a Linux box with podman, when and only when
-Blackb0x/Debs/ needs new packages in it. Then commit the resulting .deb
-bytes, which is what every macOS bake actually consumes.
+The division is the point:
+  - THIS script (Linux/CI) grows debcache/ — a real apt-get dependency solve
+    with real version constraints and GPG-verified fetches from live repos.
+    The no-container stand-in explicitly cannot do any of that (see its own
+    docstring's "Known gaps").
+  - Every macOS bake consumes the resulting .deb bytes, which are committed.
+
+So: run this in CI, or by hand on a Linux box, when and only when debcache/
+needs new packages in it. Then commit what it adds.
 
 Deliberately does NOT reimplement dependency resolution, repo-index parsing,
 or GPG/hash verification — those are exactly what apt itself already does
@@ -70,7 +74,7 @@ silently worked around:
     `[trusted=yes]` for the same reason it always was: there's nothing to
     verify at all, keyed or not.
 
-Never deletes or overwrites anything already in Blackb0x/Debs/ — an
+Never deletes or overwrites anything already in debcache/ — an
 existing file at a given filename is left completely untouched, even if
 this run would have fetched different bytes for that exact name (matters
 for the already-documented pinned-filename mismatches — see Misc/README.md's
@@ -98,7 +102,7 @@ real, previously-recovered .deb for go in package/local_only_debs.txt
 instead of packages.txt's normal resolution flow entirely: see that file's
 own comment for the full rationale and how it differs from the p0sixspwn
 case above. Their filenames still go straight into picklist.txt (so
-they're cached in Blackb0x/Debs/ and staged into the real on-device apt
+they're cached in debcache/ and staged into the real on-device apt
 cache like anything else), and this script ALSO builds a real local `deb
 file://` repository for them — a genuine `dpkg-scanpackages`-generated
 Packages index, not just loose .deb bytes with no index apt could ever
@@ -111,7 +115,7 @@ Blackb0x/Misc/apt/local.list and BakeRamdisk.cpp's staging of
 
 Writes <output-dir>/picklist.txt: the sorted list of every .deb filename
 this run's dependency resolution actually needs — this is what
-BakeRamdisk.cpp's stageDebcache() copies from Blackb0x/Debs/ directly into
+BakeRamdisk.cpp's stageDebcache() copies from debcache/ directly into
 the real device's own apt cache (/var/cache/apt/archives/), not the whole
 (append-only, never-pruned) Debs/ directory. <output-dir> is caller-owned,
 not this script's concern to create or clean up.
@@ -155,7 +159,7 @@ locally (see BakeRamdisk.cpp's kNeverStageDebs — Kodi's ~40MB .deb alone
 would blow this old ramdisk's 70MB ceiling). Fetched with
 `Acquire::By-Hash=no` specifically so the on-disk file layout stays the
 plain, flat naming convention this project's own vendored apt7 0.7.25.3
-(confirmed by extracting Blackb0x/Debs/apt7_*.deb directly and reading its
+(confirmed by extracting debcache/apt7_*.deb directly and reading its
 apt-get binary's own strings) is old enough to predate by-hash support for.
 
 The local Packages index (local-repo/, above) is back for a
@@ -175,6 +179,7 @@ Nothing else; the container provides apt/dpkg/gnupg itself.
 
 import argparse
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -184,8 +189,17 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MISC_DIR = REPO_ROOT / "Blackb0x" / "Misc"
-APT_DIR = MISC_DIR / "apt"
-DEBS_DIR = REPO_ROOT / "Blackb0x" / "Debs"
+# The .list files moved into the xyz.regulad.blackb0x package's own layout
+# when the package was introduced -- they are shipped to the device verbatim
+# from there, so that copy is the single source of truth for which repos this
+# project uses, and resolving against anything else here would let the two
+# drift. Blackb0x/Misc/apt/ still holds the ARMORED keys (*.gpg.key) that this
+# script feeds to gpgv; the package layout carries their dearmored binary
+# counterparts (trusted.gpg.d/*.gpg) for apt on-device. Two spellings of the
+# same keys, each in the form its consumer wants.
+APT_LIST_DIR = REPO_ROOT / "package" / "layout" / "etc" / "apt" / "sources.list.d"
+APT_KEY_DIR = MISC_DIR / "apt"
+DEBS_DIR = REPO_ROOT / "debcache"
 PACKAGE_DIR = REPO_ROOT / "package"
 # packages.txt and local_only_debs.txt describe what the
 # xyz.regulad.blackb0x package installs, so they live with the package
@@ -198,7 +212,7 @@ LOCAL_ONLY_LIST = PACKAGE_DIR / "local_only_debs.txt"
 # failure rather than the fatal one everything else now is — a real
 # firmware-version-gated persistence payload (6.1.4) that BakeRamdisk.cpp's
 # stageP0sixspwn() extracts straight out of its real .deb in
-# Blackb0x/Debs/ instead of going through apt resolution.
+# debcache/ instead of going through apt resolution.
 #
 # net.tihmstar.etasonuntether is here for the same firmware-gated reason:
 # Depends: firmware (= 8.4.1) cannot satisfy this sandbox's synthetic firmware
@@ -460,7 +474,34 @@ def is_flat_repo(dist: str) -> bool:
     return dist.endswith("/")
 
 
+def require_linux():
+    """Hard-stop on anything but Linux.
+
+    Not a portability nicety -- this script's whole job is running a real
+    Debian apt-get against a foreign architecture inside podman, and neither
+    podman nor a usable real apt-get exists on macOS (confirmed: no container
+    runtime at all, and neither MacPorts nor Fink ships a working native
+    apt-get on Apple Silicon). Without this check the failure lands somewhere
+    deep in the sandbox setup with a confusing message; the point of failing
+    here is that the answer is never "fix your Mac", it is "run this on Linux
+    or in CI".
+    """
+    if platform.system() != "Linux":
+        raise SystemExit(
+            f"build_deb_cache.py: refusing to run on {platform.system()} -- this is Linux-only.\n"
+            "\n"
+            "  It grows debcache/ by running a real apt-get dependency solve inside podman,\n"
+            "  and podman does not exist on macOS. Nothing in the build or the bake needs\n"
+            "  this script: every bake consumes the .deb bytes already committed under\n"
+            "  debcache/, resolved by\n"
+            "  scripts/build_deb_cache_experimental_no_container.py, which is portable.\n"
+            "\n"
+            "  Run this on a Linux host, or let CI run it, then commit what it adds."
+        )
+
+
 def main():
+    require_linux()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--output-dir", required=True, type=Path, help="Where to write picklist.txt/resolved_packages.txt/apt-lists/ — caller-owned, not created or cleaned up here")
     ap.add_argument("--firmware-version", required=True, help="Real, per-tuple ProductVersion (e.g. \"6.1.3\") to declare as the sandbox's synthetic `firmware` package — see INNER_SCRIPT's own comment for why this must be the real version for whichever (device, buildID) is actually being baked, not a fixed pin")
@@ -481,9 +522,9 @@ def main():
     # part of this sandbox's own apt resolution anyway (see the module
     # docstring's local_only_debs.txt paragraph). This script builds that
     # repo's actual content directly, it doesn't need to source FROM it.
-    list_files = sorted(p for p in APT_DIR.glob("*.list") if p.name != "local.list")
+    list_files = sorted(p for p in APT_LIST_DIR.glob("*.list") if p.name != "local.list")
     if not list_files:
-        raise SystemExit(f"No .list files found under {APT_DIR}")
+        raise SystemExit(f"No .list files found under {APT_LIST_DIR}")
 
     sources_lines = []
     keyed = []
@@ -494,7 +535,7 @@ def main():
             print(f"warning: {lf.name} has no `deb` line, skipping", file=sys.stderr)
             continue
         url, dist, components = parsed
-        key_path = APT_DIR / f"{lf.stem}.gpg.key"
+        key_path = APT_KEY_DIR / f"{lf.stem}.gpg.key"
         has_key = key_path.exists()
 
         # Always [trusted=yes]: for keyed repos this is real GPG
@@ -600,14 +641,14 @@ def main():
 
         # local_only_debs.txt's entries were never sent to apt at all (see
         # apt_attempted_packages above) — they're already real files in
-        # Blackb0x/Debs/, just merged into the same picklist.txt apt's own
+        # debcache/, just merged into the same picklist.txt apt's own
         # resolved set feeds, so stageDebcache() stages them into the
         # on-device apt cache exactly like anything else.
         resolved = sorted(resolved + local_only_filenames)
 
         picklist_path.write_text(
             "# Generated by scripts/build_deb_cache.py — do not edit by hand.\n"
-            "# Every .deb filename the ramdisk builder needs to pull from Blackb0x/Debs/\n"
+            "# Every .deb filename the ramdisk builder needs to pull from debcache/\n"
             "# for the package set currently in package/packages.txt.\n"
             + "\n".join(resolved) + "\n"
         )

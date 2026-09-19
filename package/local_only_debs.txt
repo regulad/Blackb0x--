@@ -1,5 +1,5 @@
-# .deb filenames (not package names — matches Blackb0x/Debs/'s own naming)
-# that scripts/build_deb_cache.py includes directly from Blackb0x/Debs/
+# .deb filenames (not package names — matches debcache/'s own naming)
+# that scripts/build_deb_cache.py includes directly from debcache/
 # without ever attempting real apt resolution for them at all — for
 # packages that are genuinely dead upstream (no configured repo's Packages
 # index carries them anymore, confirmed via a real "E: Unable to locate
@@ -23,7 +23,7 @@ essential_0-1_iphoneos-arm.deb
 # net.tihmstar.etasonuntether is deliberately NOT here.
 #
 # It is applied statically instead, by BakeRamdisk.cpp's stageEtasonatv():
-# extracted straight from its real .deb in Blackb0x/Debs/, with this project's
+# extracted straight from its real .deb in debcache/, with this project's
 # own untether.bin substituted for the one that .deb ships (see that
 # function's own comment and Blackb0x/Misc/README.md for why the override
 # exists), then registered with a real held dpkg status stanza. Shipping it

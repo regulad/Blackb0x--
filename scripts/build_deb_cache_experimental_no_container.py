@@ -20,10 +20,10 @@ closure walk by bare package NAME (no version-constraint comparison at
 all — every Depends:/Pre-Depends:/Provides: field gets stripped straight
 to package names, same simplification BakeRamdisk.cpp's own
 parseDependencyGroups() already makes for a different purpose) over
-*only* the .deb files already vendored in Blackb0x/Debs/ — it cannot
+*only* the .deb files already vendored in debcache/ — it cannot
 fetch anything new, and will fail loudly (not silently) if packages.txt's
 closure needs something not already present. Keep using
-build_deb_cache.py on a real Linux+podman machine whenever Blackb0x/Debs/
+build_deb_cache.py on a real Linux+podman machine whenever debcache/
 needs to grow; this script only reconstructs picklist.txt/
 resolved_packages.txt from what's already there, for machines where that
 script can't run at all.
@@ -60,7 +60,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MISC_DIR = REPO_ROOT / "Blackb0x" / "Misc"
-DEBS_DIR = REPO_ROOT / "Blackb0x" / "Debs"
+DEBS_DIR = REPO_ROOT / "debcache"
 PACKAGE_DIR = REPO_ROOT / "package"
 # packages.txt and local_only_debs.txt describe what the
 # xyz.regulad.blackb0x package installs, so they live with the package
@@ -131,7 +131,7 @@ def read_deb_control_info(deb_path: Path) -> PackageInfo:
             raise SystemExit(f"{deb_path}: no control.tar.* member found")
         # The control member's own path inside control.tar.* isn't always
         # "./control" -- confirmed directly against this project's real,
-        # already-vendored Blackb0x/Debs/: 14 org.tihmstar.* .debs store it
+        # already-vendored debcache/: 14 org.tihmstar.* .debs store it
         # as plain "control" (no "./" prefix) instead. Listing the archive
         # first and matching either spelling is more robust than assuming
         # one fixed path (BakeRamdisk.cpp's own readDebControlInfo() makes
@@ -185,7 +185,7 @@ def build_local_index(debs_dir: Path):
     """Scans every .deb already vendored in debs_dir, returns
     (by_name, by_provides): by_name maps a real Package: name to its
     PackageInfo (last one wins if duplicated — this project's own
-    Blackb0x/Debs/ has never carried more than one version of the same
+    debcache/ has never carried more than one version of the same
     package name at once in practice); by_provides maps a virtual
     package name to the list of real package names that provide it.
 
@@ -195,7 +195,7 @@ def build_local_index(debs_dir: Path):
     kPreinstallInnerScript already make (see either's own comment) — a
     real, confirmed-necessary fix, not a hack: rtadvd's own real Depends:
     is a bare, non-alternative "firmware" with no fallback, and it's
-    already vendored in Blackb0x/Debs/, so without this every one of its
+    already vendored in debcache/, so without this every one of its
     own dependents (network-cmds, several others) would falsely fail to
     resolve even though nothing is actually missing."""
     by_name = {"firmware": PackageInfo(name="firmware", filename=None, depends=[], pre_depends=[], provides=[])}
@@ -305,9 +305,9 @@ def main():
     if unresolved_top_level:
         for name in sorted(unresolved_top_level):
             print(f"build_deb_cache_experimental_no_container.py: FATAL: {name} did not resolve against "
-                  f"the locally-vendored Blackb0x/Debs/ set", file=sys.stderr)
+                  f"the locally-vendored debcache/ set", file=sys.stderr)
         raise SystemExit(
-            "one or more packages.txt entries did not resolve -- grow Blackb0x/Debs/ on a real Linux+podman "
+            "one or more packages.txt entries did not resolve -- grow debcache/ on a real Linux+podman "
             "machine via build_deb_cache.py first, then retry here"
         )
 

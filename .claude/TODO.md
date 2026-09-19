@@ -8,7 +8,7 @@ Open items not yet resolved. See `AGENTS.md` for repo conventions and
 `Blackb0x/Misc/tihmstar-untether.tar` — the last original tarball ever
 checked into this repo — is gone now: the real, long-lost
 `net.tihmstar.etasonuntether-1.3.1.deb` itself turned up (now in
-`Blackb0x/Debs/`), and `BakeRamdisk.cpp`'s `stageEtasonatv()` extracts the
+`debcache/`), and `BakeRamdisk.cpp`'s `stageEtasonatv()` extracts the
 8.4 untether payload straight out of that `.deb` at bake time instead of
 the tarball. Direct provenance was already confirmed before this switch —
 see `Blackb0x/Misc/README.md`'s `## etasonATV / tihmstar-untether
@@ -314,7 +314,7 @@ Apple Silicon, fink/fink#232). Resolved with a new, deliberately
 experimental, portable replacement instead of either container path:
 `scripts/build_deb_cache_experimental_no_container.py` (a plain
 transitive-closure dependency-group walk over already-vendored
-`Blackb0x/Debs/`, no version-constraint comparison, no network/root/
+`debcache/`, no version-constraint comparison, no network/root/
 container use at all — see its own module docstring for the documented
 gaps versus `build_deb_cache.py`, and
 `scripts/test_build_deb_cache_experimental_no_container.py` for its 18

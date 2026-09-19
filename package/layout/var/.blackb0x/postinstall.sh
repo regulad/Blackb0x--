@@ -34,7 +34,7 @@ fi
 # apt-get. `sleep` itself is only typically available at this point, not
 # guaranteed — before installing coreutils here, Apple doesn't ship things
 # like a shell in a retail build (real evidence, not just assumption:
-# Blackb0x/Debs/dpkg_*.deb's own control file lists `bash` as one of dpkg's
+# debcache/dpkg_*.deb's own control file lists `bash` as one of dpkg's
 # own Depends:, meaning this jailbreak ecosystem itself treats bash as
 # something it has to supply, not something already on the stock OS), so
 # there's no reason to trust a bare `sleep` any more than a bare `bash`
@@ -92,7 +92,7 @@ export DEBIAN_FRONTEND=noninteractive
 #     no local file:// source or synthetic Packages index needed.
 #
 # On this old on-device apt (apt7 0.7.25.3 — confirmed directly by
-# extracting Blackb0x/Debs/apt7_*.deb and reading its real apt-get binary's
+# extracting debcache/apt7_*.deb and reading its real apt-get binary's
 # own strings): only apt-get exists, there's no unified `apt` command at
 # all (that CLI wasn't introduced until APT 1.0/1.1, years after this
 # build), and `full-upgrade` doesn't exist either (also a later addition to

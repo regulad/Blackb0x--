@@ -521,11 +521,10 @@ targets:
   does not deny the other two their artifacts. Uploads `dist/` with 90-day
   retention.
 
-**The 45-day cadence is a gate, not a cron.** Cron cannot express 45 days, so
-the schedule fires monthly and a separate `should_bake` job checks the age of
-the newest published `firmware-*` artifact, skipping unless it is 45 days or
-older. Firing more often and skipping is the safe direction; every two months
-would let artifacts go stale past the 45 days asked for. Monthly also stays
+**Refreshed on the 23rd of every month** (`cron: "0 5 23 * *"`). An earlier
+draft approximated a 45-day interval with a monthly cron plus a job that
+checked artifact age and skipped when the newest was younger than 45 days;
+that was dropped as more machinery than the problem needed. Monthly also stays
 clear of GitHub disabling schedules after 60 days of inactivity.
 
 **It bakes one build, not 95.** `kJailbreakTargetBuild` (`Cli.cpp`) pins

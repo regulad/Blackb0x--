@@ -580,9 +580,7 @@ armv6, vendored apt actually runs). `bake` runs on a schedule and on manual
 dispatch only, one runner per device, and publishes `dist/` as artifacts so end
 users never need root or the authoring toolchain.
 
-The refresh cadence is a gate rather than a cron: the schedule fires monthly
-and a `should_bake` job skips unless the newest published artifact is 45 days
-or older. Cron cannot express 45 days.
+Artifacts refresh on the 23rd of every month.
 
 ## External references
 

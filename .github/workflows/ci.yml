@@ -11,19 +11,10 @@ on:
   push:
   pull_request:
   workflow_dispatch:
-    inputs:
-      force_bake:
-        description: "Bake even if the last artifacts are younger than 45 days"
-        type: boolean
-        default: false
   schedule:
-    # Cron cannot express "every 45 days", so this fires monthly and the bake
-    # job's own age gate below decides whether there is anything to do. Firing
-    # more often than needed and skipping is the safe direction: the opposite
-    # (every two months) would let artifacts go stale past the 45 days asked
-    # for. Note GitHub disables scheduled workflows in repos with no activity
-    # for 60 days, which a monthly cadence stays clear of.
-    - cron: "0 5 1 * *"
+    # 23rd of every month. Monthly also stays clear of GitHub disabling
+    # scheduled workflows in repos with no activity for 60 days.
+    - cron: "0 5 23 * *"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -99,53 +90,13 @@ jobs:
           # system. --version still prints, which is all this asserts.
           ./build/apt-tools/apt-get --version 2>/dev/null | grep -q 'darwin-arm'
 
-  # Whether the bake job has anything to do. Split out so the matrix below does
-  # not spin up three runners just to have each decide it should skip.
-  should_bake:
-    name: Check artifact age
-    # Same gate as the bake job below, so an ordinary push does not spin up a
-    # runner purely to decide there is nothing to bake.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    outputs:
-      stale: ${{ steps.age.outputs.stale }}
-    steps:
-      - id: age
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "stale=true" >> "$GITHUB_OUTPUT"
-            echo "Manual run: baking regardless of age."
-            exit 0
-          fi
-          # Age of the newest firmware artifact this workflow has published.
-          # Artifacts expire, so "none found" correctly means "bake".
-          latest=$(gh api "repos/$REPO/actions/artifacts?per_page=100" \
-                     --jq '[.artifacts[] | select(.name | startswith("firmware-")) | .created_at] | max // empty')
-          if [ -z "$latest" ]; then
-            echo "stale=true" >> "$GITHUB_OUTPUT"
-            echo "No firmware artifacts found: baking."
-            exit 0
-          fi
-          age_days=$(( ( $(date -u +%s) - $(date -u -d "$latest" +%s) ) / 86400 ))
-          echo "Newest firmware artifact is ${age_days} days old (published ${latest})."
-          if [ "$age_days" -ge 45 ]; then
-            echo "stale=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "stale=false" >> "$GITHUB_OUTPUT"
-            echo "Younger than 45 days: nothing to refresh."
-          fi
-
   # Scheduled and manual only. Needs root, Theos and the network, which is
   # exactly the set of requirements this job exists to keep off end users'
   # machines.
   bake:
     name: Bake ${{ matrix.device }}
-    needs: [build, should_bake]
-    if: needs.should_bake.outputs.stale == 'true'
+    needs: build
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     strategy:
       # One device per runner. The tuples are independent, and a failure on one
@@ -212,7 +163,7 @@ jobs:
         with:
           name: firmware-${{ matrix.device }}
           path: dist/
-          # Comfortably longer than the 45-day refresh cadence, so there is
-          # always a published set even if a scheduled run fails.
+          # Longer than the monthly refresh, so a failed scheduled run still
+          # leaves the previous set downloadable.
           retention-days: 90
           if-no-files-found: error

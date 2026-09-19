@@ -56,9 +56,12 @@ cmake -S . -B build
 Then pick a target:
 
 ```sh
-cmake --build build --target jailbreak   # blackb0x and blackb0x-pwn
-cmake --build build --target authoring   # bake-firmware, vendored apt, tests, xpwntool
+cmake --build build --target jailbreak -j"$(sysctl -n hw.ncpu)"   # blackb0x and blackb0x-pwn
+cmake --build build --target authoring -j"$(sysctl -n hw.ncpu)"   # bake-firmware, vendored apt, tests, xpwntool
 ```
+
+`sysctl -n hw.ncpu` is the macOS equivalent of `nproc`, which does not exist
+here.
 
 `--recurse-submodules` is required; without it the build fails on missing headers
 (`git submodule update --init --recursive` fixes an existing clone). **Install

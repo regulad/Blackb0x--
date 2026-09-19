@@ -1,7 +1,7 @@
 # misc
 
 Now that `Blackb0x/ramdisk/` has been deleted outright (see
-`.claude/NEO_FLOW.md`), this directory is where
+AGENTS.md's "Install-time design"), this directory is where
 everything from it worth keeping for provenance/reference lives instead.
 No original source tarball is needed going forward anymore — see
 "Original tarballs" below: every one, including `tihmstar-untether.tar`
@@ -47,7 +47,7 @@ an open forensic question in its own right, not just install-time payload.
   the real `openssh` package `postinstall.sh` installs onto the fully-booted
   device afterward — and `entrypoint.c` never spawns/execs anything to
   begin with, so staging these binaries alone would never have started a
-  session even if wired in. NEO_FLOW doesn't need a ramdisk-stage rescue
+  session even if wired in. the current design doesn't need a ramdisk-stage rescue
   shell, so `third_party/ssh-rd` was removed entirely (submodule
   deregistered, `.gitmodules` entry gone) rather than left unused.
 
@@ -76,7 +76,7 @@ sandboxed resolution declares its synthetic "firmware" version as `8.4.2`
 (see the script's own comment for why: it can't satisfy every firmware
 range this ecosystem has ever used in one resolution pass, so it picks
 this project's newest/most-capable supported target). This isn't a bug —
-per `.claude/NEO_FLOW.md`, per-branch persistence payloads like this are
+per AGENTS.md's "Install-time design", per-branch persistence payloads like this are
 meant to be installed as direct loose-file copies (extracted straight out
 of their real `.deb` — see `BakeRamdisk.cpp`'s `stageP0sixspwn()`), not
 resolved through apt at all, so dropping out of this list here is the
@@ -141,7 +141,7 @@ is already preserved elsewhere, individually, below or in `debcache/`:
 - `ATV-Cydia.tgz` — its only content still in use by anything (4 files) is
   extracted individually below; the rest of this ~15MB tarball was a flat,
   pre-extracted, unattributed Cydia filesystem tree already superseded by
-  the real `.deb`-driven install NEO_FLOW.md describes.
+  the real `.deb`-driven install AGENTS.md's "Install-time design" describes.
 - `RamdiskBins.tar` — the ramdisk-stage tool set, unpacked flat into `bin/`
   (see below) rather than kept packed; nothing gained by leaving it as a
   tarball once it's this small and this static.
@@ -210,7 +210,7 @@ to `packages.txt`, not yet fetched into `debcache/` (that happens
 automatically, the next time `scripts/build_deb_cache.py` runs, the same as
 any other name added there). Nothing needs a raw copy of either before
 `postinstall.sh` gets a chance to install the real packages — see
-`.claude/NEO_FLOW.md`. `plutil` itself is gone now — see
+AGENTS.md's "Install-time design". `plutil` itself is gone now — see
 the `bin/` section above for `com.ericasadun.utilities`, the real BigBoss
 package that turned out to ship it (confirmed only by checking that repo
 specifically; the earlier "no package in any of this project's three
@@ -342,8 +342,8 @@ directory to glob rather than filtering repo config out of a flat `Misc/`
 listing that also holds unrelated payloads.
 
 - `xyz.regulad.blackb0x.postinstall.plist` — LaunchDaemon plist (see
-  NEO_FLOW.md for what installs/runs it). No
-  `com.openssh.sshd.plist` here anymore — NEO_FLOW deliberately doesn't
+  AGENTS.md's "Install-time design" for what installs/runs it). No
+  `com.openssh.sshd.plist` here anymore — the current design deliberately doesn't
   bootstrap an early sshd; the real `openssh` package's own LaunchDaemon
   plist is the only one that ever starts sshd now, once `postinstall.sh`
   installs it. The original disassembled binary did stage one — see "What
@@ -486,7 +486,7 @@ listing that also holds unrelated payloads.
 - `rtbuddyd.bin` — the pre-`jsc`-swap tether-only `rtbuddyd` replacement
   used by `install_blackb0x_tether()`'s branch, in the removed tether flow.
 - `postinstall.sh` — the legacy first-boot installer script, being fully rewritten
-  per NEO_FLOW.md; kept here as the pre-rewrite reference.
+  per AGENTS.md's "Install-time design"; kept here as the pre-rewrite reference.
 - `apt/trustdb.gpg`, `apt/trusted.gpg` — Cydia's apt keyring database, extracted
   from `ATV-Cydia.tgz` before that tarball was deleted.
 - `firmware.sh.old`, `startup.old` — Cydia's own pre-jailbreak firmware/

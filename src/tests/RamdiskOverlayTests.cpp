@@ -72,20 +72,20 @@ static void testDecryptedDMGFor() {
            "decryptedDMGFor produces the expected suffix");
 }
 
-// Blackb0x/ramdisk/ was deleted outright as the first step of the NEO_FLOW
-// rewrite (see .claude/NEO_FLOW.md) — the flat,
+// Blackb0x/ramdisk/ was deleted outright as the first step of the
+// install-flow rewrite (see AGENTS.md's "Install-time design") — the flat,
 // pre-extracted Cydia tree this test used to check for doesn't exist
 // anymore by design, and its replacement (debcache + sources list + dpkg +
 // setup.sh + the persistence payload, all driven by a real dpkg/apt
 // install) hasn't been built yet. Once entrypoint.c and setup.sh are
-// rewritten to match NEO_FLOW.md, this should assert against whatever
+// rewritten to match that section, this should assert against whatever
 // Blackb0x/ramdisk/ ends up containing then — asserting against the old,
 // now-nonexistent file list in the meantime would just be checking that a
 // deliberate deletion didn't happen.
 static void testOverlayHasRequiredFiles() {
     unsetenv("BLACKB0X_RAMDISK_DIR");
     expect(!fs::exists(resolveRamdiskPath()),
-           "Blackb0x/ramdisk/ should not exist yet — NEO_FLOW's replacement overlay hasn't been built");
+           "Blackb0x/ramdisk/ should not exist yet — its replacement overlay hasn't been built");
 }
 
 // setup.sh's hardcoded `mv`/`dpkg -i` targets — if a deb ever gets renamed

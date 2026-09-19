@@ -1,7 +1,7 @@
 # TODO
 
 Open items not yet resolved. See `AGENTS.md` for repo conventions and
-`docs/HISTORY.md`/`NEO_FLOW.md` for how we got here.
+`docs/HISTORY.md`/`AGENTS.md's "Install-time design"` for how we got here.
 
 ## 1. Pin down `untether.bin`'s exact build (mostly resolved)
 

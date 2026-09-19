@@ -262,6 +262,223 @@ own header.
 - No kernel-module blacklisting, no udev rule, no systemd drop-in. All three were
   Linux-only requirements and are gone; see the README's "No one-time system setup".
 
+## Install-time design (what ships on the ramdisk, and how)
+
+Folded in from `.claude/NEO_FLOW.md`, which is deleted. That file was written as a
+design doc for work not yet implemented; the work is done and has moved past the
+plan in several places, so what follows is the as-built design. Where this and the
+code disagree, the code is right.
+
+This supersedes the pre-rewrite Objective-C tool's install flow entirely. Two
+structural problems drove the rewrite: `postinstall.sh` hit the live network on
+every single real-OS boot forever, with no offline fallback; and the base Cydia
+filesystem was a flat, pre-extracted overlay with no corresponding `dpkg` database
+entries, so `dpkg` never knew those files existed. The fix that shipped is a real
+`dpkg`/`apt`-driven install, resolved once at bake time and run once per device at
+first real boot — but **not** a fully network-disabled one. That specific piece of
+the plan turned out to be impossible (see `postinstall.sh` below).
+
+### How `/blackb0x` gets assembled
+
+Nothing is copied into `/blackb0x` by hand at runtime. The whole tree is assembled
+once at bake time by `BakeRamdisk.cpp`'s `stageBlackb0xTree()`, then blindly
+replicated onto the real device by `entrypoint.c`'s `merge_tree()` at boot.
+
+1. **Resolve the closure.** `scripts/build_deb_cache_experimental_no_container.py`
+   walks `package/packages.txt` (real package *names*, not `.deb` filenames) into a
+   transitive closure over the `.deb` bytes already committed in `debcache/`. It only
+   reads; it cannot fetch. Growing `debcache/` is a separate, Linux-only, CI job —
+   `scripts/build_deb_cache.py`, which does a real apt-get solve against the five
+   configured repos inside podman and refuses to run off Linux. See that script's
+   header and the `debcache/` entry in "Repo layout".
+2. **Local-only fallback.** A few packages will never resolve through any live repo
+   but do have a real recovered `.deb` (`essential`, currently the only one).
+   `package/local_only_debs.txt` names them by filename. `package/build.sh` bundles
+   exactly those into the package as a file-backed apt repo at
+   `/var/.blackb0x/local-debs`, with a real `dpkg-scanpackages` index, reachable
+   on-device through `sources.list.d/local.list`
+   (`deb [trusted=yes] file:///var/.blackb0x/local-debs ./`). A `.deb` sitting in
+   apt's cache with no matching `Packages` entry is invisible to apt's resolver —
+   verified with a real minimal repro — which is why these need an index even though
+   the main debcache doesn't.
+3. **Decide bake-time force-install vs. real apt.**
+   `computePreinstallEligibleFilenames()` walks the resolved closure against
+   `misc/prebake_package_blacklist.txt`. Packages with a real, stateful,
+   uninspectable or device-only postinst/preinst (`cydia`, `firmware-sbin`, `rtadvd`,
+   `pam`, `pam-modules`, `essential`, the exploit-specific ones) are excluded, and so
+   is anything that transitively depends on an excluded package — propagated to a
+   fixpoint, not one level. An eligible package that still has a postinst gets it
+   stripped between unpack and configure (safe: postinst only runs at `--configure`);
+   one with a preinst gets its `.deb` rebuilt without that member before being
+   unpacked at all (preinst runs *during* `--unpack`, so stripping after the fact is
+   too late). Both decided per real `.deb` content, never hardcoded.
+4. **Install the eligible set for real.** On Linux this ran inside a `debian:stretch`
+   container for an era-appropriate `dpkg` 1.18.26: force-unpack everything
+   (`--force-architecture --force-depends --unpack`, because this ecosystem has a
+   genuine unbreakable circular Pre-Depends chain, `dpkg → tar → gzip/lzma → sed →
+   dpkg`), then one `dpkg --force-depends --configure -a` to let dpkg's own solver
+   break the cycle — the real debootstrap two-phase pattern. **macOS has no container
+   runtime, so that path is gone**; `computePreinstalledPackages()` now extracts each
+   eligible `.deb` with plain `ar`/`tar`, merges its payload, and hand-writes the
+   matching dpkg status stanza and `info/` state. That is sound precisely because
+   step 3 already proved no maintainer script ever executes on this path, which
+   removes the ordering problem real dpkg was there to solve. `kPreinstallInnerScript`
+   in `BakeRamdisk.cpp` is the old container script, kept as the record of what it
+   did and executed by nothing.
+5. **Cache it once per process.** `computeGlobalDebcacheOnce()` runs steps 1–4 exactly
+   once per `bake-firmware` invocation (a static-local cache). The pipeline is
+   firmware-independent; re-running it per target meant identical repeated work.
+6. **Build and install the package.** `stageBlackb0xPackage()` runs
+   `package/build.sh`, which produces a real `xyz.regulad.blackb0x` `.deb` with
+   Theos's `dm.pl`, then installs it into the staged tree the same way
+   `stageEtasonatv()` does — extract, merge payload, append a real dpkg status stanza.
+   This replaced a dozen hand-rolled `stageFile()` calls (`.claude/TODO.md` item 11).
+   `postinstall.sh`'s `__BLACKB0X_PACKAGES__` placeholder is templated by `build.sh`
+   from `package/packages.txt` itself — deliberately *not* from this bake's resolved
+   closure, so the package needs no bake state and stays independently buildable. It
+   is also more correct on-device: bake-time resolution runs against a synthetic
+   `firmware` package and a few entries legitimately fail there while resolving fine
+   against real repos. Top-level `etc/`/`var/` are remapped to `private/etc/`,
+   `private/var/` — the `.deb` ships them unprefixed (right for on-device dpkg, where
+   they are symlinks), but `/blackb0x` is a flat mirror replicated literally.
+7. **Stage the rest, per firmware.** The bake-time `apt-get update` lists cache
+   (so on-device apt knows what every repo offered even with no network at install
+   time), the non-preinstalled `.deb` bytes into apt's real cache directory, and
+   exactly one of three persistence payloads picked by this firmware's real
+   `ProductVersion`.
+8. **Build the entrypoint binary once.** `BakeFirmware.cpp`'s `main()` calls
+   `buildEntrypointBinary()` before its per-firmware loop, same pattern as the
+   debcache cache, and passes the one built path into every `bakeRamdisk()` call.
+
+### Persistence payloads
+
+Picked by `stageVersionBranch()` off the firmware's real `ProductVersion`:
+
+- **8.4.x** → `stageEtasonatv()`: the four loose payload files extracted directly
+  from the real `net.tihmstar.etasonuntether` `.deb` in `debcache/` (not the old
+  hand-assembled `tihmstar-untether.tar`, which is gone), with this project's own
+  `misc/untether.bin` deliberately overriding the package's copy, held in dpkg so
+  apt can never replace it. Plus the `/untether/expl.js` → `/--early-boot` symlink.
+  The `rtbuddyd`→`jsc` swap is **not** done at bake time — see `entrypoint.c`'s
+  `fixup_etasonuntether_rtbuddyd()`, which needs the real target volume. The only
+  branch with a real untether.
+- **7.x / 8.x (non-8.4)** → `stageIos7Tether()`: swaps a custom binary into
+  `/usr/libexec/dirhelper` (`misc/dirhelper`). Genuinely tethered; no untether exists
+  for this range. The technique traces cleanly to evasi0n6's published
+  `dirhelper`-hijack mechanism (matching `remount()` call, confirmed against
+  evasi0n6's archived source), but the compiled binary itself was never
+  open-sourced by anyone — see `misc/README.md` for the full dead-end provenance.
+- **6.1.4** → `stageP0sixspwn()`: p0sixspwn's own untether payload, extracted from
+  the real vendored `.deb`.
+- Anything else warns and stages common content only. No hard failure — a firmware
+  with no persistence answer yet still gets everything else correctly.
+
+### `entrypoint.c` replaces `/sbin/launchd`, not `/etc/rc.boot`
+
+The one place this project's exploration went somewhere and came back. Real
+disassembly of an AppleTV2,1 10B809 `RestoreRamdisk` showed `/etc/rc.boot` is itself
+`LC_MAIN`-entered directly by the kernel, so the splice target moved there for a
+while on the theory that injecting at the true first entry point is strictly better.
+It didn't generalize: a real bake against AppleTV3,1/3,2 12H606 failed because that
+firmware's ramdisk has no `/etc/rc.boot` at all (`/etc/` is nearly empty there,
+confirmed by mounting it). Reverted to always targeting `/sbin/launchd`, the one
+thing guaranteed to exist as real PID-1 across every firmware generation. The ad-hoc
+signing identity matches: `com.apple.launchd`.
+
+`do_install()` is unconditional apart from two guards — bail if
+`/mnt1/Applications/AppleTV.app/AppleTV` is missing (not an Apple TV), and `panic()`
+if `/mnt1/var/.blackb0x/install-done` already exists rather than clobber live dpkg
+state. No version branching happens on-device at all; that decision was made at bake
+time, so `entrypoint.c` never needs to know what firmware it is on.
+
+- `merge_tree()` is a generic recursive merge (real `stat()` owner/mode, symlinks
+  recreated verbatim, existing destination directories recursed into rather than
+  replaced). It replaced the old
+  `create_cydia_directories()`/`MYSTERY_DIR_MODE`/`clone_directory()` machinery
+  entirely — every directory `/blackb0x` needs is already a plain staged entry in it.
+- `panic()` deliberately never returns and never reboots. An automatic reboot on a
+  genuine failure would re-run the same ramdisk into the same panic every cycle, with
+  nothing to show a human debugging over console/serial.
+- The mount target is `/mnt1`, not `/mnt` — `/mnt1` and `/mnt2` are real pre-existing
+  empty mountpoints on a pristine ramdisk; `/mnt` never was.
+- `set_auto_boot()` runs the pristine ramdisk's own `/usr/sbin/nvram auto-boot=1`
+  before every `reboot(2)`. SecureROM/iBoot clears that variable once a real DFU
+  payload has run; without it a plain reboot risks leaving the device at the iBoot/DFU
+  prompt instead of continuing into the installed OS. This is the one thing salvaged
+  from the ssh-rd-derived `rc.boot` this project once looked at (now deleted).
+
+### `postinstall.sh` — one-shot, network-opportunistic
+
+Runs once the device boots into its real OS
+(`xyz.regulad.blackb0x.postinstall.plist`, `RunAtLoad`, root). `StandardOutPath` and
+`StandardErrorPath` point at two *separate* log files — pointing both at one path is
+a real, long-documented launchd bug.
+
+**The original plan called for hard-disabling the network for the whole install
+window. That is impossible in practice**: Kodi and a few other real packages are far
+too big for this A4-era ramdisk's budget, so they are never staged locally at all
+(`kNeverStageDebs`). What shipped uses the network opportunistically instead:
+
+- All five real sources.list.d entries are always present; `apt-get update` may reach
+  them if it can. That is the **one and only** command in the script allowed to fail
+  (`|| true`). Everything else runs under a bare `set -ex`, so a real failure stops
+  the script, `install-done` never gets written, and the next boot retries the whole
+  install from scratch.
+- With no network, apt still has the bake-time `apt-get update` lists cache staged at
+  `/private/var/lib/apt/lists/`, so it knows what every repo offered as of bake time.
+- Whatever `.deb` bytes did fit sit in apt's own cache
+  (`/private/var/cache/apt/archives/`); apt finds them via its normal
+  cache-before-download check, no `file://` source needed for the main debcache.
+
+The sequence: exit if `install-done` exists (a real UTC timestamp, not an empty
+touch); wait ≥60s since boot before touching apt, because this `RunAtLoad` job fires
+before networking has necessarily associated and this old launchd has no portable
+one-time-delay knob (`sleep` is not guaranteed present on a stock retail OS — dpkg's
+own control file lists `bash` as a `Depends:`, so this ecosystem treats even a shell
+as something it must supply; `coreutils-bin`'s cached `.deb` gets `dpkg -i`'d if
+missing, though it is normally already bake-time-preinstalled); `apt-get update ||
+true`; `apt-get install cydia` **on its own, first**, because its real postinst does
+its own `/var/stash` relocation and nothing else may assume that environment exists;
+then the templated package set; then `install -f`, plain `upgrade`, `autoremove`;
+then write `install-done` last.
+
+Plain `upgrade`, never `dist-upgrade`/`full-upgrade`: this on-device apt
+(`apt7 0.7.25.3`) has no unified `apt` command and no `full-upgrade` at all, and
+plain `upgrade` only touches already-installed packages, never demanding more from
+the network than what is staged.
+
+Worth knowing, because the pre-rewrite tool got this wrong: **the real `cydia`
+package ships its own `/usr/libexec/cydia/startup`, `firmware.sh` and a real
+`RunAtLoad` LaunchDaemon** (1.1.30, downloaded and inspected directly). The
+synthetic-`firmware`-package declaration, GSC capability stanzas,
+`Media/Cydia/AutoInstall` handling and `uicache` refresh all happen automatically
+once `apt-get install cydia` runs through real dpkg. The old tool reimplemented all
+of it by hand only because its flat-file-copy install never ran real dpkg, so
+Cydia's own LaunchDaemon never got registered.
+
+### Ramdisk sizing
+
+`/blackb0x` does not fit in the pristine ramdisk's free space, and growing an HFS+
+volume in place proved unreliable (xpwn's `grow_hfs()`, `libhfsp`, and the Linux
+kernel driver's own resize path each have a confirmed bug in exactly that operation).
+So the bake assembles the real final content — original ramdisk + spliced `launchd` +
+`/blackb0x` — onto a generously oversized throwaway scratch volume, measures that
+*mounted* volume's real disk usage (block-rounded; estimating from a plain host
+directory undercounted by several MB in practice), then creates the shipped volume
+sized from that number plus a margin and does one `cp -a`.
+
+Both volumes are case-sensitive, matching the real iOS/tvOS root (HFSX) — a real bake
+failure showed ncurses' terminfo tree needs genuinely distinct case-varying sibling
+directories (`e`/`E`, `a`/`A`).
+
+**A finished ramdisk over 64 MiB is a hard failure**, not a warning: the oversized
+output is deleted and the bake returns false, because a ramdisk that big cannot be
+uploaded and leaving it in `dist/` would get it silently reused.
+`DEBUG_RAMDISK_LIMIT_MIB` overrides the ceiling; `-1` disables the check entirely and
+turns it into a surfaced warning instead. (The ceiling was a 70MB rule-of-thumb
+warning under the Linux design; the A4/A5 iBEC has no `ramdisk-size` variable to ask,
+and 64 MiB was confirmed against a live AppleTV3,2 as at-or-very-near the real limit.)
+
 ## External references
 
 - [ATV3 jailbreak writeup PDF](https://elhacker.info/Books/BOOKS%20PART%206/atv3_jb-.pdf)
@@ -270,14 +487,6 @@ own header.
   reverse-engineered install logic (see `misc/README.md`) — both were
   flagged there as "we replicate the action, not the underlying mechanism."
 
-## Current status
-
-Builds clean; fully statically linked. Normal-mode discovery (real `usbmuxd`,
-wolfSSL/SSLv3 lockdownd handshake, AFC), the full firmware download/decrypt/patch/
-re-encrypt pipeline, and `--dry-run` are all verified working against real hardware.
-**Only one physical unit has ever been available to test against: an AppleTV3,2** —
-`AppleTV2,1`(SHAtter)/`AppleTV3,1` (external-hardware checkm8) paths are implemented
-from protocol analysis only, unverified.
 ## Current status: macOS only
 
 **Linux support is removed.** The build refuses to configure off Apple (`CMakeLists.txt`

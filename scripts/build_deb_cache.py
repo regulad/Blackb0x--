@@ -294,7 +294,7 @@ cp /work/sources.list /sandbox/etc/apt/sources.list
 # it no longer unconditionally fails the way it did under the old fixed
 # 8.4.2 pin. This project's own persistence-establishing packages for
 # OTHER firmware branches are already installed as direct loose-file
-# copies, not through apt (see .claude/NEO_FLOW.md) — packages.txt driving
+# copies, not through apt (see AGENTS.md's "Install-time design") — packages.txt driving
 # apt resolution is for the firmware-independent base Cydia system, and
 # per-branch persistence payloads dropping out of it here (when they do)
 # is exactly the signal that they don't belong being resolved this way.

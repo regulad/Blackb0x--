@@ -281,7 +281,7 @@ static int install_file(const char *src, const char *dst, int uid, int gid, int 
 }
 
 /* ---------------------------------------------------------------------- */
-/* /blackb0x merge — NEO_FLOW's replacement for the old per-file           */
+/* /blackb0x merge — replaces the old per-file                            */
 /* install_file() call list. /blackb0x is a flat mirror of the real        */
 /* device's final layout, staged at bake time by bakeRamdisk() with each   */
 /* file/directory/symlink already carrying its correct final owner and     */
@@ -554,7 +554,7 @@ static void fixup_etasonuntether_rtbuddyd(void) {
     }
 }
 
-/* NEO_FLOW: no version/first-install branching left at all. Which
+/* No version/first-install branching left at all. Which
  * firmware this ramdisk targets was already resolved once, at bake time,
  * into exactly what's staged under /blackb0x (see BakeRamdisk.cpp's
  * stageBlackb0xTree()) — this function's only remaining job is a sanity
@@ -562,10 +562,9 @@ static void fixup_etasonuntether_rtbuddyd(void) {
  * unconditional, blind merge_tree().
  *
  * That merge is NOT safe to run twice against the same device, though:
- * /blackb0x ships a static `dpkg` binary at usr/bin/dpkg (see NEO_FLOW's
- * own comment history) alongside apt's sources.list.d/trusted.gpg.d
- * entries and a debcache — all real dpkg-managed paths once postinstall.sh
- * has actually run apt against them. Re-merging over an
+ * /blackb0x ships a static `dpkg` binary at usr/bin/dpkg alongside apt's
+ * own sources.list.d/trusted.gpg.d entries and a debcache — all real
+ * dpkg-managed paths once postinstall.sh has actually run apt against them. Re-merging over an
  * already-provisioned device would blindly stomp whatever real state dpkg
  * itself has since written at those exact same paths (up to and including
  * dpkg's own binary, if apt ever replaces it) with this ramdisk's stale,

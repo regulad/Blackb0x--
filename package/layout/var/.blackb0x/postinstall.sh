@@ -2,7 +2,7 @@
 
 # The legacy behavior this file used to implement is fully documented in
 # the legacy tether flow — nothing here needs to preserve it anymore. The
-# target design is .claude/NEO_FLOW.md.
+# target design is AGENTS.md's "Install-time design".
 #
 # Run directly by xyz.regulad.blackb0x's LaunchDaemon plist as
 # `/bin/bash /var/.blackb0x/postinstall.sh` — bash, not sh. `set -ex`
@@ -121,7 +121,7 @@ apt-get update || true
 # first-run setup (including its own /var/stash relocation of
 # /Applications, /usr/include, /usr/share, with integrity checks on that
 # state; confirmed directly from the real postinst binary's own strings —
-# see .claude/NEO_FLOW.md). Nothing else should assume Cydia's own
+# see AGENTS.md's "Install-time design"). Nothing else should assume Cydia's own
 # environment exists until that's actually finished.
 apt-get install -y --allow-unauthenticated cydia
 

@@ -454,7 +454,7 @@ static bool spliceFileContentInPlace(const std::string& targetPath, const std::s
 }
 
 // ---------------------------------------------------------------------------
-// /blackb0x staging — NEO_FLOW's replacement for the old per-file
+// /blackb0x staging — the current design's replacement for the old per-file
 // install_file() call list inside entrypoint.c. entrypoint.c's own
 // merge_tree() is now a completely blind, unconditional recursive copy: it
 // has no idea what firmware it's running on or what any of these files are
@@ -2202,7 +2202,8 @@ static bool stageVersionBranch(const fs::path& blackb0xRoot, const std::string& 
 // already use for packages that never go through real apt: extract the .deb,
 // merge its payload into /blackb0x, and append a real dpkg status stanza so
 // the on-device dpkg has a genuine record of it. Every file in the .deb is
-// uid 0 / gid 0 (dm.pl records the container-side root), which is exactly
+// uid 0 / gid 0 (a non-root dm.pl stamps root:wheel by construction -- see
+// package/README.md's ownership section), which is exactly
 // what the LaunchDaemon plist needs -- launchd refuses to load a plist that
 // is not root-owned -- and mergeRealFilesystemTree() preserves that.
 //
@@ -2234,8 +2235,8 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
 
     // build.sh builds the bundled local repo itself, straight from
     // package/local_only_debs.txt, and generates its Packages index with the
-    // real dpkg-scanpackages inside the container. Only the .deb source
-    // directory has to be pointed at, since it is not under package/.
+    // real dpkg-scanpackages. Only the .deb source directory has to be
+    // pointed at, since it is not under package/.
     setenv("BLACKB0X_DEBCACHE_DIR", fs::absolute(resolveDebcachePath()).c_str(), 1);
 
     std::string debPath = outDir + "/xyz.regulad.blackb0x.deb";

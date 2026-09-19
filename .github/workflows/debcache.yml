@@ -1,0 +1,122 @@
+# Grow debcache/ from the live apt repos, and commit whatever is new.
+#
+# This is the OTHER half of the package story, and it is deliberately separate
+# from ci.yml:
+#
+#   scripts/build_deb_cache_apt.py   reads debcache/ and resolves a closure
+#                                    over it. Runs on macOS, in every bake,
+#                                    never writes.
+#   scripts/build_deb_cache.py       grows debcache/ by doing a real apt-get
+#                                    solve against the five live repos inside
+#                                    podman. Linux-only (it refuses to start
+#                                    anywhere else), never called by a bake.
+#
+# That second script's own header says a GitHub Action is the intended way to
+# run it. This is that Action.
+#
+# Additive only: the script never deletes or overwrites anything already in
+# debcache/, so the worst case for a run is that nothing changes.
+name: Grow debcache
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Monthly, a few days before ci.yml's own bake on the 23rd, so a bake picks
+    # up whatever this added rather than missing it by a day.
+    - cron: "0 4 19 * *"
+
+# Never more than one of these at a time: two concurrent runs would both try to
+# commit new .deb bytes to the same branch.
+concurrency:
+  group: debcache
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  grow:
+    name: Resolve against live repos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          # The commit below pushes back to this branch, so the checkout needs
+          # a token that can write and a ref that is a branch rather than a
+          # detached SHA.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.ref_name }}
+
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      # One run per device, each declaring that device's own newest known
+      # firmware as the sandbox's synthetic `firmware` package. That matters:
+      # packages gated on `Depends: firmware (>= X)` resolve differently per
+      # version, and bake-firmware itself uses the newest-known-per-model
+      # version rather than a given tuple's own (see BakeFirmware.cpp). Running
+      # only one version would leave the cache short for the others.
+      #
+      # Versions come from misc/firmware_versions.txt, which
+      # scripts/generate_firmware_versions.py regenerates.
+      # One run per device, each declaring that device's own newest known
+      # firmware as the sandbox's synthetic `firmware` package. That matters:
+      # packages gated on `Depends: firmware (>= X)` resolve differently per
+      # version, and bake-firmware itself uses the newest-known-per-model
+      # version rather than a given tuple's own (see BakeFirmware.cpp). Running
+      # only one version would leave the cache short for the others.
+      - name: Resolve
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/debcache-out
+          python3 scripts/newest_firmware_versions.py | while read -r device version; do
+            echo "::group::$device (firmware $version)"
+            python3 scripts/build_deb_cache.py \
+              --output-dir /tmp/debcache-out \
+              --firmware-version "$version"
+            echo "::endgroup::"
+          done
+
+      - name: Report what changed
+        id: changed
+        run: |
+          set -euo pipefail
+          git add -A debcache
+          if git diff --cached --quiet -- debcache; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "debcache/ is unchanged -- the live repos had nothing this cache was missing."
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          git diff --cached --name-status -- debcache
+          count=$(git diff --cached --name-only -- debcache | wc -l | tr -d ' ')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      # Deliberately NOT marked [skip ci]. A debcache change is exactly the
+      # kind of change that should rebuild artifacts: the resolved closure may
+      # now differ, so the published dist/ was built against a stale cache.
+      # Letting this commit trigger ci.yml is the point, not a side effect.
+      # Deliberately NOT marked [skip ci]. A debcache change is exactly the
+      # kind of change that should rebuild artifacts: the resolved closure may
+      # now differ, so the published dist/ was built against a stale cache.
+      # Letting this commit trigger ci.yml is the point, not a side effect.
+      #
+      # Repeated -m flags rather than one embedded multi-line string: git joins
+      # them with blank lines, and it keeps the YAML block scalar readable.
+      - name: Commit
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          COUNT: ${{ steps.changed.outputs.count }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit \
+            -m "debcache: add ${COUNT} package file(s) from the live repos" \
+            -m "Produced by .github/workflows/debcache.yml running scripts/build_deb_cache.py, which does a real apt-get dependency solve against the five configured repos inside podman. Additive only: that script never deletes or overwrites anything already here." \
+            -m "Not marked [skip ci] on purpose. The resolved closure may now differ, so the published firmware artifacts were built against a stale cache and should be rebuilt."
+          git push origin "HEAD:${BRANCH}"

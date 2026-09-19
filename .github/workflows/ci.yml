@@ -104,10 +104,20 @@ jobs:
     runs-on: macos-15
     strategy:
       # One device per runner. The tuples are independent, and a failure on one
-      # device should not deny the other two their artifacts.
+      # device should not deny the others their artifacts.
       fail-fast: false
       matrix:
-        device: ["AppleTV2,1", "AppleTV3,1", "AppleTV3,2"]
+        # AppleTV3,2 only, for now. AppleTV2,1 and AppleTV3,1 both fail at
+        # 10B329a on `KernelCache: patch failed` -- a real, pre-existing defect
+        # in xpwn's img3 decrypt that predates this pipeline entirely (see
+        # .claude/TODO.md item 12). Their iBSS, iBEC and DeviceTree all patch
+        # fine; only the kernel does not, so no complete suite can be produced
+        # for them and there is nothing to publish.
+        #
+        # Listing them here anyway would mean two permanently-red legs, which
+        # trains everyone to ignore the colour. Add them back the moment item
+        # 12 is fixed -- that is the whole change needed.
+        device: ["AppleTV3,2"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -120,12 +130,21 @@ jobs:
                        ldid afsctool dpkg \
                        berkeley-db@5 openssl@3 xxhash lz4 xz gettext
 
-      # build.sh only ever calls bin/dm.pl, which is a standalone Perl script
-      # using core modules only (checked: English, File::Find, File::Spec, Cwd,
-      # Getopt::Long, Pod::Usage, Archive::Tar, IPC::Open2). No toolchain, no
-      # submodules, so a shallow clone is enough.
+      # build.sh only ever calls bin/dm.pl, a standalone Perl script using core
+      # modules only (English, File::Find, File::Spec, Cwd, Getopt::Long,
+      # Pod::Usage, Archive::Tar, IPC::Open2), so none of Theos' toolchain is
+      # needed.
+      #
+      # But bin/dm.pl is a SYMLINK to ../vendor/dm.pl/dm.pl, and vendor/dm.pl
+      # is a Theos submodule. A plain shallow clone leaves it empty, the
+      # symlink dangles, and build.sh's `[ ! -x "$THEOS_DIR/bin/dm.pl" ]`
+      # reports "no dm.pl" -- which is exactly how this failed the first time
+      # it ran. One submodule, fetched shallowly; still no toolchain.
       - name: Install Theos (dm.pl only)
-        run: git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+        run: |
+          git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          git -C "$HOME/theos" submodule update --init --depth 1 vendor/dm.pl
+          test -x "$HOME/theos/bin/dm.pl"
 
       - name: Build the authoring tools
         run: |

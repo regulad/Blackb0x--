@@ -817,7 +817,57 @@ entries, upgradeable/removable through normal apt instead of being
 permanently-invisible loose files), instead of being the one piece of
 this ramdisk's own content dpkg has no record of at all.
 
-## 12. Kernelcache decrypt fails on every IMG3 whose `DATA` size is not 16-aligned
+## 12. Kernelcache decrypt fails on some builds; the cause is NOT yet known
+
+**CORRECTION, from a wider sample.** This entry used to claim the failures
+correlate exactly with a `DATA` `dataSize` that is not a multiple of 16. That
+was a small-sample artifact and is **false**. Counterexample, from a real
+successful bake: `AppleTV3,2` 10B329a has `dlen=6004801`, which is 1 mod 16,
+and it patches, decrypts and bakes into a working 30 MiB ramdisk.
+
+Everything measured so far:
+
+| tuple | dlen | dlen mod 16 | result |
+|---|---|---|---|
+| AppleTV3,1 12H606 | 8312768 | 0 | patches |
+| AppleTV3,2 10B329a | 6004801 | 1 | **patches** |
+| AppleTV3,1 10B329a | 6813386 | 10 | fails |
+| AppleTV2,1 10B809 | 6284571 | 11 | fails |
+| AppleTV3,2 12H606 | 7618269 | 13 | fails |
+| AppleTV2,1 11D258 | 6812814 | 14 | fails |
+
+An alternative rule -- that it fails when the tag's padded size
+`((total - 12) / 16) * 16` lands short of `dlen` -- does not hold either:
+AppleTV3,2 12H606 pads to 7618272, three bytes PAST its dlen of 7618269, and
+still fails. So the determinant is genuinely unknown.
+
+What is still solid, and worth keeping:
+
+- The symptom is always `createAbstractFileFromComp()` (`lzssfile.c`) rejecting
+  the stream, with `decompress_lzss()` returning ~50-70 bytes fewer than the
+  `complzss` header claims.
+- It is not a wrong key. The header parses, the sizes are plausible, and
+  `length_compressed + 0x180` lands exactly on `dlen`. The bulk decompresses;
+  only the tail is wrong.
+- It is not the decrypt/encrypt length asymmetry in `setKeyImg3()` vs
+  `closeImg3()`. Changing the decrypt side to match was tried and moves the
+  decompressed length without reaching the claimed one.
+- It is not a macOS regression; `docs/HISTORY.md` records 10B144b failing the
+  same way on Linux.
+
+**It now blocks two of the three devices.** At `kJailbreakTargetBuild`
+(10B329a), `AppleTV2,1` and `AppleTV3,1` both fail on the kernel while their
+iBSS, iBEC and DeviceTree all patch cleanly, so no complete suite can be built
+for them. `.github/workflows/ci.yml`'s bake matrix is restricted to
+`AppleTV3,2` for exactly this reason; the other two go back the moment this is
+fixed.
+
+The next concrete move is unchanged: diff a known-good decryption of one
+failing kernelcache against xpwn's output over the last few hundred bytes,
+which localises the defect to decrypt or to `decompress_lzss()` rather than
+guessing at rules.
+
+## 12 (original). Kernelcache decrypt fails on every IMG3 whose `DATA` size is not 16-aligned
 
 Found by the first real macOS `bake-firmware --only bootchain` sweep, run at
 the time over the five then-currently-signed builds. Three of the five currently-signed builds fail to patch their

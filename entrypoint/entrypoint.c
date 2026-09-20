@@ -49,7 +49,6 @@
 #define SYS_symlink 57
 #define SYS_readlink 58
 #define SYS_chroot  61
-#define SYS_vfork   66
 #define SYS_dup2    90
 #define SYS_mount     167
 #define SYS_unmount   159
@@ -64,23 +63,38 @@ typedef unsigned int uint32;
 typedef unsigned long size_t_;
 typedef long ssize_t_;
 
+/* Darwin's syscall ABI signals errors via the CARRY FLAG, not a negated
+ * return value: after `svc #0x80`, carry clear = success (r0 is the result),
+ * carry set = failure (r0 is a POSITIVE errno). This is unlike Linux, which
+ * returns -errno in the result register. libSystem's stubs read that carry
+ * and convert it to the C "-1 and set errno" convention; we have no
+ * libSystem, so each wrapper must do it itself. Without this, a failed
+ * open()/stat() returning e.g. ENOENT (2) as a positive value would sail
+ * past every `fd < 0` / `!= 0` error check as if it were a valid fd/result.
+ * `rsbcs r0, r0, #0` negates r0 in place ONLY when carry is set (reverse-
+ * subtract from zero, predicated on CS), turning the positive errno into a
+ * negative one so the C-side checks work like Linux's. It is a conditional
+ * ARM instruction, valid because this file is built `-arch armv6` (ARM
+ * encoding, not Thumb). "cc" is added to the clobber list because svc itself
+ * writes the condition flags. Confirmed against Darwin's arm64 syscall path
+ * (Go's asm_darwin_arm64.s BCC), same convention on armv7. */
 static inline long __syscall0(long n) {
     register long r12 __asm__("r12") = n;
     register long r0 __asm__("r0");
-    __asm__ volatile("svc #128" : "=r"(r0) : "r"(r12) : "memory");
+    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "=r"(r0) : "r"(r12) : "memory", "cc");
     return r0;
 }
 static inline long __syscall1(long n, long a0) {
     register long r12 __asm__("r12") = n;
     register long r0 __asm__("r0") = a0;
-    __asm__ volatile("svc #128" : "+r"(r0) : "r"(r12) : "memory");
+    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12) : "memory", "cc");
     return r0;
 }
 static inline long __syscall2(long n, long a0, long a1) {
     register long r12 __asm__("r12") = n;
     register long r0 __asm__("r0") = a0;
     register long r1 __asm__("r1") = a1;
-    __asm__ volatile("svc #128" : "+r"(r0) : "r"(r12), "r"(r1) : "memory");
+    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12), "r"(r1) : "memory", "cc");
     return r0;
 }
 static inline long __syscall3(long n, long a0, long a1, long a2) {
@@ -88,7 +102,7 @@ static inline long __syscall3(long n, long a0, long a1, long a2) {
     register long r0 __asm__("r0") = a0;
     register long r1 __asm__("r1") = a1;
     register long r2 __asm__("r2") = a2;
-    __asm__ volatile("svc #128" : "+r"(r0) : "r"(r12), "r"(r1), "r"(r2) : "memory");
+    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12), "r"(r1), "r"(r2) : "memory", "cc");
     return r0;
 }
 static inline long __syscall4(long n, long a0, long a1, long a2, long a3) {
@@ -97,7 +111,7 @@ static inline long __syscall4(long n, long a0, long a1, long a2, long a3) {
     register long r1 __asm__("r1") = a1;
     register long r2 __asm__("r2") = a2;
     register long r3 __asm__("r3") = a3;
-    __asm__ volatile("svc #128" : "+r"(r0) : "r"(r12), "r"(r1), "r"(r2), "r"(r3) : "memory");
+    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12), "r"(r1), "r"(r2), "r"(r3) : "memory", "cc");
     return r0;
 }
 
@@ -112,7 +126,12 @@ static int sys_chown(const char *p, int uid, int gid) { return (int)__syscall3(S
 static int sys_access(const char *p, int mode) { return (int)__syscall2(SYS_access, (long)p, mode); }
 static int sys_sync(void) { return (int)__syscall0(SYS_sync); }
 static int sys_dup2(int oldfd, int newfd) { return (int)__syscall2(SYS_dup2, oldfd, newfd); }
-static int sys_reboot(int how) { return (int)__syscall1(SYS_reboot, how); }
+/* reboot(2) is really `reboot(int opt, char *msg)` (xnu syscalls.master #55),
+ * a TWO-argument syscall -- libc's userspace reboot(int) is a 1-arg wrapper
+ * over it. The msg pointer is only dereferenced when opt has RB_PANIC/command
+ * bits set, which we never use, so an earlier 1-arg call left r1 as garbage
+ * harmlessly -- but pass an explicit NULL to match the real ABI. */
+static int sys_reboot(int opt) { return (int)__syscall2(SYS_reboot, opt, 0); }
 static int sys_symlink(const char *target, const char *linkpath) { return (int)__syscall2(SYS_symlink, (long)target, (long)linkpath); }
 static long sys_readlink(const char *path, char *buf, size_t_ n) { return __syscall3(SYS_readlink, (long)path, (long)buf, (long)n); }
 static int sys_chroot(const char *p) { return (int)__syscall1(SYS_chroot, (long)p); }
@@ -127,12 +146,40 @@ static int sys_execve(const char *path, char *const argv[], char *const envp[]) 
 static int sys_wait4(int pid, int *status, int options, void *rusage) { return (int)__syscall4(SYS_wait4, pid, (long)status, options, (long)rusage); }
 static void sys_exit(int code) { __syscall1(SYS_exit, code); }
 
-/* fork()/vfork() return twice (parent/child) — can't go through the plain
- * __syscall0 wrapper safely with a naive C signature, but this binary never
- * actually inspects the "am I the child" return value itself beyond zero
- * checks, matching the original's own FUN_00006074/FUN_00006134 pattern
- * (fork, then in the PARENT spin-wait via wait4 until the child appears). */
-static long sys_vfork(void) { return __syscall0(SYS_vfork); }
+/* fork(2) returns twice, and the plain __syscallN wrapper CANNOT express it:
+ * the Darwin ABI puts the child pid in r0 for BOTH parent and child, and
+ * flags the child in r1 (0 = parent, 1 = child) -- libSystem's fork stub is
+ * what zeroes r0 in the child (see xnu libsyscall/custom/__fork.s). A wrapper
+ * reading only r0 makes the child see its own pid, never 0, so every
+ * `if (pid == 0)` child branch silently runs as the parent. This does that r1
+ * check itself. Carry still means error (rsbcs negates to -errno; r1 is
+ * meaningless then, so the child-zeroing is gated behind carry-clear).
+ *
+ * fork, not vfork, deliberately: with fork the child gets its own address
+ * space, so it can safely return through this C wrapper into run-a-child code
+ * and execve/_exit there. vfork shares the parent's stack and forbids the
+ * child from returning from the calling frame at all -- correctness would then
+ * depend on this wrapper being inlined, which is too fragile to rely on. The
+ * original binary's own child-spawn helpers (FUN_00006074/FUN_00006134) used
+ * fork too. See docs/HISTORY.md. */
+static long sys_fork(void) {
+    register long r12 __asm__("r12") = SYS_fork;
+    register long r0 __asm__("r0");
+    register long r1 __asm__("r1");
+    __asm__ volatile("svc #128\n\t"
+                     "bcs 1f\n\t"         /* carry set -> error path */
+                     "cmp r1, #0\n\t"     /* r1: 0 = parent, 1 = child */
+                     "beq 2f\n\t"         /* parent: r0 already holds pid */
+                     "mov r0, #0\n\t"     /* child: return 0 */
+                     "b 2f\n\t"
+                     "1:\n\t"
+                     "rsb r0, r0, #0\n\t" /* error: r0 = -errno */
+                     "2:"
+                     : "=r"(r0), "=r"(r1)
+                     : "r"(r12)
+                     : "memory", "cc");
+    return r0;
+}
 
 /* O_* flags — BSD/XNU numeric values, not resolved from any header since
  * we have none (-nostdlib). */
@@ -610,18 +657,23 @@ static int do_install(void) {
  * real, pristine binary already present on every restore ramdisk (confirmed directly:
  * firmware-sbin's own preinst backs up this exact path before ever
  * touching it), so nothing needs to be staged for this, just invoked.
- * vfork(), not fork(): the child does nothing but call execve() immediately
- * (textbook-safe under vfork()'s shared-address-space semantics), and
- * sys_exit() below only runs in the child if execve() itself failed. */
+ * fork(), not vfork(): see sys_fork()'s own comment for why the shared-stack
+ * hazard of vfork made a raw-syscall C wrapper unsafe. The child execve()s
+ * /usr/sbin/nvram and, only if execve() itself fails, _exit()s via
+ * sys_exit(); the parent waits for it. */
 static void set_auto_boot(void) {
     char *argv[] = {"/usr/sbin/nvram", "auto-boot=1", 0};
     char *envp[] = {0};
-    long pid = sys_vfork();
+    long pid = sys_fork();
     if (pid == 0) {
         sys_execve("/usr/sbin/nvram", argv, envp);
         sys_exit(1); /* only reached if execve() itself failed */
     }
-    sys_wait4((int)pid, 0, 0, 0);
+    /* pid > 0: parent, wait for the child. pid < 0: fork failed (-errno) --
+     * nothing to wait for, and auto-boot simply will not have been set. */
+    if (pid > 0) {
+        sys_wait4((int)pid, 0, 0, 0);
+    }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -684,7 +736,7 @@ int entry(void) {
         console_print("Unable to mount devices!\n");
         sys_unmount("/mnt1", 0);
         set_auto_boot();
-        sys_reboot(1);
+        sys_reboot(0); /* RB_AUTOBOOT */
         return -1;
     }
     console_print("Devices mounted\n");
@@ -708,7 +760,11 @@ int entry(void) {
     console_print("Rebooting device...\n");
     set_auto_boot();
     sys_close(consoleFd);
-    sys_reboot(1);
+    /* RB_AUTOBOOT (0), a normal reboot. The original binary passed 1
+     * (RB_ASKNAME) here -- a deliberate deviation: RB_ASKNAME is a bootstrap-
+     * prompt flag with nothing to act on under iOS, so it was an inert
+     * wrong value, and 0 is the correct "reboot normally" request. */
+    sys_reboot(0);
 
     return 0;
 }

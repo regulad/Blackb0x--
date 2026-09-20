@@ -1655,6 +1655,12 @@ static bool checkDeviceLeftRecoveryModeAfterBoot(uint64_t ecid) {
 //                              checkDeviceLeftRecoveryModeAfterBoot() above),
 //                              and free.
 //   pio-error=0                carried over from the original app's args.
+//
+// NOT here: serial=3 / debug=0x8 (kernel serial console). They ARE the
+// correct way to make the -v log observable, but the AppleTV3,2's UART is on
+// internal hardware test-points, not the micro-USB port (which is USB/DFU
+// only) -- so with no soldered tap there is nowhere to read that log. See
+// docs/HISTORY.md's "Why serial console debugging is not available" note.
 // Notably absent: nand-enable-reformat=1, and the reason is NOT that it
 // would reformat anything here. Researched rather than assumed: that arg
 // only AUTHORIZES a reformat; the format itself is performed by asr under

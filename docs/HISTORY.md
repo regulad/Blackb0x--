@@ -4324,3 +4324,129 @@ tail**. That leaves two possibilities, both downstream of the bake:
 Next step is to retest against the verified-complete CI kernelcache: if the
 error persists, it is delivery (audit `sendKernelCache`); if it clears, the
 device had been booting a stale artifact.
+
+## Past `bootx`: the `-z` lzss bypass worked, and why serial console debugging is not available
+
+With the `-z` lzss patch baked into iBEC (see `bake-iboot` and the
+`iBoot32Patcher` fork's `patch_lzss_check()`), the on-device `Size mismatch
+from lzss` rejection is gone: `bootx` is accepted and the kernelcache actually
+executes. The observable proof is a **state change past iBEC**: the device
+drops off the USB bus entirely (iBEC, which served the recovery/DFU USB
+interface, is gone and nothing re-enumerates it) and the front **status-LED
+blink cadence slows**. That is consistent with the kernel booting into *our*
+ramdisk: entrypoint.c replaces `/sbin/launchd` and never brings the USB gadget
+up (it just writes files and reboots), so a silent bus is expected once we
+reach userspace.
+
+But it does **not** reboot within a minute, which it must if entrypoint.c ran
+to completion. So the failure has moved *past the kernelcache*: the kernel
+boots, but either it never reaches PID 1 (panic / `md0` root-mount failure /
+`launchd` exec refusal) or entrypoint.c runs and stalls before its final
+`reboot(2)`. After sitting, Menu+Play/Pause forces DFU, so the device is in a
+live post-`bootx` state, not hard-hung at the bootloader.
+
+### Why serial console debugging is not available
+
+The obvious next move is to make the `-v` boot log observable by routing the
+kernel console to the UART: `debug=0x8` (`DB_KPRT` in `osfmk/kern/debug.h` —
+enables kernel serial output and initializes the UART, with no `DB_HALT` bit so
+panic behavior is unchanged) plus `serial=3` (serialmode bits: `0x1` output,
+`0x2` input; `3` = full bidirectional console, matching Apple's own restore
+environments' `debug-uarts=3` / `boot-args=serial=3`). A patched iBEC — which
+we already ship — is required for the kernel to honor custom boot-args at all.
+
+That was implemented and then reverted, because **the AppleTV3,2's UART is on
+internal hardware test-points, not the micro-USB port.** The micro-USB is
+USB/DFU only; true serial requires soldering to on-board footprints (community
+teardowns identify a ~10-pin ARM-JTAG-style connector and a 30-pin FPC — see
+the XDA "Apple TV3 JTAG points" thread). Without a soldered tap there is
+nowhere to read the log, so `serial=3` would emit onto a wire we cannot see.
+Booting via iBEC (not full iBoot) also never initializes the framebuffer, so
+there is no on-screen console either. The `serial=3`/`debug=0x8` reasoning is
+recorded in `DeviceManager.cpp`'s `kRamdiskBootArgs` comment for anyone who
+later adds a hardware tap; it is deliberately not in the live boot-args.
+
+### The channel that is left: USB re-enumeration as a proof-of-life beacon
+
+With no serial and no framebuffer, the remaining zero-hardware, host-visible
+signal is USB **re-enumeration**. We cannot bring a USB *interface* up from
+entrypoint.c ourselves — advertising the restore/AFC gadget needs the IOKit
+userspace USB stack (`restored`/`usbmuxd`) we deliberately do not link, which
+is exactly why the bus goes silent after `bootx`. But `reboot(2)` *is* a USB
+event: the device leaves the kernel and reappears in DFU/recovery on the bus
+(and the LED cadence changes with it). So an early `reboot(2)` from entrypoint —
+before any mount — is a clean binary test: if the ATV power-cycles right after
+`bootx`, entrypoint definitely executed as PID 1 and the bug is downstream
+(mounts / `merge_tree` / the final reboot); if it stays dark, the kernel never
+reached our `launchd` (panic / `md0` mount / exec-time code-signing). That
+bisection needs no hardware and is the next diagnostic step.
+
+## entrypoint.c syscall ABI audit: the carry-flag error convention, `reboot`'s arity, and a real `fork`/`vfork` bug
+
+Prompted by a question about `sys_reboot`'s flag, the whole freestanding
+syscall layer (`entrypoint.c` has no libSystem, so every wrapper is hand-rolled
+`svc #0x80`) was audited against xnu's `syscalls.master` and `libsyscall`. All
+25 syscall *numbers* were already correct classic-BSD/xnu values, and all arg
+*counts* matched except `reboot`. Three ABI defects were found and fixed; the
+third is significant enough that it could by itself explain a boot that reaches
+userspace and still fails to come back.
+
+**1. `reboot` was called with one argument, but the syscall is two.** xnu
+`syscalls.master` #55 is `reboot(int opt, char *msg)`; libc's userspace
+`reboot(int)` is a 1-arg wrapper over it. Our wrapper passed only `opt`, leaving
+`msg` as garbage in `r1`. Harmless for our flags (msg is only read for
+`RB_PANIC`/command opts), but wrong — now passes an explicit `NULL`. Also
+switched the flag itself from `1` to `0`: the original binary passed `1`
+(`RB_ASKNAME`), a bootstrap-prompt flag with nothing to act on under iOS — an
+inert wrong value. `RB_AUTOBOOT` (`0`) is the correct "reboot normally".
+
+**2. No wrapper honored Darwin's carry-flag error convention.** Unlike Linux
+(which returns `-errno` in the result register), Darwin signals syscall failure
+by *setting the carry flag*, with `r0` holding a *positive* errno; libSystem's
+stubs are what convert that to the C `-1`/`errno` convention. Our wrappers
+returned `r0` raw, so on failure they returned a small positive errno — and a
+failed `open()` returning e.g. `ENOENT` (2) would sail straight past `if (fd <
+0)` as if it were a valid fd, likewise for `stat`/`mount`/`read`. Fixed by
+appending `rsbcs r0, r0, #0` (conditional reverse-subtract-from-zero, predicated
+on carry-set — a plain ARM conditional instruction, valid because the file is
+built `-arch armv6`, i.e. ARM not Thumb) to every `svc`, negating the errno on
+error so all the existing `< 0` / `!= 0` checks become meaningful. `"cc"` was
+added to each asm's clobber list since `svc` writes the flags. Verified in the
+built binary: `rsbhs r0, r0, #0` (otool's spelling of `rsbcs`) follows every
+`svc`.
+
+**3. `sys_vfork()` never told the child it was the child.** This is the real
+bug. On armv7 Darwin, `fork`/`vfork` return the child pid in `r0` for *both*
+processes and flag the child in `r1` (`0` = parent, `1` = child); libSystem's
+`__fork.s` is what zeroes `r0` in the child. Our `sys_vfork()` was
+`__syscall0(SYS_vfork)` — it read only `r0`, so **the child saw its own pid, not
+0.** `set_auto_boot()`'s `if (pid == 0)` child branch therefore never ran, and
+`/usr/sbin/nvram auto-boot=1` was never exec'd. Since SecureROM clears
+`auto-boot` after any USB boot, that means even a fully-working entrypoint would
+reboot into recovery instead of the installed OS — indistinguishable from the
+outside from "the jailbreak didn't work". And under `vfork`'s shared-address-
+space rule the mis-branched child then *returned from the calling frame*, which
+is undefined behavior. Fixed with a dedicated `sys_fork()` that inspects `r1`
+and returns `0` in the child (verified in the disassembly: `svc` → `bhs`
+error → `cmp r1,#0` / `beq` parent / `mov r0,#0` child), and by switching
+`set_auto_boot()` from `vfork` to `fork` so the child has its own address space
+and can safely run C and `execve`/`_exit` — which is what the original binary's
+own child-spawn helpers used anyway. The parent now also only `wait4`s when the
+fork actually succeeded (`pid > 0`).
+
+### Driving the LED as a signal: not reachable from here
+
+The other candidate for an observable signal was the front status LED, whose
+cadence is seen to change after `bootx`. But that cadence changes while *only*
+our minimal entrypoint is running — no SpringBoard, no backboardd, none of the
+userspace that would normally drive it — which means at this boot stage the LED
+is driven automatically by the kernel/a kext, not by a process we could co-opt.
+Driving it deliberately would need IOKit (a user client for the GPIO/LED
+service, reached via mach messaging + `IOServiceOpen`/`IOConnectCallMethod`);
+restore ramdisks do exactly this from C (e.g. iphone-dataprotection's
+`ramdisk_tools/IOKit.c`, and `restored_external` talking to `AppleImage3NORAccess`),
+but only because they link IOKit.framework over libSystem/mach. entrypoint.c is
+freestanding with no mach layer at all, and the ATV3 LED's specific service
+name/selector is undocumented, so this is impractical without abandoning the
+freestanding design. The `reboot(2)` beacon remains the one viable, host-visible
+(USB re-enumeration) proof-of-life signal.

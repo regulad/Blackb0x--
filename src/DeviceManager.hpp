@@ -146,6 +146,12 @@ public:
     // Patcher.cpp's patchiBEC().
     int sendKernelCache(const std::string& path, uint64_t ecid);
     int sendDeviceTree(const std::string& path, uint64_t ecid);
+    // RestoreLogo for the reconnect-per-step (non-stockRecovery) path, sent
+    // between iBEC and Ramdisk with iBoot's "setpicture 4" command -- the
+    // same file+command sendStockRestoreTail() sends on its single-connection
+    // path. Only the stockRecovery path used to send it at all; the normal
+    // reconnect-per-step flow skipped it despite the documented ordering.
+    int sendRestoreLogo(const std::string& path, uint64_t ecid);
 
     // stockRecovery only (see sendComponentsToDevice()'s own comment for
     // why that's the gate, not stockSecurerom): whether useStockIBEC()'s

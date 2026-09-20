@@ -67,21 +67,29 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
 - `src/` — first-party code, flat, and nothing else: `main.cpp`, `Cli.hpp`/`.cpp`,
   `Console.hpp`/`.cpp`, `DeviceManager.hpp`/`.cpp`, `IPSW.hpp`/`.cpp`,
   `IPSWDownloader.hpp`/`.cpp`, `Patcher.hpp`/`.cpp`, `PatcherPatch.cpp`,
-  `Img3Crypt.hpp`/`.cpp`, `Personalize.hpp`/`.cpp`,
+  `Img3Crypt.hpp`/`.cpp`, `StockIBSSCrypt.hpp`/`.cpp`, `Personalize.hpp`/`.cpp`,
   `ResourcePath.hpp`/`.cpp`, `BakeRamdisk.hpp`/`.cpp`, `BakeFirmware.cpp`.
-  **`Patcher` is split across two TUs by whether the method decrypts.**
-  `Patcher.cpp` is the crypto-free half (baked-component loaders, the `dist/`
-  existence check, `useStock*` which now send Apple's original img3 untouched,
-  and bookkeeping) and links no `decrypt()`; it is compiled into both binaries.
+  **`Patcher` is split across two TUs by whether the method patches.**
+  `Patcher.cpp` is the no-patch half (baked-component loaders, the `dist/`
+  existence check, `useStock*`, and bookkeeping) and links no xpwn `decrypt()`
+  and no GPL patch tools; it is compiled into both binaries.
   `PatcherPatch.cpp` holds `patchiBSS()`/`patchiBEC()`/`patchKernel()`, which
   call `decrypt()` (first-party glue in `src/Img3Crypt.cpp`, built over xpwn's
   public API) and fork/exec the GPL patch tools, and is compiled into
   `bake-firmware` ONLY. The upshot, and the invariant to keep:
-  **the `blackb0x` jailbreak binary does zero decryption** — it links neither
-  `blackb0x_xpwntool` nor `xpwn` — and consumes bake-firmware's already-
-  encrypted `dist/` output verbatim. Everything except the raw iBSS reaches its
-  loader still encrypted and img3-wrapped, because iBoot32Patcher defeats only
-  iBoot's signature/ticket/KASLR checks, never its img3 parse or AES-decrypt.
+  **the `blackb0x` jailbreak binary links no xpwn and no GPL patch/decrypt
+  code** — not `blackb0x_xpwntool`, not `xpwn`, not the patch tools — and
+  consumes bake-firmware's already-encrypted `dist/` output verbatim.
+  Everything except the raw iBSS reaches its loader still encrypted and
+  img3-wrapped, because iBoot32Patcher defeats only iBoot's
+  signature/ticket/KASLR checks, never its img3 parse or AES-decrypt. The
+  **one deliberate, narrow exception**: `src/StockIBSSCrypt.cpp` is a small
+  first-party AES-CBC img3 decrypt (wolfSSL, already linked via `deps::wolfssl`
+  — NOT xpwn, so no GPL), and `Patcher::useStockIBSS()` calls it to decrypt a
+  *stock* iBSS for the checkm8 `boot_client()` route only (A5 without
+  `--stock-securerom`), because that route uploads the img3 DATA payload
+  directly as code and so needs plaintext — the same reason the baked iBSS is
+  the one `dist/` component published decrypted.
   The original Objective-C (`AppDelegate`, `MainView`,
   `Blackb0x.h`/`.m`, `TaskManager`, and the old `.h`/`.m`/`.mm` counterparts of the
   files above) has been fully ported and deleted — check `docs/HISTORY.md`/git

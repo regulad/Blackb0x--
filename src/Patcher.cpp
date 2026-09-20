@@ -5,6 +5,7 @@
 
 #include "Patcher.hpp"
 #include "ResourcePath.hpp"
+#include "StockIBSSCrypt.hpp"
 
 // NOTE: this TU links no xpwn/decrypt() code. Everything that decrypts or
 // re-encrypts firmware -- patchiBSS()/patchiBEC()/patchKernel() and the
@@ -83,10 +84,54 @@ void Patcher::loadKeysForDevice(const std::string& deviceID, const std::string& 
 // now. A raw iBSS is exactly what the normal jailbreak path already gets from
 // dist/ -- iBSS being the one component sent decrypted is why it is the sole
 // exception to "everything reaches the loader still encrypted".
-bool Patcher::useStockIBSS(const std::string& path, bool /*stockSecurerom*/) {
+bool Patcher::useStockIBSS(const std::string& path, bool stockSecurerom) {
+    // A5 (AppleTV3,x) with no --stock-securerom is the one delivery route
+    // that cannot run an encrypted iBSS: checkm8's boot_client()
+    // (DeviceManager.cpp) uploads the img3 DATA payload directly as code, so
+    // it needs plaintext. Every OTHER route loads it through a real (or
+    // pwned) SecureROM that AES-decrypts the img3 itself -- --stock-securerom
+    // (standard DFU, un-pwned SecureROM) and AppleTV2,1/A4 (irecv_send_file to
+    // a limera1n/SHAtter-pwned SecureROM) both want the encrypted original,
+    // untouched, so its signature/KBAG stay intact.
+    //
+    // So decrypt here -- and ONLY here -- for the boot_client route, using the
+    // local .keys entry blackb0x already loaded. This is the deliberate,
+    // narrow exception to "blackb0x does no decryption": the same reason the
+    // BAKED iBSS is the one dist/ component published decrypted rather than
+    // re-encrypted (see PatcherPatch.cpp's patchiBSS()). decryptStockIBSS()
+    // uses wolfSSL, not xpwn, so no GPL code reaches blackb0x's link line
+    // (StockIBSSCrypt.cpp). Matches the design the CliOptions::stockRecovery
+    // comment already documented for this path.
+    const bool isA5 = deviceModel_.rfind("AppleTV3", 0) == 0;
+    if (isA5 && !stockSecurerom) {
+        const FirmwareKeyPair* k = keyFor("iBSS");
+        if (!k || k->key.empty() || k->iv.empty()) {
+            fprintf(stderr,
+                    "useStockIBSS: no iBSS decryption keys loaded for %s %s -- the checkm8 boot_client() route "
+                    "uploads the img3 DATA as code and cannot run an encrypted iBSS. Drop a real keys/%s/"
+                    "%s_%s.keys with an iBSS entry, or add --stock-securerom to route through a real "
+                    "SecureROM (which decrypts the img3 itself and needs no local key).\n",
+                    deviceModel_.c_str(), buildID_.c_str(), deviceModel_.c_str(), deviceModel_.c_str(),
+                    buildID_.c_str());
+            return false;
+        }
+        const std::string decPath = path + ".dec";
+        if (!decryptStockIBSS(path, decPath, k->key, k->iv)) {
+            fprintf(stderr, "useStockIBSS: failed to decrypt the stock iBSS at %s\n", path.c_str());
+            return false;
+        }
+        fprintf(stderr,
+                "--stock-recovery: decrypted Apple's stock iBSS for the checkm8 boot_client() route (it "
+                "uploads the DATA payload as code, so it needs plaintext); no patches applied.\n");
+        outputs_.iBSS = decPath;
+        checkPatching();
+        return true;
+    }
+
     fprintf(stderr,
             "--stock-recovery: sending the original downloaded iBSS untouched (still encrypted, still "
-            "img3-wrapped) -- no host-side decryption; whatever loads it decrypts the img3 itself.\n");
+            "img3-wrapped) -- %s decrypts the img3 itself.\n",
+            stockSecurerom ? "the real SecureROM (standard DFU)" : "the pwned SecureROM");
     outputs_.iBSS = path;
     checkPatching();
     return true;

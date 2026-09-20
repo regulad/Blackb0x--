@@ -44,7 +44,7 @@ struct CliOptions {
     // --no-pwn; renamed to avoid colliding with the new, differently-
     // scoped --no-pwn above once that name became available.)
     //
-    // REQUIRES stockFirmware below (runCli() refuses to start otherwise):
+    // REQUIRES stockFirmwareOld below (runCli() refuses to start otherwise):
     // the resulting stock iBEC still enforces real APTicket verification
     // on whatever it loads next, checkm8 or not (patch_ticket_check()
     // only ever runs against blackb0x's own patched iBEC), and a real
@@ -69,19 +69,36 @@ struct CliOptions {
     // -- drop a real .keys file for that build under keys/
     // and rerun to get past it.
     bool stockRecovery = false;
-    // Sends a stock kernelcache (see Patcher::useStockKernel()) and stock
-    // ramdisk (same as stockRamdisk above) -- devicetree is already always
-    // sent unmodified either way. Meaningful alone (blackb0x's own patched
-    // iBSS/iBEC, ticket checks already bypassed there, booting an
-    // otherwise-unmodified OS -- if this boots fine, the iBSS/iBEC patches
-    // are confirmed OK and the failure is in blackb0x's own kernel/ramdisk
-    // patches specifically; if it fails the same way, the iBSS/iBEC
-    // patches themselves are implicated instead) or combined with
-    // stockRecovery above for a fully-stock suite end to end (checkm8/
-    // the pwntool still runs regardless, unless noPwn above also skips it) --
-    // stockRecovery above REQUIRES this combination specifically (see its
-    // own comment for why).
-    bool stockFirmware = false;
+    // The two stock-kernel/ramdisk diagnostics. Both send a stock kernelcache
+    // (see Patcher::useStockKernel()) and stock ramdisk (same as stockRamdisk
+    // above) while keeping blackb0x's own patched iBSS/iBEC -- so both test
+    // "can blackb0x's patched bootloader boot an otherwise-unmodified OS?".
+    // They differ ONLY in which build the stock OS suite (kernelcache,
+    // ramdisk, DeviceTree, RestoreLogo) is pulled from:
+    //
+    //   stockFirmwareOld -- the same build the patched iBSS/iBEC are for
+    //     (kJailbreakTargetBuild). A self-consistent old suite end to end.
+    //     If this boots, the iBSS/iBEC patches are confirmed OK and any
+    //     jailbreak failure is in blackb0x's own kernel/ramdisk patches; if
+    //     it fails the same way, the bootloader patches are implicated.
+    //
+    //   stockFirmwareNew -- the newest currently-signed build instead, still
+    //     loaded by the OLD patched iBSS/iBEC. The patched iBEC has its ticket
+    //     check defeated and the stock kernel/ramdisk go out still-encrypted
+    //     (the iBEC AES-decrypts them via the GID key), so no APTicket and no
+    //     local .keys are needed for the newer suite. Tests whether the old
+    //     patched bootloader can hand off to a newer OS at all.
+    //
+    // Mutually exclusive (runCli()/parseCliOptions() refuse both). stockram-
+    // disk is redundant with either. stockRecovery/stockSecurerom below build
+    // on stockFirmwareOld specifically (a stock bootloader wants one
+    // self-consistent, keyed/signed build, not a mixed old+new suite).
+    bool stockFirmwareOld = false;
+    bool stockFirmwareNew = false;
+    // True when either stock-kernel/ramdisk mode is active. Everything that
+    // only cares "is the kernel/ramdisk being stocked?" (as opposed to WHICH
+    // build supplies it) tests this.
+    bool stockFirmware() const { return stockFirmwareOld || stockFirmwareNew; }
     // Like noPwn above (never attempt to run a pwntool), but for the
     // opposite scenario: a genuinely un-exploited device, still running
     // real, un-bypassed SecureROM signature enforcement. Errors out if the
@@ -92,7 +109,7 @@ struct CliOptions {
     // the rest of the boot chain, personalizing iBSS with a real,
     // ECID-bound SHSH ticket fetched from Apple's TSS server before
     // sending it (see Personalize.hpp/DeviceManager::sendiBSS()) --
-    // REQUIRES both stockRecovery and stockFirmware (runCli() refuses to
+    // REQUIRES both stockRecovery and stockFirmwareOld (runCli() refuses to
     // start otherwise): that ticket (and the combined APTicket
     // DeviceManager::sendStockRestoreTail() sends afterward) is only ever
     // valid for the exact, unmodified stock components BuildManifest.plist

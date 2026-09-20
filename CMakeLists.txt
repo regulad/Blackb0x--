@@ -1179,6 +1179,10 @@ add_executable(blackb0x
     src/IPSWDownloader.cpp
     src/Patcher.cpp
     src/Personalize.cpp
+    # First-party AES-CBC decrypt of a stock iBSS, for the checkm8 boot_client()
+    # route only (Patcher::useStockIBSS()). Uses wolfSSL, not xpwn -- the one
+    # deliberate, narrow decryption in blackb0x. See its own header.
+    src/StockIBSSCrypt.cpp
     src/ResourcePath.cpp)
 
 target_include_directories(blackb0x PRIVATE third_party/xpwn/includes)
@@ -1329,6 +1333,9 @@ add_executable(bake-firmware
     # First-party decrypt()/IMG3 re-encrypt glue over xpwn's public API (was
     # the vendored src/libraries/xpwntool.c + blackb0x_xpwntool library).
     src/Img3Crypt.cpp
+    # Shared with blackb0x -- Patcher::useStockIBSS() (in the shared Patcher.cpp)
+    # calls decryptStockIBSS(), so both targets that build Patcher.cpp need it.
+    src/StockIBSSCrypt.cpp
     src/ResourcePath.cpp)
 
 # Img3Crypt.cpp includes <xpwn/nor_files.h>, whose chain reaches a bare
@@ -1338,6 +1345,14 @@ add_executable(bake-firmware
 # Applied as a per-source property so it doesn't force wolfssl/options.h onto
 # every other bake-firmware translation unit.
 set_source_files_properties(src/Img3Crypt.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${DEPS_INCLUDE};${DEPS_INCLUDE}/wolfssl"
+    COMPILE_OPTIONS "-include;${DEPS_INCLUDE}/wolfssl/options.h")
+
+# StockIBSSCrypt.cpp uses wolfSSL's <openssl/aes.h> compat shim directly (the
+# only openssl-compat consumer in first-party blackb0x/bake-firmware code that
+# isn't Img3Crypt.cpp), so it needs the same wolfssl/options.h force-include.
+# Per-source (this directory scope covers its compilation into both targets).
+set_source_files_properties(src/StockIBSSCrypt.cpp PROPERTIES
     INCLUDE_DIRECTORIES "${DEPS_INCLUDE};${DEPS_INCLUDE}/wolfssl"
     COMPILE_OPTIONS "-include;${DEPS_INCLUDE}/wolfssl/options.h")
 

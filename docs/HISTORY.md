@@ -4036,7 +4036,7 @@ One cosmetic leftover: the libirecovery fork's branch is still named
 `libusb-async-cancel-fix`, after libusb fixes this project no longer compiles. Renaming a
 pushed branch that `.gitmodules` pins is not worth the churn.
 
-## Stock diagnostic paths after the decryption strip: two prep bugs fixed, and why `--stock-recovery` alone became structurally impossible on A5
+## Stock diagnostic paths after the decryption strip: prep bugs, the stock-iBSS decrypt, RestoreLogo, and the --stock-firmware-old/-new split
 
 Revisiting the boot failure after the library-vendoring work, three separate
 things were wrong with the `--stock-*` diagnostic routes, all consequences of
@@ -4066,37 +4066,81 @@ the spurious "bake it first" message the user reported. Replaced with
 every component is coming from the IPSW verbatim, which is the sole
 fully-stock combination.
 
-**3. `--stock-recovery` without `--stock-securerom` can no longer deliver a
-runnable iBSS on AppleTV3,x — now refused outright.** This is the one that
-explains "not booting, and the Boot Failure Count never even increments." On
-A5, a non-`--stock-securerom` iBSS goes through checkm8's `boot_client()`,
-whose `check_img3_file_format()` strips the img3 wrapper and uploads the DATA
-tag's bytes **verbatim, without decrypting** (the exploited SecureROM then
-executes them as code). That is exactly why `patchiBSS()` leaves the *baked*
-ATV3 iBSS decrypted (`outputs_.iBSS = patchedPath`, not the re-encrypted
-`outPath`). A *stock* iBSS is a still-encrypted img3, so `boot_client()` would
-upload ciphertext-as-code: no iBoot ever runs, no `bootx`, and the on-device
-boot-failure counter — which only advances when iBoot itself attempts and
-fails a boot — never moves. The older HISTORY entry above, describing
-`--stock-recovery` (no securerom) reaching `bootx` with the counter
-incrementing, was from the era when `useStockIBSS()` still decrypted the stock
-iBSS host-side; removing that made this sub-path structurally impossible, not
-merely "unsolved." `sendiBSS()` now detects the exact condition
-(`(isATV31 || isATV32) && stockRecovery && !stockSecurerom`) and refuses with a
-real explanation, pointing at the only coherent fully-stock A5 test:
-`--stock-firmware --stock-recovery --stock-securerom` (real SecureROM over
-standard DFU, which decrypts the img3 itself against a live SHSH ticket).
+**3. `--stock-recovery` without `--stock-securerom` needs the stock iBSS
+decrypted host-side first.** This is the one that explains "not booting, and
+the Boot Failure Count never even increments." On A5, a non-`--stock-securerom`
+iBSS goes through checkm8's `boot_client()`, whose `check_img3_file_format()`
+strips the img3 wrapper and uploads the DATA tag's bytes **verbatim, without
+decrypting** (the exploited SecureROM then executes them as code). That is
+exactly why `patchiBSS()` leaves the *baked* ATV3 iBSS decrypted
+(`outputs_.iBSS = patchedPath`, not the re-encrypted `outPath`). A *stock* iBSS
+is a still-encrypted img3, so uploading it unchanged is ciphertext-as-code: no
+iBoot ever runs, no `bootx`, and the on-device boot-failure counter — which
+only advances when iBoot itself attempts and fails a boot — never moves.
+
+A first pass here *refused* this combination outright, on the reasoning that
+blackb0x no longer decrypts anything. That was wrong, and the fix was
+reverted: the coherent answer is to decrypt the stock iBSS host-side for this
+one route, exactly as `useStockIBSS()`'s own long-standing comment already
+described. That is the sole, deliberate exception to "blackb0x does no
+decryption," and it is the same reason the baked iBSS is the one `dist/`
+component published decrypted rather than re-encrypted. `src/StockIBSSCrypt.cpp`
+is a small first-party AES-CBC img3 decrypt (its img3 walk mirrors
+`check_img3_file_format()` exactly) built on **wolfSSL** — already on
+blackb0x's link line via `deps::wolfssl` — so it pulls no xpwn/GPL code into
+blackb0x. `useStockIBSS()` invokes it only for the boot_client route
+(A5 && !`--stock-securerom`), using the local `keys/` iBSS entry blackb0x
+already loads; every other route (`--stock-securerom`'s real SecureROM, or
+AppleTV2,1/A4's pwned SecureROM over `irecv_send_file`) still gets the
+encrypted original untouched, because those decrypt the img3 themselves and a
+decrypt would invalidate the signature/KBAG.
+
+**Missing RestoreLogo on the reconnect-per-step path.** `sendComponentsToDevice()`
+documents its flow as iBSS → iBEC → **RestoreLogo** → Ramdisk → DeviceTree →
+KernelCache, and the single-connection `sendStockRestoreTail()` (stockRecovery)
+sent RestoreLogo — but the ordinary reconnect-per-step path (normal jailbreak
+and `--stock-firmware-*` without `--stock-recovery`) skipped it entirely. Added
+`DeviceManager::sendRestoreLogo()` (file + `setpicture 4`, same as the stock
+tail) and a call between iBEC and Ramdisk, sent whenever the manifest actually
+had a RestoreLogo (non-fatal on failure — it is a cosmetic boot image).
+
+**The `--stock-firmware` split.** `--stock-firmware` is gone, replaced by two
+flags that differ only in which build supplies the stock OS suite:
+- **`--stock-firmware-old`** — the old build the patched iBSS/iBEC are for
+  (`kJailbreakTargetBuild`); a self-consistent old suite end to end. This is
+  what `--stock-firmware` alone used to be, and the build `--stock-recovery`/
+  `--stock-securerom` now require.
+- **`--stock-firmware-new`** — the newest currently-signed build's stock suite
+  (kernel/ramdisk/DeviceTree/RestoreLogo), still loaded by the OLD patched
+  iBSS/iBEC. No APTicket and no local keys are needed for it: the patched
+  iBEC's ticket check is defeated and the stock images go out still-encrypted
+  (the iBEC AES-decrypts them via the GID key). Tests whether the old patched
+  bootloader can hand off to a *newer* OS at all — the natural next probe once
+  the `--stock-securerom` fully-stock path was seen to panic right after
+  RestoreLogo/`setpicture 4` on real hardware.
+
+This made `downloadAndPatchComponents()` carry two build IDs: `bootloaderBuild`
+(the baked iBSS/iBEC and the bake target — always `kJailbreakTargetBuild` for
+any patched-bootloader mode) and `buildToRequest` (the downloaded OS suite +
+manifest). They are equal in every mode but `--stock-firmware-new`. `keys/` are
+loaded for `bootloaderBuild` (the iBSS-decrypt keys, and the only build that
+has any), and the baked iBSS/iBEC use a `bootSuffix` while baked OS components
+use an `osSuffix`.
 
 Net effect on the diagnostic matrix, all verified to build (both target
-groups) and prep without the old spurious errors:
+groups), prep, and parse:
 
 - **default** (no stock flags) — full bake; patched everything.
-- **`--stock-firmware`** — bakes (patched iBSS/iBEC + DeviceTree from bake),
-  stock kernel/ramdisk downloaded.
-- **`--stock-firmware --stock-recovery`** — no bake; refused at `sendiBSS()`
-  with the securerom guidance above (encrypted iBSS, no valid A5 delivery).
-- **`--stock-firmware --stock-recovery --stock-securerom`** — no bake; the
-  real-SecureROM fully-stock path, DeviceTree/RestoreLogo downloaded.
+- **`--stock-firmware-old`** — bake old build; patched iBSS/iBEC + DeviceTree
+  from the bake, stock old kernel/ramdisk downloaded, RestoreLogo sent if the
+  manifest has one.
+- **`--stock-firmware-new`** — bake old build for the patched iBSS/iBEC only;
+  newest-signed kernel/ramdisk/DeviceTree/RestoreLogo downloaded and sent under
+  that old bootloader.
+- **`--stock-firmware-old --stock-recovery`** — no bake; stock iBSS decrypted
+  host-side for the boot_client route, rest downloaded.
+- **`--stock-firmware-old --stock-recovery --stock-securerom`** — no bake; the
+  real-SecureROM fully-stock path (the one still panicking after RestoreLogo).
 
 The separate, ultimate goal — a real jailbroken boot via the patched `dist/`
 ramdisk — is untouched by this and remains open.

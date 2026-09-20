@@ -79,27 +79,32 @@ void printCliUsage(const char* argv0) {
     printf("                            to the bootloader itself) -- to check whether a\n");
     printf("                            boot failure is in blackb0x's own iBSS/iBEC\n");
     printf("                            patches or elsewhere in the chain. REQUIRES\n");
-    printf("                            --stock-firmware (refuses to start otherwise): the\n");
-    printf("                            resulting stock iBEC still enforces real APTicket\n");
-    printf("                            verification on whatever it loads next, and a real\n");
-    printf("                            ticket can never authorize blackb0x's own patched\n");
-    printf("                            kernel/ramdisk. The device will NOT be jailbroken\n");
-    printf("                            by a run using this flag.\n");
-    printf("  --stock-firmware          DIAGNOSTIC: send a stock kernelcache (no\n");
-    printf("                            tfp0/AMFI/sandbox patches) and stock ramdisk\n");
-    printf("                            (same as --stock-ramdisk) -- meaningful alone\n");
-    printf("                            (keeps blackb0x's own patched iBSS/iBEC) to check\n");
-    printf("                            whether blackb0x's own patched bootloader can\n");
-    printf("                            still boot an otherwise-unmodified OS: if this\n");
-    printf("                            boots fine, the iBSS/iBEC patches are confirmed OK\n");
-    printf("                            and the failure is in blackb0x's own kernel/\n");
-    printf("                            ramdisk patches specifically; if it fails the same\n");
-    printf("                            way, the iBSS/iBEC patches themselves are\n");
-    printf("                            implicated. Also required alongside\n");
-    printf("                            --stock-recovery for a fully-stock suite end to\n");
-    printf("                            end (see that flag's own entry for why). The\n");
-    printf("                            device will NOT be jailbroken by a run using this\n");
-    printf("                            flag.\n");
+    printf("                            --stock-firmware-old (refuses to start otherwise):\n");
+    printf("                            the resulting stock iBEC still enforces real\n");
+    printf("                            APTicket verification on whatever it loads next,\n");
+    printf("                            and a real ticket can never authorize blackb0x's\n");
+    printf("                            own patched kernel/ramdisk. The device will NOT be\n");
+    printf("                            jailbroken by a run using this flag.\n");
+    printf("  --stock-firmware-old      DIAGNOSTIC: send a stock kernelcache (no\n");
+    printf("                            tfp0/AMFI/sandbox patches) and stock ramdisk from\n");
+    printf("                            the SAME build the patched iBSS/iBEC are for, while\n");
+    printf("                            keeping blackb0x's own patched iBSS/iBEC -- to\n");
+    printf("                            check whether the patched bootloader can boot an\n");
+    printf("                            otherwise-unmodified OS. If it boots, the iBSS/iBEC\n");
+    printf("                            patches are OK and any jailbreak failure is in the\n");
+    printf("                            kernel/ramdisk patches; if it fails the same way,\n");
+    printf("                            the bootloader patches are implicated. Also the\n");
+    printf("                            build --stock-recovery/--stock-securerom pair with.\n");
+    printf("  --stock-firmware-new      DIAGNOSTIC: like --stock-firmware-old, but pull the\n");
+    printf("                            stock OS suite (kernelcache/ramdisk/DeviceTree/\n");
+    printf("                            RestoreLogo) from the NEWEST currently-signed build\n");
+    printf("                            instead, still loaded by the OLD patched iBSS/iBEC.\n");
+    printf("                            The patched iBEC's ticket check is defeated and the\n");
+    printf("                            stock images go out still-encrypted (iBEC decrypts\n");
+    printf("                            them via the GID key), so no APTicket or local keys\n");
+    printf("                            are needed. Tests whether the old patched\n");
+    printf("                            bootloader can hand off to a newer OS. Mutually\n");
+    printf("                            exclusive with --stock-firmware-old.\n");
     printf("  --stock-securerom           DIAGNOSTIC: never attempt to run a pwntool, for a\n");
     printf("                            genuinely un-exploited device still running real,\n");
     printf("                            un-bypassed SecureROM signature enforcement --\n");
@@ -110,7 +115,8 @@ void printCliUsage(const char* argv0) {
     printf("                            Apple's TSS server before being sent, and a combined\n");
     printf("                            APTicket covering everything after it (see\n");
     printf("                            Personalize.hpp) -- REQUIRES both --stock-recovery\n");
-    printf("                            and --stock-firmware (refuses to start otherwise):\n");
+    printf("                            and --stock-firmware-old (refuses to start\n");
+    printf("                            otherwise):\n");
     printf("                            those tickets are only ever valid for the exact,\n");
     printf("                            unmodified stock components, so anything blackb0x\n");
     printf("                            has patched can never pass.\n");
@@ -146,8 +152,10 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.stockRamdisk = true;
         } else if (arg == "--stock-recovery") {
             options.stockRecovery = true;
-        } else if (arg == "--stock-firmware") {
-            options.stockFirmware = true;
+        } else if (arg == "--stock-firmware-old") {
+            options.stockFirmwareOld = true;
+        } else if (arg == "--stock-firmware-new") {
+            options.stockFirmwareNew = true;
         } else if (arg == "--stock-securerom") {
             options.stockSecurerom = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -158,18 +166,26 @@ CliOptions parseCliOptions(int argc, char** argv) {
             exit(2);
         }
     }
-    // --stock-firmware already implies stock ramdisk (see
+    // The two stock-firmware modes pick DIFFERENT builds for the stock OS
+    // suite (old vs. newest-signed), so they cannot both be in effect.
+    if (options.stockFirmwareOld && options.stockFirmwareNew) {
+        fprintf(stderr,
+                "--stock-firmware-old and --stock-firmware-new are mutually exclusive (they choose different "
+                "builds for the stock kernel/ramdisk).\n");
+        printCliUsage(argv[0]);
+        exit(2);
+    }
+    // --stock-firmware-old/-new already imply stock ramdisk (see
     // downloadAndPatchComponents()'s own `stockRamdisk || stockFirmware`
     // check) -- not an error, just redundant, so warn rather than reject.
-    // --stock-recovery is NOT redundant with --stock-firmware: --stock-
-    // firmware deliberately keeps blackb0x's own patched iBSS/iBEC and
-    // only stocks the kernel/ramdisk (isolating whether the *bootloader*
-    // patches themselves are the problem); combining both flags is how
-    // you get a fully-stock suite end to end, a real, distinct diagnostic
-    // of its own, not a redundant restatement. --no-pwn is unrelated to
-    // either -- it controls whether a pwntool runs at all.
-    if (options.stockFirmware && options.stockRamdisk) {
-        fprintf(stderr, "--stock-ramdisk is redundant with --stock-firmware\n");
+    // --stock-recovery is NOT redundant with them: they deliberately keep
+    // blackb0x's own patched iBSS/iBEC and only stock the kernel/ramdisk
+    // (isolating whether the *bootloader* patches themselves are the
+    // problem); combining --stock-recovery is how you get a fully-stock
+    // suite end to end, a real, distinct diagnostic of its own. --no-pwn is
+    // unrelated to either -- it controls whether a pwntool runs at all.
+    if (options.stockFirmware() && options.stockRamdisk) {
+        fprintf(stderr, "--stock-ramdisk is redundant with --stock-firmware-old/-new\n");
     }
     // Opposite PWND-state requirements (noPwn hard-fails if NOT already
     // pwned; stockSecurerom hard-fails if it IS) -- not useful together,
@@ -532,6 +548,7 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
 // the same patch* calls as a side effect of assignment).
 std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, const AppleTVDevice& device,
                                                               const std::string& buildToRequest,
+                                                              const std::string& bootloaderBuild,
                                                               bool stockRamdisk,
                                                               bool stockRecovery, bool stockFirmware,
                                                               bool stockSecurerom) {
@@ -566,7 +583,13 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
         return std::nullopt;
     }
 
-    patcher.loadKeysForDevice(device.deviceModel, manifest->realBuildID);
+    // Keys come from the bootloaderBuild, not the OS-suite build: they're
+    // needed only to decrypt a stock iBSS for the checkm8 route
+    // (useStockIBSS()), which is that bootloader's build -- and for
+    // --stock-firmware-new the OS-suite build (newest-signed) has no local
+    // keys at all, while the old bootloaderBuild does. Everywhere else the
+    // two builds are identical, so this is unchanged for them.
+    patcher.loadKeysForDevice(device.deviceModel, bootloaderBuild);
     patcher.setBuildIdentity(manifest->buildIdentity);
     patcher.setBuildID(manifest->realBuildID);
 
@@ -593,8 +616,13 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // in dist/). The old gate here (`!stockRamdisk && !stockFirmware`)
     // wrongly skipped the bake for --stock-firmware too, so its takeBaked()
     // iBSS/iBEC/DeviceTree calls hit a dist/ that was never produced.
+    // Bake the bootloaderBuild (that is where the baked iBSS/iBEC live). For
+    // every mode except --stock-firmware-new it equals realBuildID; for
+    // --stock-firmware-new it stays the old kJailbreakTargetBuild while the
+    // OS suite is downloaded from a newer build, so the bake must target the
+    // OLD build, not the new one this run's manifest is for.
     bool fullyStock = stockFirmware && stockRecovery;
-    if (!fullyStock && !ensureBakedFirmware(device.deviceModel, manifest->realBuildID)) {
+    if (!fullyStock && !ensureBakedFirmware(device.deviceModel, bootloaderBuild)) {
         return std::nullopt;
     }
 
@@ -661,15 +689,21 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // that can only come from the IPSW. So those branches download (populating
     // the usual cache under ipswDataRoot()) while every other component is
     // taken from the bake.
-    const std::string bakedSuffix = "-" + device.deviceModel + "_" + manifest->realBuildID;
-    auto takeBaked = [&](const char* label, const std::string& name, auto&& setter) {
-        const std::string path = "dist/" + name + bakedSuffix;
+    // Two suffixes: bootSuffix names the baked iBSS/iBEC (blackb0x's patched
+    // bootloader, always kJailbreakTargetBuild's), osSuffix names any baked
+    // OS component (kernel/DeviceTree/RestoreLogo, the run's manifest build).
+    // Identical for every mode but --stock-firmware-new, which splits them.
+    const std::string osSuffix = "-" + device.deviceModel + "_" + manifest->realBuildID;
+    const std::string bootSuffix = "-" + device.deviceModel + "_" + bootloaderBuild;
+    auto takeBaked = [&](const char* label, const std::string& name, const std::string& suffix,
+                          const std::string& bakeBuild, auto&& setter) {
+        const std::string path = "dist/" + name + suffix;
         if (!fs::exists(path)) {
             fprintf(stderr,
                     "%s: no baked component at %s.\n"
                     "  Bake it first:\n"
                     "    sudo ./build/bake-firmware --device '%s' --build %s\n",
-                    label, path.c_str(), device.deviceModel.c_str(), manifest->realBuildID.c_str());
+                    label, path.c_str(), device.deviceModel.c_str(), bakeBuild.c_str());
             return;
         }
         setter(path);
@@ -681,15 +715,18 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
         downloadAndPatch("iBEC", manifest->iBECPath,
                           [&](const std::string& path) { patcher.useStockIBEC(path); });
     } else {
-        takeBaked("iBSS", "iBSS", [&](const std::string& p) { patcher.setBakedIBSSPath(p); });
-        takeBaked("iBEC", "iBEC", [&](const std::string& p) { patcher.setBakedIBECPath(p); });
+        takeBaked("iBSS", "iBSS", bootSuffix, bootloaderBuild,
+                  [&](const std::string& p) { patcher.setBakedIBSSPath(p); });
+        takeBaked("iBEC", "iBEC", bootSuffix, bootloaderBuild,
+                  [&](const std::string& p) { patcher.setBakedIBECPath(p); });
     }
 
     if (stockFirmware) {
         downloadAndPatch("KernelCache", manifest->kernelCachePath,
                           [&](const std::string& path) { patcher.useStockKernel(path, stockRecovery); });
     } else {
-        takeBaked("KernelCache", "KernelCache", [&](const std::string& p) { patcher.setBakedKernelPath(p); });
+        takeBaked("KernelCache", "KernelCache", osSuffix, manifest->realBuildID,
+                  [&](const std::string& p) { patcher.setBakedKernelPath(p); });
     }
 
     // DeviceTree is sent unmodified (see Patcher::setDeviceTreePath()), so
@@ -702,7 +739,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // required component with no download path at all, which is exactly why
     // that route failed with a hard "missing DeviceTree". Same
     // bake-first/download-fallback shape as RestoreLogo just below.
-    const std::string bakedDeviceTree = "dist/DeviceTree" + bakedSuffix;
+    const std::string bakedDeviceTree = "dist/DeviceTree" + osSuffix;
     if (fs::exists(bakedDeviceTree)) {
         patcher.setDeviceTreePath(bakedDeviceTree);
     } else {
@@ -721,8 +758,8 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // Preferred from the bake, which publishes it verbatim, and downloaded only
     // as a fallback -- a dist/ produced before bake-firmware started publishing
     // the unmodified components will not have it.
-    if (fs::exists("dist/RestoreLogo" + bakedSuffix)) {
-        patcher.setRestoreLogoPath("dist/RestoreLogo" + bakedSuffix);
+    if (fs::exists("dist/RestoreLogo" + osSuffix)) {
+        patcher.setRestoreLogoPath("dist/RestoreLogo" + osSuffix);
     } else {
         downloadAndPatch(
             "RestoreLogo", manifest->restoreLogoPath,
@@ -736,7 +773,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // iteration instead of a fixed component list.
     // Same bake-first, download-as-fallback rule as RestoreLogo above.
     for (const auto& [name, remotePath] : manifest->loadedByIBootComponents) {
-        const std::string baked = "dist/" + name + bakedSuffix;
+        const std::string baked = "dist/" + name + osSuffix;
         if (fs::exists(baked)) {
             patcher.addLoadedByIBootComponent(name, baked);
             continue;
@@ -879,6 +916,22 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
         return true;
     }
 
+    // RestoreLogo, when the manifest had one (downloadAndPatchComponents()
+    // only sets components.restoreLogo if a real Path existed). This path
+    // used to skip it entirely even though the documented flow and the
+    // stockRecovery path (sendStockRestoreTail()) both send it here, between
+    // iBEC and Ramdisk. Non-fatal on failure: RestoreLogo is a cosmetic boot
+    // image, not something the boot depends on, so a failed send shouldn't
+    // abort a run that would otherwise proceed.
+    if (components.restoreLogo) {
+        console::out("Sending RestoreLogo...\n");
+        if (deviceManager.sendRestoreLogo(*components.restoreLogo, device.ecid) != 0) {
+            console::err("Failed to send RestoreLogo (continuing -- it is a cosmetic boot image).\n");
+        } else {
+            console::out("RestoreLogo sent.\n");
+        }
+    }
+
     console::out("Sending Ramdisk...\n");
     i = components.ramdisk ? deviceManager.sendRamdisk(*components.ramdisk, device.ecid) : -1;
     if (i != 0) {
@@ -946,13 +999,15 @@ int runCli(const CliOptions& options) {
     // check to catch it, so this specific combination gets a message
     // that actually names --stock-securerom as the reason. Refuse outright
     // rather than attempting (and failing) a combination that can never
-    // do anything else.
-    if (options.stockSecurerom && !(options.stockRecovery && options.stockFirmware)) {
+    // do anything else. Pairs with --stock-firmware-old specifically: a
+    // real SecureROM run is one self-consistent signed build end to end,
+    // not the mixed old-bootloader/new-suite --stock-firmware-new does.
+    if (options.stockSecurerom && !(options.stockRecovery && options.stockFirmwareOld)) {
         fprintf(stderr,
-                "--stock-securerom requires both --stock-recovery and --stock-firmware: personalizing "
+                "--stock-securerom requires both --stock-recovery and --stock-firmware-old: personalizing "
                 "anything other than the unmodified, stock iBSS/iBEC/kernel/ramdisk against a real TSS "
                 "ticket can never pass a genuine SecureROM's signature check. Pass --stock-recovery "
-                "--stock-firmware --stock-securerom together.\n");
+                "--stock-firmware-old --stock-securerom together.\n");
         return 1;
     }
 
@@ -975,12 +1030,16 @@ int runCli(const CliOptions& options) {
     // fail with no output component set at all, surfacing several layers
     // away as a generic "Not all required components patched
     // successfully".
-    if (options.stockRecovery && !options.stockFirmware) {
+    // Specifically --stock-firmware-old, not -new: --stock-recovery stocks the
+    // bootloader too, so the whole suite has to be one self-consistent build
+    // its ticket verification accepts -- the mixed old-bootloader/new-suite
+    // --stock-firmware-new does is meaningless once the bootloader is stock.
+    if (options.stockRecovery && !options.stockFirmwareOld) {
         fprintf(stderr,
-                "--stock-recovery requires --stock-firmware: a stock iBEC verifies a real APTicket against "
-                "the exact, unmodified component digests BuildManifest.plist lists, and blackb0x's own "
-                "patched kernel/ramdisk can never match those regardless of which build gets requested. Pass "
-                "--stock-recovery --stock-firmware together.\n");
+                "--stock-recovery requires --stock-firmware-old: a stock iBEC verifies a real APTicket "
+                "against the exact, unmodified component digests BuildManifest.plist lists, and blackb0x's "
+                "own patched kernel/ramdisk can never match those regardless of which build gets requested. "
+                "Pass --stock-recovery --stock-firmware-old together.\n");
         return 1;
     }
 
@@ -1180,9 +1239,13 @@ int runCli(const CliOptions& options) {
     // perfectly compatible with a real, successful jailbreak if the
     // device was already pwned by a separate run.
     std::vector<std::string> stockFlags;
-    if (options.stockFirmware) stockFlags.push_back("--stock-firmware (patched bootloader, stock kernel/ramdisk)");
+    if (options.stockFirmwareOld)
+        stockFlags.push_back("--stock-firmware-old (patched bootloader, stock kernel/ramdisk, same build)");
+    if (options.stockFirmwareNew)
+        stockFlags.push_back("--stock-firmware-new (patched old bootloader, newest-signed stock suite)");
     if (options.stockRecovery) stockFlags.push_back("--stock-recovery (stock iBSS/iBEC)");
-    if (options.stockRamdisk && !options.stockFirmware) stockFlags.push_back("--stock-ramdisk (stock RestoreRamdisk)");
+    if (options.stockRamdisk && !options.stockFirmware())
+        stockFlags.push_back("--stock-ramdisk (stock RestoreRamdisk)");
     if (!stockFlags.empty()) {
         std::string joined;
         for (size_t i = 0; i < stockFlags.size(); i++) {
@@ -1193,8 +1256,18 @@ int runCli(const CliOptions& options) {
                 joined.c_str());
     }
 
-    std::string buildToRequest = kJailbreakTargetBuild;
-    if (device.jailbroken) buildToRequest = device.buildID;
+    // Two builds now, not one. bootloaderBuild is the build whose iBSS/iBEC
+    // actually run; buildToRequest (the OS suite: kernel/ramdisk/DeviceTree/
+    // RestoreLogo, and the manifest we download) is usually the same, and
+    // differs only for --stock-firmware-new. blackb0x only bakes/keys
+    // kJailbreakTargetBuild, so every mode that keeps blackb0x's own patched
+    // bootloader uses it; device.buildID only matters when re-running the
+    // real jailbreak against an already-jailbroken device (no stock flag).
+    std::string bootloaderBuild = kJailbreakTargetBuild;
+    if (device.jailbroken && !options.stockFirmware() && !options.stockRecovery && !options.stockSecurerom &&
+        !options.stockRamdisk)
+        bootloaderBuild = device.buildID;
+    std::string buildToRequest = bootloaderBuild;
     printf("Targeting %s %s for this run.\n", device.deviceModel.c_str(), buildToRequest.c_str());
     // Both --stock-securerom (real SecureROM, no checkm8) AND --stock-recovery
     // (real, unpatched iBEC via useStockIBEC() -- patch_ticket_check()
@@ -1258,11 +1331,40 @@ int runCli(const CliOptions& options) {
                 buildToRequest = preferred;
             }
         }
+
+        // iBSS/iBEC are stock here too (useStockIBSS()/useStockIBEC()), so
+        // the WHOLE suite -- bootloader included -- is this one signed build.
+        bootloaderBuild = buildToRequest;
+    } else if (options.stockFirmwareNew) {
+        // Keep the OLD patched iBSS/iBEC (bootloaderBuild stays
+        // kJailbreakTargetBuild, baked in dist/), but pull the stock OS suite
+        // from the newest currently-signed build. No APTicket and no local
+        // keys are needed for it: the patched iBEC's ticket check is defeated
+        // and the stock kernel/ramdisk go out still-encrypted (the iBEC
+        // AES-decrypts them via the GID key). signedBuildsForDevice() returns
+        // a std::set (ascending), so the last element is the greatest =
+        // newest signed. Falls back to the literal "latest" if enumeration
+        // came back empty.
+        std::set<std::string> signedBuilds = signedBuildsForDevice(device.deviceModel);
+        std::string newestSigned;
+        if (!signedBuilds.empty()) newestSigned = *signedBuilds.rbegin();
+        if (!newestSigned.empty()) {
+            buildToRequest = newestSigned;
+            printf("--stock-firmware-new: newest currently-signed build for %s is %s -- sending its stock OS "
+                   "suite under the patched %s bootloader.\n",
+                   device.deviceModel.c_str(), newestSigned.c_str(), bootloaderBuild.c_str());
+        } else {
+            buildToRequest = "latest";
+            fprintf(stderr,
+                    "--stock-firmware-new: could not enumerate signed builds for %s -- falling back to "
+                    "\"latest\".\n",
+                    device.deviceModel.c_str());
+        }
     }
 
-    auto components = downloadAndPatchComponents(patcher, device, buildToRequest,
+    auto components = downloadAndPatchComponents(patcher, device, buildToRequest, bootloaderBuild,
                                                    options.stockRamdisk,
-                                                   options.stockRecovery, options.stockFirmware,
+                                                   options.stockRecovery, options.stockFirmware(),
                                                    options.stockSecurerom);
     if (!components) {
         // Not "...to patch..." -- on any --stock-* route nothing here

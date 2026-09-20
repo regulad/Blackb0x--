@@ -1693,15 +1693,23 @@ static bool checkDeviceLeftRecoveryModeAfterBoot(uint64_t ecid) {
 // the kernel for.
 static const char* const kRamdiskBootArgs =
     "setenv boot-args rd=md0 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
-// --tether-boot's args: the ramdisk set MINUS rd=md0, so the kernel roots off
+// --tether-boot's args: rd=disk0s1s1 instead of rd=md0, so the kernel roots off
 // the OS already on NAND instead of an uploaded ramdisk (none is sent on that
-// path). The AMFI/code-signing args stay -- a tether-booted jailbreak's
-// on-NAND untether/tweaks are unsigned too, and even for booting a stock NAND
-// OS they are harmless. This is the arg set the original app's tether-boot
-// MEANT to use; it had rd=md0 and non-rd=md0 wired to the wrong iBECs (see
-// docs/HISTORY.md and CliOptions::tetherBoot).
+// path). rd= is NOT optional: it is the boot-arg that tells the kernel which
+// partition holds PID 1 (launchd) / the root filesystem. A restore bootloader
+// like iBEC boots a kernelcache via `bootx` without doing fsboot's automatic
+// NAND-root setup, so with no rd= at all the kernel comes up with no root
+// device and hangs -- which is exactly the "nothing happens on --tether-boot"
+// symptom. disk0s1s1 is the system partition (disk0s1s2 is /var) on this
+// device, matching entrypoint.c's own mounts and the standard iOS fstab
+// (`/dev/disk0s1s1 / hfs ro`). The AMFI/code-signing args stay -- a
+// tether-booted jailbreak's on-NAND untether/tweaks are unsigned too, and even
+// for booting a stock NAND OS they are harmless. (An earlier version of this
+// dropped rd= entirely; the original app's tether-boot had rd=md0 and
+// non-rd=md0 wired to the wrong iBECs -- see docs/HISTORY.md and
+// CliOptions::tetherBoot.)
 static const char* const kTetherBootArgs =
-    "setenv boot-args -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
+    "setenv boot-args rd=disk0s1s1 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
 int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid, bool skipBootCheck,
                                    bool ramdiskBoot) {
     // get_tv_patient(): same reasoning as sendiBEC() above -- this reconnect

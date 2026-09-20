@@ -4599,3 +4599,18 @@ contained a complete, real XNU kernel (`Darwin Kernel Version 13.0.0 …
 xnu-2107.7.55.2.2 … RELEASE_ARM_S5L8947X`) — the artifact was never the problem,
 only its IMG3 packaging. Hardware confirmation via `--tether-boot` is the next
 step.
+
+## `--tether-boot` needs `rd=disk0s1s1`: the NAND root device
+
+With the img3 alignment fix, `--stock-ramdisk` boots cleanly on hardware — the
+kernel is confirmed intact (the "Size mismatch from lzss" wall is gone). But
+`--tether-boot` still did nothing. Cause: `kTetherBootArgs` had NO `rd=` at all.
+`rd=` is the boot-arg that tells the kernel which partition holds PID 1
+(launchd) / the root filesystem; a restore bootloader like iBEC boots a
+kernelcache via `bootx` without fsboot's automatic NAND-root setup, so with no
+`rd=` the kernel comes up with no root device and hangs — exactly the "nothing
+happens" symptom. Fixed by setting `rd=disk0s1s1`, the system partition (the
+same one `entrypoint.c` mounts as `/`, with `disk0s1s2` as `/var`, matching the
+standard iOS fstab `/dev/disk0s1s1 / hfs ro`). This only affects `--tether-boot`
+(the install path keeps `rd=md0`); it is a runtime `setenv boot-args`, so it
+changes only the `blackb0x` tool, not the baked firmware.

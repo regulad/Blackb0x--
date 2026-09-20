@@ -4667,3 +4667,98 @@ work. It is purely advisory and NEVER refuses: a nearby build whose kernel ABI
 did not change may still boot, so it always proceeds and lets the hardware
 decide. This is a softer subset of the original app's tether-boot preflight,
 which required a prior Normal-mode connection outright. Tool-only change.
+
+## CHECKPOINT: kernel fixed, --stock-ramdisk boots, but the real jailbreak ramdisk still does "nothing"
+
+State of play at this checkpoint (post the IMG3 16-align fix):
+
+- **Kernel is fixed and confirmed.** The IMG3 DATA 16-alignment fix landed
+  (xpwn fork `4481d66`, main `fb808d3`); `--stock-ramdisk` now boots on
+  hardware ("takes the kernel without issue"). So checkm8 -> iBSS -> iBEC ->
+  DeviceTree -> KernelCache(`bootx`) is sound end to end, and iBoot's
+  "Size mismatch from lzss" rejection is gone. `-z` was walked back (unused).
+- **`--tether-boot`** recipe is canonical (`rd=disk0s1s1`, RestoreLogo sent so
+  the framebuffer inits, `bootx`), with an advisory NAND-build preflight
+  (main `b439e38`/`c1941ff`/`a21a57d`/`059d38e`). It is gated on the device's
+  installed OS matching kJailbreakTargetBuild (10B329a); status on hardware
+  still pending / version-dependent.
+- **The full jailbreak (our baked ramdisk + entrypoint.c) still does
+  "nothing."** This is the live problem.
+
+### Isolation: it is NOT the ramdisk's IMG3 packaging
+
+The baked RestoreRamDisk's IMG3 DATA element is naturally 16-aligned already:
+`dataLength = 0x24d7000` (`% 16 == 0`), because a DMG is sector-sized (512-byte
+multiples are always 16-multiples). So unlike the kernelcache, the ramdisk was
+never affected by the 4-vs-16 alignment bug, and the img3 fix does not change
+it. iBoot can decrypt it and the kernel can copy it to `md0`. The delivery path
+is also shared with `--stock-ramdisk`, which works. **The ONLY thing that
+differs between the working `--stock-ramdisk` and the failing jailbreak is the
+ramdisk's CONTENT: our overlay** -- `entrypoint.c` spliced in as `/sbin/launchd`
+(via BakeRamdisk.cpp's spliceFileContentInPlace), the staged `/blackb0x` tree +
+dpkg/apt payload, and the DMG resize. So the fault is downstream of the kernel,
+in the baked ramdisk content or in entrypoint.c's own execution.
+
+### What "nothing" means now, and the first thing to check next session
+
+The install path DOES send RestoreLogo before the Ramdisk, so the display/
+framebuffer IS initialized, and `-v` is in the boot-args -- therefore the kernel
+should render verbose boot text to the HDMI output, and entrypoint.c's own
+`console_print()` (it opens `/dev/console`, dup2 to fd 1/2) should appear too
+("Searching for disk...", "blackb0x Jailbreak - by @NSSpiral", "Mounting
+filesystem...", etc.). So the decisive observation is **what appears on the TV
+during a full jailbreak run**:
+  - Kernel `-v` text then a stop -> note WHERE it stops (md0 root-mount? the
+    `exec /sbin/launchd`? a panic backtrace?).
+  - entrypoint's own lines appear -> it reached PID 1; see which line is last
+    (which mount / merge_tree / step it dies on).
+  - Truly nothing (no logo, no text) -> the kernel is not booting our ramdisk at
+    all (early md0 mount panic before console), which points at the DMG/HFS we
+    rebuilt.
+Also worth distinguishing from before: is it the old "USB drops + LED cadence
+slows + no reboot" state (kernel booted, entrypoint didn't finish), or truly
+dark (kernel not booting)? That single observation splits the remaining tree.
+
+### Ranked hypotheses for the baked-ramdisk failure
+
+1. **entrypoint.c reaches PID 1 but hangs/crashes before its final reboot.**
+   The observable success signal is the device power-cycling (entrypoint's
+   `reboot(0)` at the end); "nothing" = it never gets there. The syscall ABI
+   bugs are now fixed (carry-flag errors, `reboot` arity, `fork` child
+   detection -- `9d663c4`), so a prior silent failure in `set_auto_boot()`/a
+   mount check may now surface. With the framebuffer up, its own prints should
+   show the last step reached.
+2. **Kernel cannot mount `md0`** because the rebuilt DMG/HFS (decrypt -> mount
+   -> overlay -> resize -> rebuild -> re-encrypt) is malformed or oversized ->
+   early panic before much console output. Compare our baked DMG against a
+   freshly-decrypted stock one (does it mount cleanly on the Mac? is HFS
+   intact? is the resize sane?).
+3. **entrypoint exec/signing**: it is ldid-signed `com.apple.launchd` and the
+   boot-args carry `amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1`,
+   so this should be covered -- but if AMFI still refuses an ad-hoc-signed PID 1
+   the kernel would fail to exec init. The `-v` log would show it.
+4. **Framebuffer console renders nothing** even though it booted (least likely
+   now that RestoreLogo is sent) -- would make a working boot look dark.
+
+### Concrete next steps (ready to implement)
+
+- **entrypoint reboot-beacon** (best no-hardware signal): behind a compile-time
+  switch, have entrypoint call `reboot(0)` as its very first action. If the ATV
+  power-cycles seconds after `bootx`, entrypoint definitely reached PID 1 and
+  the bug is downstream (mounts / merge_tree / final reboot); if it stays dark,
+  the kernel never reached our launchd (panic / md0 / exec). This bisects the
+  tree with zero hardware and was designed earlier -- just not wired in.
+- **Verify the CI baked ramdisk**: download run 35530176871's
+  `firmware-AppleTV3,2`, decrypt the RestoreRamDisk, loop-mount the DMG, and
+  confirm `/sbin/launchd` is our entrypoint Mach-O and `/blackb0x` is populated
+  and the HFS is clean.
+- **Watch the HDMI output** during a full run (framebuffer is up via
+  RestoreLogo) and report the last line -- this likely settles it directly.
+- Optional: have entrypoint write an early marker onto NAND (`/mnt1/.../var`,
+  disk0s1s2) so that after forcing DFU and booting `--stock-ramdisk`, the marker
+  can be read back to confirm how far entrypoint got.
+
+Commits this session: xpwn `4481d66`; main `9d663c4` (entrypoint ABI),
+`1bb9a3e` (--tether-boot), `38bf62a`/earlier (bake-iboot/-z, now walked back),
+`fb808d3` (IMG3 16-align + -z walkback), `b439e38`/`c1941ff`/`a21a57d`/`059d38e`
+(--tether-boot rd=disk0s1s1, RestoreLogo, advisory version preflight).

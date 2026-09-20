@@ -1472,23 +1472,24 @@ int runCli(const CliOptions& options) {
     // what populates device.buildID); in DFU/Recovery there is no way to read
     // the on-NAND version. So warn on mismatch, and when it is simply unknown
     // tell the user how to make it knowable (connect once in Normal mode).
+    // Purely advisory -- never refuses. tether-boot loads the
+    // kJailbreakTargetBuild kernel and roots off whatever OS is on NAND, so a
+    // build mismatch is a likely (not certain) hang: a nearby build whose
+    // kernel ABI did not change may well still boot, so we always proceed and
+    // let the hardware decide.
     if (options.tetherBoot) {
         if (device.buildID.empty()) {
-            printf("\n--tether-boot: could not read the installed OS build (the device has not been seen in\n"
-                   "Normal mode this session -- only lockdownd, in Normal mode, exposes it). tether-boot loads\n"
-                   "the %s kernel and roots off NAND, so it only works if the installed OS is %s. If the\n"
-                   "screen stays dark, connect the Apple TV in Normal mode once (so its version can be read)\n"
-                   "and confirm it is on %s before retrying.\n",
-                   kJailbreakTargetBuild.c_str(), kJailbreakTargetBuild.c_str(), kJailbreakTargetBuild.c_str());
+            printf("\n--tether-boot: didn't see the device in Normal mode to read its OS version -- tether "
+                   "boot may not work (it needs the installed OS to be %s). Proceeding anyway.\n",
+                   kJailbreakTargetBuild.c_str());
         } else if (device.buildID != kJailbreakTargetBuild) {
-            printf("\n*** --tether-boot WARNING: the Apple TV's installed OS is %s%s, but tether-boot loads the\n"
-                   "%s kernel and mounts the NAND root. That version mismatch will almost certainly hang the\n"
-                   "boot (no visible output) -- this is expected, not a new bug. tether-boot can only boot a\n"
-                   "device whose installed OS is %s (the build blackb0x bakes/keys). ***\n",
+            printf("\n--tether-boot: installed OS is %s%s but tether boot loads the %s kernel -- version "
+                   "mismatch, tether boot may not work (though it can still boot if the kernel ABI didn't "
+                   "change between these builds). Proceeding anyway.\n",
                    device.version.empty() ? "" : (device.version + " / ").c_str(), device.buildID.c_str(),
-                   kJailbreakTargetBuild.c_str(), kJailbreakTargetBuild.c_str());
+                   kJailbreakTargetBuild.c_str());
         } else {
-            printf("\n--tether-boot: installed OS build %s matches the jailbreak target -- the NAND root and\n"
+            printf("\n--tether-boot: installed OS build %s matches the jailbreak target -- the NAND root and "
                    "the patched kernel should be compatible.\n",
                    device.buildID.c_str());
         }

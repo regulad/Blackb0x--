@@ -4660,9 +4660,10 @@ without a booted OS would be to boot the stock ramdisk and read
 implemented; the Normal-mode read is simpler and already present.)
 
 So `runCli()` now runs a `--tether-boot` preflight against `device.buildID`:
-warn loudly on a mismatch (installed build != kJailbreakTargetBuild -- tether
-will hang, expected), confirm on a match, and when it is simply unknown (the
-device was never seen in Normal mode this session) tell the user to connect the
-Apple TV in Normal mode once so the version can be read. This is a subset of the
-original app's tether-boot preflight (which required a prior Normal-mode
-connection outright); we warn rather than refuse. Tool-only change.
+warn on a mismatch (installed build != kJailbreakTargetBuild -- tether boot MAY
+not work), confirm on a match, and when it is simply unknown (the device was
+never seen in Normal mode this session) say so and note tether boot may not
+work. It is purely advisory and NEVER refuses: a nearby build whose kernel ABI
+did not change may still boot, so it always proceeds and lets the hardware
+decide. This is a softer subset of the original app's tether-boot preflight,
+which required a prior Normal-mode connection outright. Tool-only change.

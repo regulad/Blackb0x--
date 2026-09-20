@@ -126,6 +126,14 @@ struct CliOptions {
     // usual build-selection / stock flags still apply to which iBSS/iBEC is
     // sent. The device is NOT jailbroken by a --send-only run.
     std::string sendOnly;
+    // Diagnostic: after the final 'bootx', do NOT reconnect and read the
+    // device's recovery console (checkDeviceLeftRecoveryModeAfterBoot() /
+    // captureConsoleLog()). That readout holds the USB device for ~5s and
+    // consumes whatever iBoot printed; skipping it makes blackb0x exit right
+    // after 'bootx' and release USB, so the console can be read interactively
+    // instead (e.g. `irecovery -s`). Boot success/failure is then not judged
+    // by this tool -- you inspect it yourself.
+    bool noShellAttach = false;
     bool help = false;
 };
 

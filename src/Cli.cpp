@@ -120,6 +120,11 @@ void printCliUsage(const char* argv0) {
     printf("                            those tickets are only ever valid for the exact,\n");
     printf("                            unmodified stock components, so anything blackb0x\n");
     printf("                            has patched can never pass.\n");
+    printf("  --no-shell-attach         DIAGNOSTIC: after the final 'bootx', do NOT\n");
+    printf("                            reconnect and read the recovery console -- exit\n");
+    printf("                            and release USB immediately so you can inspect it\n");
+    printf("                            interactively (e.g. `irecovery -s`). Boot\n");
+    printf("                            success/failure is then not judged by this tool.\n");
     printf("  --send-only ibss|ibec     DIAGNOSTIC: run the exploit and send only iBSS\n");
     printf("                            (ibss) or iBSS then iBEC (ibec), then exit\n");
     printf("                            immediately -- leaving the device where that stage\n");
@@ -166,6 +171,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.stockFirmwareNew = true;
         } else if (arg == "--stock-securerom") {
             options.stockSecurerom = true;
+        } else if (arg == "--no-shell-attach") {
+            options.noShellAttach = true;
         } else if (arg == "--send-only") {
             options.sendOnly = nextArg("--send-only");
             if (options.sendOnly != "ibss" && options.sendOnly != "ibec") {
@@ -845,7 +852,8 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
 // installed OS off NAND (its `self.selected_device.jailbroken == 1`
 // branch); that whole path is gone -- see docs/HISTORY.md.
 bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device, const PatchedComponents& components,
-                             bool dryRun, bool stockRecovery, bool stockSecurerom, const std::string& sendOnly) {
+                             bool dryRun, bool stockRecovery, bool stockSecurerom, const std::string& sendOnly,
+                             bool noShellAttach) {
     if (dryRun) {
         printf("(dry run) Would send:\n");
         printf("  iBSS%s\n", components.iBSS ? "" : " (missing, would fail here)");
@@ -907,7 +915,7 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     auto sendStockTail = [&]() -> bool {
         const char* what = "APTicket + RestoreLogo + Ramdisk + DeviceTree + KernelCache";
         console::out("Sending %s...\n", what);
-        int i = deviceManager.sendStockRestoreTail(device.ecid, components, device.deviceModel);
+        int i = deviceManager.sendStockRestoreTail(device.ecid, components, device.deviceModel, noShellAttach);
         if (i != 0) {
             console::err("Failed to send the post-iBEC stock restore sequence. Re-enter DFU mode and try "
                          "again.\n");
@@ -984,7 +992,7 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     // WITHOUT it into this path, so entrypoint.c could never have run as
     // PID 1. See docs/HISTORY.md.
     console::out("Sending KernelCache...\n");
-    int kernelResult = components.kernel ? deviceManager.sendKernelCache(*components.kernel, device.ecid) : -1;
+    int kernelResult = components.kernel ? deviceManager.sendKernelCache(*components.kernel, device.ecid, noShellAttach) : -1;
     if (kernelResult != 0) {
         console::err("Failed to send KernelCache.\n");
         return false;
@@ -1403,7 +1411,8 @@ int runCli(const CliOptions& options) {
     }
 
     if (!sendComponentsToDevice(deviceManager, device, *components, options.dryRun,
-                                 options.stockRecovery, options.stockSecurerom, options.sendOnly)) {
+                                 options.stockRecovery, options.stockSecurerom, options.sendOnly,
+                                 options.noShellAttach)) {
         return 1;
     }
 

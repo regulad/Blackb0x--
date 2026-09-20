@@ -1687,7 +1687,7 @@ static bool checkDeviceLeftRecoveryModeAfterBoot(uint64_t ecid) {
 // the kernel for.
 static const char* const kRamdiskBootArgs =
     "setenv boot-args rd=md0 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
-int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid) {
+int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid, bool skipBootCheck) {
     // get_tv_patient(): same reasoning as sendiBEC() above -- this reconnect
     // follows Ramdisk's own NOTIFY_FINISH-triggered reset.
     irecv_client_t client = get_tv_patient(ecid);
@@ -1701,6 +1701,13 @@ int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t
     fprintf(stderr, "sendKernelCache: %s\n", kRamdiskBootArgs);
     int result = sendFileThenCommand(client, "sendKernelCache", KernelCache_Path, "bootx", false, 1, true,
                                       kRamdiskBootArgs, /*extraCommandMustSucceed=*/true);
+    if (result == 0 && skipBootCheck) {
+        fprintf(stderr,
+                "sendKernelCache: 'bootx' acknowledged. --no-shell-attach: not reading the recovery console; "
+                "releasing USB so it can be inspected interactively (e.g. `irecovery -s`).\n");
+        sleep(2);
+        return 0;
+    }
     if (result == 0 && !checkDeviceLeftRecoveryModeAfterBoot(ecid)) {
         result = -1;
     }
@@ -1729,7 +1736,7 @@ int DeviceManager::sendRestoreLogo(const std::string& RestoreLogo_Path, uint64_t
 }
 
 int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& components,
-                                         const std::string& deviceModel) {
+                                         const std::string& deviceModel, bool skipBootCheck) {
     irecv_client_t client = get_tv_patient(ecid);
     if (!client) {
         fprintf(stderr, "sendStockRestoreTail: device did not reconnect\n");
@@ -1926,6 +1933,12 @@ int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& 
 
     irecv_close(client);
     sleep(2);
+    if (skipBootCheck) {
+        fprintf(stderr,
+                "sendStockRestoreTail: --no-shell-attach: not reading the recovery console; releasing USB so "
+                "it can be inspected interactively (e.g. `irecovery -s`).\n");
+        return 0;
+    }
     return checkDeviceLeftRecoveryModeAfterBoot(ecid) ? 0 : -1;
 }
 

@@ -144,7 +144,11 @@ public:
     // this now) are set at runtime with `setenv boot-args` rather than
     // compiled into iBEC -- see sendKernelCache()'s own comment and
     // Patcher.cpp's patchiBEC().
-    int sendKernelCache(const std::string& path, uint64_t ecid);
+    // skipBootCheck: when true, return right after 'bootx' is acknowledged
+    // instead of reconnecting to poll/read the recovery console
+    // (checkDeviceLeftRecoveryModeAfterBoot()). Frees USB immediately so the
+    // console can be inspected interactively -- see CliOptions::noShellAttach.
+    int sendKernelCache(const std::string& path, uint64_t ecid, bool skipBootCheck = false);
     int sendDeviceTree(const std::string& path, uint64_t ecid);
     // RestoreLogo for the reconnect-per-step (non-stockRecovery) path, sent
     // between iBEC and Ramdisk with iBoot's "setpicture 4" command -- the
@@ -185,7 +189,8 @@ public:
     //
     // deviceModel is AppleTVDevice::deviceModel (the signed-build warning
     // before the TSS request).
-    int sendStockRestoreTail(uint64_t ecid, const PatchedComponents& components, const std::string& deviceModel);
+    int sendStockRestoreTail(uint64_t ecid, const PatchedComponents& components, const std::string& deviceModel,
+                             bool skipBootCheck = false);
 
     // --- Jailbreak status polling (was checkJailbreak/checkJailbreakRunning) ---
     // Blocks for up to a few seconds while it handshakes with the device

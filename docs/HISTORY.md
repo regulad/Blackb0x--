@@ -4644,3 +4644,25 @@ but hangs mounting the NAND root because the installed OS on disk0s1s1 is not a
 clean, fully-restored 10B329a (tether-boot loads OUR 10B329a kernel against
 whatever is on NAND -- a version mismatch will hang). `--stock-ramdisk` avoids
 both by carrying its own self-contained root, which is why it boots regardless.
+
+## Warning when the NAND OS won't match: read the installed build via lockdownd in Normal mode
+
+Since `--tether-boot` loads OUR kernel (kJailbreakTargetBuild, 10B329a) and roots
+off whatever is on NAND, it only works if the installed OS is that same build; a
+version mismatch hangs at the NAND root-mount with no visible output -- the exact
+"nothing happens" symptom. blackb0x already reads the authoritative installed
+`ProductVersion`/`BuildVersion` via `lockdownd_get_value` (DeviceManager.cpp),
+but ONLY when the device is seen in **Normal mode** -- that is the only channel
+that exposes the on-NAND version. In DFU/Recovery there is no way to read it
+(iBoot exposes SRTG/CPID, not the installed OS build). (The other way to learn it
+without a booted OS would be to boot the stock ramdisk and read
+`/System/Library/CoreServices/SystemVersion.plist` off `disk0s1s1` -- not
+implemented; the Normal-mode read is simpler and already present.)
+
+So `runCli()` now runs a `--tether-boot` preflight against `device.buildID`:
+warn loudly on a mismatch (installed build != kJailbreakTargetBuild -- tether
+will hang, expected), confirm on a match, and when it is simply unknown (the
+device was never seen in Normal mode this session) tell the user to connect the
+Apple TV in Normal mode once so the version can be read. This is a subset of the
+original app's tether-boot preflight (which required a prior Normal-mode
+connection outright); we warn rather than refuse. Tool-only change.

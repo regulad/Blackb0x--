@@ -1463,6 +1463,37 @@ int runCli(const CliOptions& options) {
         return 1;
     }
 
+    // --tether-boot boots the OS ALREADY on NAND off our patched kernel, which
+    // is built for kJailbreakTargetBuild only. If the installed OS is a
+    // different build, the kernel/kext/userspace mismatch hangs at (or after)
+    // the NAND root-mount with no visible output -- the classic "nothing
+    // happens" tether-boot symptom. We can read the installed build via
+    // lockdownd, but ONLY if the device has been seen in Normal mode (that is
+    // what populates device.buildID); in DFU/Recovery there is no way to read
+    // the on-NAND version. So warn on mismatch, and when it is simply unknown
+    // tell the user how to make it knowable (connect once in Normal mode).
+    if (options.tetherBoot) {
+        if (device.buildID.empty()) {
+            printf("\n--tether-boot: could not read the installed OS build (the device has not been seen in\n"
+                   "Normal mode this session -- only lockdownd, in Normal mode, exposes it). tether-boot loads\n"
+                   "the %s kernel and roots off NAND, so it only works if the installed OS is %s. If the\n"
+                   "screen stays dark, connect the Apple TV in Normal mode once (so its version can be read)\n"
+                   "and confirm it is on %s before retrying.\n",
+                   kJailbreakTargetBuild.c_str(), kJailbreakTargetBuild.c_str(), kJailbreakTargetBuild.c_str());
+        } else if (device.buildID != kJailbreakTargetBuild) {
+            printf("\n*** --tether-boot WARNING: the Apple TV's installed OS is %s%s, but tether-boot loads the\n"
+                   "%s kernel and mounts the NAND root. That version mismatch will almost certainly hang the\n"
+                   "boot (no visible output) -- this is expected, not a new bug. tether-boot can only boot a\n"
+                   "device whose installed OS is %s (the build blackb0x bakes/keys). ***\n",
+                   device.version.empty() ? "" : (device.version + " / ").c_str(), device.buildID.c_str(),
+                   kJailbreakTargetBuild.c_str(), kJailbreakTargetBuild.c_str());
+        } else {
+            printf("\n--tether-boot: installed OS build %s matches the jailbreak target -- the NAND root and\n"
+                   "the patched kernel should be compatible.\n",
+                   device.buildID.c_str());
+        }
+    }
+
     if (!sendComponentsToDevice(deviceManager, device, *components, options.dryRun,
                                  options.stockRecovery, options.stockSecurerom, options.sendOnly,
                                  options.noShellAttach, options.noSendRestoreLogo, options.tetherBoot)) {

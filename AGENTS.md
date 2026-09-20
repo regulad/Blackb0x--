@@ -66,8 +66,22 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
 
 - `src/` — first-party code, flat, and nothing else: `main.cpp`, `Cli.hpp`/`.cpp`,
   `Console.hpp`/`.cpp`, `DeviceManager.hpp`/`.cpp`, `IPSW.hpp`/`.cpp`,
-  `IPSWDownloader.hpp`/`.cpp`, `Patcher.hpp`/`.cpp`, `Personalize.hpp`/`.cpp`,
+  `IPSWDownloader.hpp`/`.cpp`, `Patcher.hpp`/`.cpp`, `PatcherPatch.cpp`,
+  `Img3Crypt.hpp`/`.cpp`, `Personalize.hpp`/`.cpp`,
   `ResourcePath.hpp`/`.cpp`, `BakeRamdisk.hpp`/`.cpp`, `BakeFirmware.cpp`.
+  **`Patcher` is split across two TUs by whether the method decrypts.**
+  `Patcher.cpp` is the crypto-free half (baked-component loaders, the `dist/`
+  existence check, `useStock*` which now send Apple's original img3 untouched,
+  and bookkeeping) and links no `decrypt()`; it is compiled into both binaries.
+  `PatcherPatch.cpp` holds `patchiBSS()`/`patchiBEC()`/`patchKernel()`, which
+  call `decrypt()` (first-party glue in `src/Img3Crypt.cpp`, built over xpwn's
+  public API) and fork/exec the GPL patch tools, and is compiled into
+  `bake-firmware` ONLY. The upshot, and the invariant to keep:
+  **the `blackb0x` jailbreak binary does zero decryption** — it links neither
+  `blackb0x_xpwntool` nor `xpwn` — and consumes bake-firmware's already-
+  encrypted `dist/` output verbatim. Everything except the raw iBSS reaches its
+  loader still encrypted and img3-wrapped, because iBoot32Patcher defeats only
+  iBoot's signature/ticket/KASLR checks, never its img3 parse or AES-decrypt.
   The original Objective-C (`AppDelegate`, `MainView`,
   `Blackb0x.h`/`.m`, `TaskManager`, and the old `.h`/`.m`/`.mm` counterparts of the
   files above) has been fully ported and deleted — check `docs/HISTORY.md`/git
@@ -76,15 +90,40 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   Cocoa, keep these.
 - `src/Pwn/` — the standalone `blackb0x-pwn` exploit binary's own C sources
   (`main.c`, `Checkm8Pwn.c`), separate from the main CLI.
-- `src/libraries/` — already-portable C kept in-tree and built directly by the
-  root `CMakeLists.txt`: `xpwntool.c` (compiled against `third_party/xpwn`'s own
-  headers — its private `libxpwntool/` header copies are deleted),
-  `idevicerestore_img3.c`, `libplist_compat.c`.
-  Both GPL patchers have moved OUT of here to their own submodules, built as
-  separate executables and fork/exec'd rather than linked (see the table below):
-  `CBPatcher` and `iBoot32Patcher`. `libbootkit/` and `libprerestore.h` used to
-  sit here as dead code, linked into nothing and referenced by nothing; both are
-  deleted.
+- `src/libraries/` is **gone**. It held copied/adapted upstream C
+  (`xpwntool.{c,h}`, `idevicerestore_img3.{c,h}`, `libplist_compat.c`); all three
+  were eliminated in favour of the real submodules:
+  - `xpwntool.{c,h}` → first-party `src/Img3Crypt.cpp`, our own `decrypt()` glue
+    over `third_party/xpwn`'s public `AbstractFile` API, compiled into
+    bake-firmware only. GPL-3.0 (derives from / links GPL-3.0 xpwn). Do NOT add
+    it, `xpwn`, or any decrypt path to `blackb0x`'s link line — the jailbreak
+    binary does no decryption. It needs a per-source `${DEPS_INCLUDE}/wolfssl`
+    include + `wolfssl/options.h` force-include (set on the bake-firmware
+    target), because `<xpwn/nor_files.h>` reaches a bare `<openssl/aes.h>` that
+    only resolves to wolfSSL's compat shim.
+  - `idevicerestore_img3.{c,h}` → compiled straight from the
+    `third_party/idevicerestore` submodule (`src/img3.c` + `src/log.c`) into the
+    `idevicerestore_img3` static lib (blackb0x, for `--stock-securerom`). See its
+    CMake block: idevicerestore ships no library or headers of its own, so only
+    those two files are compiled, against its `src/` headers + `${DEPS_INCLUDE}`,
+    with `HAVE_CONFIG_H` left undefined. LGPL-2.1-or-later.
+  - `libplist_compat.c` → deleted with the libplist consolidation (below); every
+    function it shimmed is real in the single vendored libplist 2.7.0.
+  Both GPL patchers (`CBPatcher`, `iBoot32Patcher`) are their own submodules,
+  built as separate executables and fork/exec'd, never linked (see the table
+  below).
+
+  **Whole-project licensing:** the project is **AGPL-3.0** (`LICENSE.md`, the
+  FSF's text). AGPL-3.0 is compatible with the GPL-3.0 code it links and execs
+  (wolfSSL — its vendored `COPYING` is GPLv3 — plus xpwn and the two patchers),
+  so `blackb0x` and `bake-firmware` are AGPL-3.0 combined works. Dropping the
+  xpwn static link from `blackb0x` (the `Patcher`/`PatcherPatch` split) keeps the
+  decrypt path out of the shipped binary but does not by itself make it non-GPL —
+  wolfSSL alone already does. The statically-linked LGPL-2.1 pieces
+  (`idevicerestore_img3`, `deps::plist`/`imobiledevice`/`usbmuxd`/`irecovery`,
+  etc.) are allowed under the LGPL §6 relink provision; whether the distribution
+  must spell that out (a written offer / relink objects) is the remaining open
+  licensing question for the owner.
 - `src/tests/` — `RamdiskOverlayTests.cpp`, the one test target.
 - `package/` — the `xyz.regulad.blackb0x` Debian package: `build.sh` (builds the
   `.deb` with Theos' `dm.pl` inside a container), `layout/` (its literal on-device
@@ -147,10 +186,11 @@ statically linked. **Forked** means: patched on our own branch, pushed, pointed 
 
 | Submodule | Source | Forked? |
 |---|---|---|
-| `libplist`, `libusbmuxd` | libimobiledevice/* | No — historically pinned |
-| `libimobiledevice` | **regulad/libimobiledevice**@`legacy` | Yes — additive, `--with-ssl-implementation=wolfssl`-selectable SSL backend for `idevice.c` (real OpenSSL/GnuTLS untouched, still selectable) |
+| `libplist` | libimobiledevice/libplist | No — current HEAD (2.7.0). Installs as `libplist-2.0`; `libplist_ext`'s install step drops a `libplist.pc` alias beside it so consumers still asking for the old `libplist` pkg-config name resolve. This single copy replaced a former two-build setup (a 2.1.0 pin + a separate `libplist-modern`) and retired `libplist_compat.c` — every current-API function it shimmed is real here now |
+| `libusbmuxd`, `libimobiledevice-glue` | libimobiledevice/* | No — current HEAD, plain upstream (both build against the single `libplist` above) |
+| `libimobiledevice` | **regulad/libimobiledevice**@`legacy` | Yes — additive `--with-ssl-implementation=wolfssl`-selectable SSL backend for `idevice.c` (real OpenSSL/GnuTLS untouched, still selectable); plus `common/utils.{h,c}` now use libplist's `plist_format_t` instead of a local `enum plist_format_t` that collided with libplist ≥ 2.3.0's own (redefinition once built against current libplist) |
+| `idevicerestore` | libimobiledevice/idevicerestore | No — current HEAD. Not built as an app; only `src/img3.c` + `src/log.c` are compiled into the `idevicerestore_img3` static lib for `img3_stitch_component()` (`--stock-securerom`) |
 | `libirecovery` | **regulad/libirecovery**@`libusb-async-cancel-fix`, off synackuk/libirecovery | Yes — real stderr diagnostics on `irecv_send_buffer()`'s upload-failure paths, which previously returned `IRECV_E_USB_UPLOAD` silently unless built with `debug()` on; plus `irecv_usb_control_transfer_ex()`, which keeps the partial byte count on a stall/timeout that both ordinary wrappers discard. Built `--with-iokit` only. The branch also carries libusb-path fixes (a use-after-free, a double free and a non-terminating completion wait in `irecv_async_usb_control_transfer_with_cancel()`) that this project no longer compiles — the branch name is a leftover from when it did |
-| `libimobiledevice-glue`, `libplist-modern` | libimobiledevice/* | No — current HEAD, not historically pinned (see HISTORY for why two `libplist`s) |
 | `libfragmentzip` | **regulad/libfragmentzip**@`fix-cxx-stdbool-header` | Yes — one header fix (C++/`<stdbool.h>` collision) |
 | `libgeneral` | tihmstar/libgeneral | No |
 | `xpwn` | **regulad/xpwn**@`legacy` | Yes — a wolfSSL AES-CBC buffer over-read fix in `img3.c`, plus disabling the legacy-libusb-0.1-only `pwnmetheus2` subdirectory |
@@ -159,15 +199,21 @@ statically linked. **Forked** means: patched on our own branch, pushed, pointed 
 | `CBPatcher` | zzanehip/CBPatcher (upstream, pinned) | No — plain upstream. **Built as a separate EXECUTABLE and fork/exec'd, never linked**, same GPL-3.0 reason as `iBoot32Patcher` below: it was a static library on blackb0x's own link line until that was noticed, which the in-tree copy's missing LICENSE file helped hide. No fork needed — upstream already ships a `main()` whose CLI (`<infile> <outfile> <version> [--nosb]`, nukesb defaulting to 1) is a drop-in for the `patch_kernel()` call this used to link. The old local delta (an `#ifdef __APPLE__` around CBPatch.c's Apple-only Mach-O includes, plus `portable_macho.h` standing in for them) existed only to build on Linux and died with Linux support |
 | `iBoot32Patcher` | **regulad/iBoot32Patcher**@`blackb0x`, off zzanehip/iBoot32Patcher | Yes — two real bug fixes: `patch_kaslr()` fell off the end of a non-void function on every *successful* branch (garbage return read non-zero on x86_64, 0 on arm64, so a real macOS run treated a successful KASLR patch as a hard failure), and `iBootPatcher()` tested its `RSA` argument twice so the `debug` argument was dead and `patch_debug_enabled()` ran whenever the RSA patch was asked for. **Built as a separate EXECUTABLE and fork/exec'd, never linked** — it is GPL-3.0-or-later and blackb0x declares no license, so linking would make blackb0x a GPLv3 derivative. Do not "simplify" it back into a static library |
 
-`src/libraries/xpwntool.c` (in-tree, not a submodule) is sourced from
-`zzanehip/xpwntool-swift`, and compiles against `third_party/xpwn`'s headers
-rather than the private copies it shipped with, with one local fix: `decrypt()`'s three error paths
-(`cannot open infile` / `cannot open outfile` / `cannot duplicate file from provided
-template`) each printed the diagnostic and then fell through to dereference the NULL
-they had just reported, so any one of them was a SIGSEGV rather than a failure. They
-bail out now. That is the root cause behind the "`decrypt()` a nonexistent file
-corrupts the heap" hazard `Patcher.cpp` documents in several places; `decrypt()` is
-still `void`, so callers detect failure by checking for a zero-byte output.
+`src/Img3Crypt.cpp` (first-party, in `src/`, not `src/libraries/`) is our own
+`decrypt()` glue over `third_party/xpwn`'s public `AbstractFile` API. It replaced
+the old `src/libraries/xpwntool.c`, a copy of `zzanehip/xpwntool-swift`'s
+function-wrapped version of xpwn's `xpwntool` CLI. The logic is xpwn's (open via
+`openAbstractFile{,2,3}`, clone an IMG3 template with `duplicateAbstractFile2`,
+copy the bytes across), so `Img3Crypt.cpp` is GPL-3.0. It keeps one local fix
+carried over from the old copy: `decrypt()`'s three error paths (`cannot open
+infile` / `cannot open outfile` / `cannot duplicate file from provided template`)
+each printed the diagnostic and then fell through to dereference the NULL they had
+just reported, so any one of them was a SIGSEGV rather than a failure. They bail
+out now, leaving a zero-byte output file. That is the root cause behind the
+"`decrypt()` a nonexistent file corrupts the heap" hazard `Patcher.cpp` documents;
+`decrypt()` is still `void`, so callers detect failure by checking for that
+zero-byte output. (The variable xpwn named `template` was renamed `templateFile`
+here — it is a reserved keyword in C++, which this file is, unlike the old `.c`.)
 
 ## Build & run
 
@@ -175,8 +221,8 @@ still `void`, so callers detect failure by checking for a zero-byte output.
 cmake -S . -B build && cmake --build build -j$(sysctl -n hw.ncpu)
 
 # Two build groups, by who runs the result rather than by how it builds:
-cmake --build build --target jailbreak   # blackb0x, blackb0x-pwn + the patchers they exec
-cmake --build build --target authoring   # bake-firmware, vendored apt, tests, xpwntool
+cmake --build build --target jailbreak   # blackb0x, blackb0x-pwn (no decryption, no patchers)
+cmake --build build --target authoring   # bake-firmware, vendored apt, tests, xpwntool + the patchers it execs
 
 # apt is EXCLUDE_FROM_ALL and is pulled in by `authoring`, never by `all`.
 

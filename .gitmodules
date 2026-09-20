@@ -26,9 +26,6 @@
 [submodule "third_party/libimobiledevice-glue"]
 	path = third_party/libimobiledevice-glue
 	url = https://github.com/libimobiledevice/libimobiledevice-glue.git
-[submodule "third_party/libplist-modern"]
-	path = third_party/libplist-modern
-	url = https://github.com/libimobiledevice/libplist.git
 [submodule "third_party/wolfssl"]
 	path = third_party/wolfssl
 	url = https://github.com/wolfSSL/wolfssl.git
@@ -64,3 +61,6 @@
 [submodule "third_party/triehash"]
 	path = third_party/triehash
 	url = https://github.com/julian-klode/triehash.git
+[submodule "third_party/idevicerestore"]
+	path = third_party/idevicerestore
+	url = https://github.com/libimobiledevice/idevicerestore.git

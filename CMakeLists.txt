@@ -191,73 +191,51 @@ target_compile_options(iBoot32Patcher PRIVATE
     -Wno-error=return-mismatch
     -fcommon)
 
-# xpwntool.c's decrypt() needs the full libxpwn implementation (AbstractFile,
-# init_libxpwn, etc.) — linked below against third_party/xpwn's "xpwn" target
-# once that's defined (see add_subdirectory(third_party/xpwn) below), since
-# CMake targets must exist before they're referenced.
-# Named blackb0x_xpwntool, not xpwntool — third_party/xpwn/ipsw-patch's own
-# CMakeLists.txt already defines an executable target literally called
-# "xpwntool" (its CLI tool of the same name), which collides otherwise.
-add_library(blackb0x_xpwntool STATIC
-    src/libraries/xpwntool.c)
-# src/libraries for its own xpwntool.h; third_party/xpwn/includes for the
-# real xpwn headers. There used to be a private copy of 22 xpwn headers at
-# src/libraries/libxpwntool/ and this compiled against those instead --
-# a duplicate set that had quietly diverged from the submodule it links.
-# Deleted: this file only ever used <xpwn/libxpwn.h> and <xpwn/nor_files.h>,
-# and only AbstractFile-level calls (openAbstractFile/2/3,
-# duplicateAbstractFile2, createAbstractFileFromFile), all present upstream.
+# The former blackb0x_xpwntool static library (a vendored copy of xpwn's own
+# `xpwntool` CLI wrapped as a decrypt() function) is gone. Its decrypt() moved
+# to first-party glue in src/Img3Crypt.cpp, which calls third_party/xpwn's
+# public AbstractFile API directly and is compiled straight into bake-firmware
+# (see that target below). Nothing in the jailbreak binary decrypts anything.
+
+# idevicerestore's IMG3 support, compiled straight from the vendored
+# third_party/idevicerestore submodule (no more copied src/libraries/ file).
+# The one piece --stock-securerom's personalization needs that libtatsu does
+# not provide: stitching a TSS-response SHSH/ECID/CERT blob into an existing
+# img3 file's tags (img3_stitch_component(), Personalize.cpp).
 #
-# The divergence was real but inert for us: the private img3.h carried extra
-# Img3Info members (shsh/ecid/decryptLast) and a replaceSignatureImg3()
-# that upstream lacks, so compiling against it while linking the submodule's
-# library was a latent struct-layout mismatch -- harmless only because
-# xpwntool.c never names Img3Info. The private libxpwn.h also declared
-# `extern int Img3DecryptLast`, which nothing uses and nothing anywhere
-# defines.
-target_include_directories(blackb0x_xpwntool PUBLIC
-    src/libraries
-    third_party/xpwn/includes)
-
-# idevicerestore's own img3.c/img3.h (src/img3.c, src/img3.h at
-# libimobiledevice/idevicerestore's current HEAD), copied in nearly
-# unchanged (see the file's own header comment for the diff) — the one
-# piece --stock-securerom's personalization needs that libtatsu itself
-# doesn't provide: stitching a TSS-response SHSH/ECID/CERT blob into an
-# existing img3 file's own tags (img3_stitch_component()). Kept as its
-# own small static library rather than folded into blackb0x's own
-# sources, matching blackb0x_xpwntool above.
+# idevicerestore ships no library and installs no headers -- its autotools
+# build only produces the `idevicerestore` binary (src/Makefile.am is
+# bin_PROGRAMS only) -- so it can't go through the ExternalProject
+# configure/make/install-a-.a path the other library submodules use. Instead
+# we compile just the two source files we need directly:
+#   img3.c  the actual code (img3_stitch_component + its static helpers)
+#   log.c   provides logger(), which img3.c calls
+# built against the submodule's own src/ headers plus the vendored dep headers
+# under ${DEPS_INCLUDE} (plist, libirecovery, libimobiledevice-glue, all
+# reached transitively via common.h/idevicerestore.h). HAVE_CONFIG_H is left
+# UNDEFINED on purpose: config.h is autotools-generated and every reference to
+# it (and to HAVE_LOCALTIME_R/HAVE_STRSEP/_WIN32) is guarded, so the plain
+# macOS defaults apply and no ./configure step is needed. The deps:: link
+# libraries and add_dependencies() are wired up further below, once those
+# targets exist (same deferral as plist_compat).
 add_library(idevicerestore_img3 STATIC
-    src/libraries/idevicerestore_img3.c)
-target_include_directories(idevicerestore_img3 PUBLIC src/libraries)
+    third_party/idevicerestore/src/img3.c
+    third_party/idevicerestore/src/log.c)
+target_include_directories(idevicerestore_img3
+    PUBLIC third_party/idevicerestore/src
+    PRIVATE ${DEPS_INCLUDE})
 
-# See deps::tatsu's own comment (near add_deps_imported_lib(tatsu ...)
-# below) for why this exists: a handful of libplist convenience functions
-# (plist_dict_copy_*()/plist_dict_get_bool()/plist_dict_get_uint()/
-# plist_new_int()/plist_write_to_stream()) that libtatsu.a's tss.o calls
-# but the historically-pinned libplist (deps::plist, third_party/libplist)
-# doesn't implement -- faithfully ported from libplist-modern's own
-# src/plist.c (see the file's own header comment for exactly which
-# functions and the one behavioral simplification), built entirely on
-# primitives deps::plist already has (plist_dict_get_item()/
-# plist_dict_set_item()/plist_copy()/plist_get_*_val()/etc. -- confirmed
-# unchanged across this whole version range already, per
-# libimobiledevice_glue_ext's own comment above).
-add_library(plist_compat STATIC
-    src/libraries/libplist_compat.c)
-# target_link_libraries(plist_compat PUBLIC deps::plist)/add_dependencies
-# happen below, near add_deps_imported_lib(plist ...) -- same
-# "target must exist first" reason as blackb0x_xpwntool's own PUBLIC xpwn
-# link a few lines up.
+# (The plist_compat shim library is gone. It existed only to backfill a
+# handful of current-API libplist functions onto the old 2.1.0 pin for
+# libtatsu; now that the single vendored libplist is 2.7.0, those functions
+# are real and libplist_compat.c is deleted -- see libplist_ext above.)
 
-# NOTE on provenance: src/libraries/xpwntool.c was confirmed (by direct
-# content diff) to come from zzanehip/xpwntool-swift @
-# 58b69c595c (2020-09-13); its libxpwntool/*.h header copies came from the
-# same place and have since been deleted in favour of third_party/xpwn's own — decrypt()'s body is byte-identical, only include
-# paths/a header comment/one debug printf differ. This matches the README's
-# own credit ("zzanehip - updated xpwntool (Created by planetbeing)"). That
-# repo is a reduced xpwntool-only tree with no DMG/HFS+ construction code,
-# matching the original app's own usage (it only ever called decrypt()).
+# NOTE on provenance: the decrypt() glue is src/Img3Crypt.cpp now, first-party
+# code over third_party/xpwn's public AbstractFile API. It replaced
+# src/libraries/xpwntool.c, which was a copy of zzanehip/xpwntool-swift @
+# 58b69c595c (2020-09-13) -- itself a function-wrapped form of xpwn's own
+# `xpwntool` CLI. The logic is xpwn's, matching the README's credit
+# ("zzanehip - updated xpwntool (Created by planetbeing)").
 #
 # third_party/xpwn (planetbeing/xpwn, current HEAD) is therefore NOT a pin of
 # something the original app used — it supplies NEW capability this port
@@ -390,9 +368,6 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 add_subdirectory(third_party/xpwn)
 unset(CMAKE_POLICY_VERSION_MINIMUM)
 
-target_link_libraries(blackb0x_xpwntool PUBLIC xpwn)
-target_include_directories(blackb0x_xpwntool PRIVATE third_party/xpwn/includes)
-
 # xpwn is circa-2010 C code that predates several diagnostics GCC >= 14
 # tightened from warnings to hard errors by default (implicit int,
 # implicit function declarations, incompatible pointer types, mismatched
@@ -443,7 +418,8 @@ foreach(_d ${_xpwn_subdirs})
                 # ones hit it, same reasoning as the bzip2_ext/libpng_ext
                 # dependency two lines up — none of these tools are
                 # actually used by blackb0x/bake-firmware at runtime
-                # (only the `xpwn` library and blackb0x_xpwntool are), so
+                # (only the `xpwn` library and bake-firmware's own
+                # src/Img3Crypt.cpp are), so
                 # there's no harm in over-applying this.
                 #
                 # Plain signature, not PRIVATE: every one of xpwn's own
@@ -463,7 +439,6 @@ foreach(_d ${_xpwn_subdirs})
     endforeach()
 endforeach()
 
-add_dependencies(blackb0x_xpwntool bzip2_ext libpng_ext zlib_ext)
 
 # ---------------------------------------------------------------------------
 # Vendored dependencies built from source (git submodules under third_party/)
@@ -475,9 +450,6 @@ add_dependencies(blackb0x_xpwntool bzip2_ext libpng_ext zlib_ext)
 # to already have real values.
 
 set(AUTOTOOLS_ENV ${CMAKE_COMMAND} -E env "PKG_CONFIG_PATH=${DEPS_PKGCONFIG}")
-
-set(DEPS_MODERN_PREFIX ${CMAKE_BINARY_DIR}/deps-modern)
-set(DEPS_MODERN_PKGCONFIG ${DEPS_MODERN_PREFIX}/lib/pkgconfig)
 
 
 # ENABLE_OPENSSL/ENABLE_COMMONCRYPTO/ENABLE_WINDOWS_CRYPTO OFF: libzip only
@@ -502,6 +474,16 @@ ExternalProject_Add(libzip_ext
     INSTALL_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target install
 )
 
+# libplist is now a single vendored copy at current HEAD (2.7.0+), the same
+# version everything in the libimobiledevice family expects today. It installs
+# as `libplist-2.0` (pkg-config module libplist-2.0, libplist-2.0.a) -- the
+# name libplist adopted at 2.3.0. Two of our era-pinned consumers (libusbmuxd,
+# libimobiledevice) still PKG_CHECK_MODULES([libplist], [libplist >= ...]) with
+# the OLD module name, so the INSTALL step drops a `libplist.pc` alias next to
+# the real `libplist-2.0.pc` (pkg-config keys on the .pc filename, so a copy is
+# a working alias; its Libs/Cflags already point at libplist-2.0). This is what
+# retired the old 2.1.0 pin + the separate libplist-modern build + the
+# libplist_compat.c shim -- see docs/HISTORY.md.
 ExternalProject_Add(libplist_ext
     SOURCE_DIR      ${CMAKE_SOURCE_DIR}/third_party/libplist
     BUILD_IN_SOURCE 1
@@ -510,6 +492,7 @@ ExternalProject_Add(libplist_ext
                         --without-cython
     BUILD_COMMAND   ${AUTOTOOLS_ENV} make -j
     INSTALL_COMMAND make install
+              COMMAND ${CMAKE_COMMAND} -E copy ${DEPS_PKGCONFIG}/libplist-2.0.pc ${DEPS_PKGCONFIG}/libplist.pc
 )
 
 ExternalProject_Add(libusbmuxd_ext
@@ -767,47 +750,23 @@ ExternalProject_Add(libimobiledevice_ext
 # the oldest commit in CURRENT history that has the function Blackb0x needs,
 # not a date-accurate pin like the other vendored libraries (see docs/HISTORY.md).
 # Being a much more recent commit than the others, it needs
-# libimobiledevice-glue (a split-out dependency the old pins don't need),
-# which in turn requires libplist >= 2.3.0 (pkg-config name "libplist-2.0")
-# — well past our historically-pinned libplist 2.1.0 (pkg-config name plain
-# "libplist"). Rather than upgrade the historical libplist pin (which would
-# be wrong for libusbmuxd_ext/libimobiledevice_ext, which are genuinely
-# pinned to that era), build a second, separate current-HEAD libplist
-# (third_party/libplist-modern) used ONLY to satisfy glue's configure-time
-# version check. glue itself still installs into the shared ${DEPS_PREFIX}
-# every other target uses — at final static-link time its few plist_*
-# symbol references resolve against whichever libplist.a is actually linked
-# (deps::plist, the historical one), which is safe since libplist's public C
-# API/ABI has stayed stable across this range.
-ExternalProject_Add(libplist_modern_ext
-    SOURCE_DIR      ${CMAKE_SOURCE_DIR}/third_party/libplist-modern
-    BUILD_IN_SOURCE 1
-    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "PKG_CONFIG_PATH=${DEPS_MODERN_PKGCONFIG}"
-                        ./autogen.sh --prefix=${DEPS_MODERN_PREFIX}
-                        --enable-static --disable-shared
-                        --without-cython
-    BUILD_COMMAND   ${CMAKE_COMMAND} -E env "PKG_CONFIG_PATH=${DEPS_MODERN_PKGCONFIG}" make -j
-    INSTALL_COMMAND make install
-)
+# libimobiledevice-glue, which requires libplist >= 2.3.0 (pkg-config name
+# "libplist-2.0"). That used to force a second, separate current-HEAD libplist
+# build (libplist_modern_ext) alongside a historical 2.1.0 pin. Now that the
+# single vendored libplist IS current HEAD (2.7.0, installed as libplist-2.0
+# with a libplist.pc alias for the old-name consumers -- see libplist_ext
+# above), glue and libirecovery just use the normal AUTOTOOLS_ENV like every
+# other target. glue installs into the shared ${DEPS_PREFIX}.
 
 ExternalProject_Add(libimobiledevice_glue_ext
-    DEPENDS         libplist_ext libplist_modern_ext
+    DEPENDS         libplist_ext
     SOURCE_DIR      ${CMAKE_SOURCE_DIR}/third_party/libimobiledevice-glue
     BUILD_IN_SOURCE 1
-    CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "PKG_CONFIG_PATH=${DEPS_MODERN_PKGCONFIG}:${DEPS_PKGCONFIG}"
-                        ./autogen.sh --prefix=${DEPS_PREFIX}
+    CONFIGURE_COMMAND ${AUTOTOOLS_ENV} ./autogen.sh --prefix=${DEPS_PREFIX}
                         --enable-static --disable-shared
-    BUILD_COMMAND   ${CMAKE_COMMAND} -E env "PKG_CONFIG_PATH=${DEPS_MODERN_PKGCONFIG}:${DEPS_PKGCONFIG}" make -j
+    BUILD_COMMAND   ${AUTOTOOLS_ENV} make -j
     INSTALL_COMMAND make install
 )
-
-# libimobiledevice-glue-1.0.pc itself declares "Requires: libplist-2.0" (it
-# was built against third_party/libplist-modern) — pkg-config resolves that
-# transitively, so irecovery's own PKG_CONFIG_PATH must also see the modern
-# prefix or it can't find libplist-2.0.pc, even though irecovery never uses
-# libplist directly itself.
-set(AUTOTOOLS_ENV_WITH_MODERN ${CMAKE_COMMAND} -E env
-    "PKG_CONFIG_PATH=${DEPS_MODERN_PKGCONFIG}:${DEPS_PKGCONFIG}")
 
 # libirecovery has a real, upstream native Darwin backend (configure.ac's
 # --with-iokit, which defaults to yes whenever IOKit is detected) as an
@@ -835,9 +794,9 @@ ExternalProject_Add(libirecovery_ext
     DEPENDS         libplist_ext libimobiledevice_glue_ext
     SOURCE_DIR      ${CMAKE_SOURCE_DIR}/third_party/libirecovery
     BUILD_IN_SOURCE 1
-    CONFIGURE_COMMAND ${AUTOTOOLS_ENV_WITH_MODERN} ./autogen.sh --prefix=${DEPS_PREFIX}
+    CONFIGURE_COMMAND ${AUTOTOOLS_ENV} ./autogen.sh --prefix=${DEPS_PREFIX}
                         --enable-static --disable-shared ${LIBIRECOVERY_BACKEND_ARGS}
-    BUILD_COMMAND   ${AUTOTOOLS_ENV_WITH_MODERN} make -j
+    BUILD_COMMAND   ${AUTOTOOLS_ENV} make -j
     INSTALL_COMMAND make install
 )
 
@@ -845,36 +804,20 @@ ExternalProject_Add(libirecovery_ext
 # response client -- used by --stock-securerom (DeviceManager.cpp's
 # sendiBSS()) to personalize a stock iBSS/iBEC with a real, ECID-bound
 # SHSH ticket before sending it, the same way idevicerestore does for a
-# genuine (non-exploited) DFU restore. Its own configure.ac
-# PKG_CHECK_MODULES for "libplist-2.0" (not the historical "libplist"
-# pkg-config name) is why this needs AUTOTOOLS_ENV_WITH_MODERN, same
-# reasoning as libirecovery_ext's own comment above -- the actual linked
-# libplist.a at blackb0x's final link step is still the historical one
-# (deps::plist), just like libimobiledevice_glue_ext.
-#
-# CPPFLAGS=-I${DEPS_MODERN_PREFIX}/include: unlike libirecovery_ext/
-# libimobiledevice_glue_ext above, libtatsu's own tss.c genuinely
-# #includes <plist/plist.h> and calls current-API functions the
-# historically-pinned libplist doesn't have (plist_dict_copy_bool(),
-# plist_write_to_stream(), etc.) -- confirmed as a real build failure
-# ("implicit declaration of function 'plist_dict_copy_bool'") without
-# this. Its own Makefile.am orders AM_CFLAGS as
-# "$(libcurl_CFLAGS) $(libplist_CFLAGS)", and libcurl_CFLAGS's
-# pkg-config-derived -I${DEPS_INCLUDE} (where curl_ext, and also the
-# HISTORICAL libplist_ext, both install) sorts before libplist_CFLAGS's
-# -I${DEPS_MODERN_PREFIX}/include -- so `#include <plist/plist.h>`
-# silently resolves to the historical, too-old header that also happens
-# to live under DEPS_INCLUDE, never reaching the modern one at all. An
-# explicit, earlier CPPFLAGS override (same shape as libfragmentzip_ext's
-# own CPPFLAGS workaround above) wins that shadowing outright.
+# genuine (non-exploited) DFU restore. Its tss.c #includes <plist/plist.h>
+# and calls current-API functions (plist_dict_copy_bool(),
+# plist_write_to_stream(), etc.); those now live in the single vendored
+# libplist (2.7.0) that installs under ${DEPS_INCLUDE}, so a plain
+# AUTOTOOLS_ENV build finds them -- no more modern-prefix CPPFLAGS override
+# or separate libplist-modern (both retired with the libplist consolidation;
+# see libplist_ext above and docs/HISTORY.md).
 ExternalProject_Add(libtatsu_ext
-    DEPENDS         libplist_modern_ext curl_ext
+    DEPENDS         libplist_ext curl_ext
     SOURCE_DIR      ${CMAKE_SOURCE_DIR}/third_party/libtatsu
     BUILD_IN_SOURCE 1
-    CONFIGURE_COMMAND ${AUTOTOOLS_ENV_WITH_MODERN} ./autogen.sh --prefix=${DEPS_PREFIX}
+    CONFIGURE_COMMAND ${AUTOTOOLS_ENV} ./autogen.sh --prefix=${DEPS_PREFIX}
                         --enable-static --disable-shared
-                        CPPFLAGS=-I${DEPS_MODERN_PREFIX}/include
-    BUILD_COMMAND   ${AUTOTOOLS_ENV_WITH_MODERN} make -j
+    BUILD_COMMAND   ${AUTOTOOLS_ENV} make -j
     INSTALL_COMMAND make install
 )
 
@@ -942,19 +885,25 @@ function(add_deps_imported_lib name libfile)
         INTERFACE_INCLUDE_DIRECTORIES ${DEPS_INCLUDE})
 endfunction()
 
-add_deps_imported_lib(plist          libplist.a)
-target_link_libraries(plist_compat PUBLIC deps::plist)
-# Directly on the ExternalProject, not on the imported archive: this file
-# #includes <plist/plist.h>, so it needs libplist_ext's INSTALL step to have
-# run, and a direct edge says that without depending on how CMake propagates
-# dependencies through an IMPORTED target.
-add_dependencies(plist_compat libplist_ext)
+add_deps_imported_lib(plist          libplist-2.0.a)
 
 add_deps_imported_lib(usbmuxd        libusbmuxd.a)
 add_deps_imported_lib(imobiledevice  libimobiledevice.a)
 add_deps_imported_lib(irecovery      libirecovery-1.0.a)
 add_deps_imported_lib(imobiledevice_glue libimobiledevice-glue-1.0.a)
 add_deps_imported_lib(general        libgeneral.a)
+
+# idevicerestore_img3 (declared far above, compiling img3.c + log.c straight
+# from the idevicerestore submodule) wires its dep edges here, now that the
+# deps:: targets it needs exist -- same deferral as plist_compat above. log.c
+# calls plist (logger_dump_plist) and glue's mutex_*; img3.c reaches
+# libirecovery/glue headers transitively via idevicerestore.h/common.h. The
+# add_dependencies() edges ensure those headers are installed before it
+# compiles.
+target_link_libraries(idevicerestore_img3 PUBLIC
+    deps::plist deps::irecovery deps::imobiledevice_glue Threads::Threads)
+add_dependencies(idevicerestore_img3 libplist_ext libirecovery_ext libimobiledevice_glue_ext)
+
 add_deps_imported_lib(fragmentzip    libfragmentzip.a)
 add_deps_imported_lib(wolfssl        libwolfssl.a)
 add_dependencies(deps::wolfssl wolfssl_ext)
@@ -993,17 +942,11 @@ add_dependencies(deps::tatsu libtatsu_ext)
 # Same shape as deps::curl above — libtatsu.a's own TSS-over-HTTPS
 # requests go through libcurl, so any consumer of deps::tatsu needs
 # deps::curl's own symbols (and transitively wolfssl/zlib) available too.
-# libplist_compat (see src/libraries/libplist_compat.c) supplies the
-# handful of newer libplist convenience functions tss.o itself calls that
-# the historically-pinned deps::plist doesn't implement — linking two
-# real copies of libplist (historical + libplist_modern_ext's -2.0
-# archive) was tried first and produces genuine duplicate-symbol link
-# errors for their shared core API (plist_new_dict()/plist_free()/etc.
-# all live in the same object file as the newer functions in both
-# archives, so there's no way to pull only the new ones) — a small,
-# faithfully-ported compat shim avoids that architecturally rather than
-# fighting it with symbol renaming.
-set_target_properties(deps::tatsu PROPERTIES INTERFACE_LINK_LIBRARIES "deps::curl;plist_compat")
+# The newer libplist convenience functions tss.o calls (plist_dict_copy_*,
+# plist_write_to_stream, etc.) are now real in the single vendored libplist
+# (2.7.0, deps::plist), so the old plist_compat shim in this interface is
+# gone -- deps::plist is already pulled in wherever deps::tatsu is linked.
+set_target_properties(deps::tatsu PROPERTIES INTERFACE_LINK_LIBRARIES "deps::curl")
 
 # Order each imported archive against the ExternalProject that actually
 # produces it.
@@ -1149,18 +1092,13 @@ target_include_directories(xpwn BEFORE PRIVATE ${DEPS_INCLUDE}/wolfssl)
 # targets themselves, not these separate executables that merely link
 # against them, so each needs the identical treatment.
 #
-# blackb0x_xpwntool (our own target wrapping src/libraries/xpwntool.c,
-# declared far above — NOT the same target as xpwn's own "xpwntool" CLI
-# tool in this list) needs it too, for the exact same reason: its
-# transitively-included xpwn/img3.h has its own
-# bare `#include <openssl/aes.h>`. This was silently getting away without
-# it on Linux dev boxes that happen to have a real system libssl-dev
-# installed (AES_KEY's struct layout has stayed ABI-stable across the
-# whole OpenSSL-compatible-API ecosystem for decades, wolfSSL's shim
-# included, so a real system openssl/aes.h resolving here instead of
-# wolfSSL's shim went unnoticed) — confirmed as a real, not hypothetical,
-# bug on a real macOS build, which has no such fallback header anywhere on
-# its default include path and failed outright.
+# Our own src/Img3Crypt.cpp (first-party decrypt() glue, compiled into
+# bake-firmware — see that target below) needs the identical treatment for
+# the same reason: it includes <xpwn/nor_files.h>, whose chain reaches a bare
+# `#include <openssl/aes.h>` that only resolves to wolfSSL's compat shim under
+# ${DEPS_INCLUDE}/wolfssl. That is applied as a per-source property on the
+# bake-firmware target rather than here, since bake-firmware is not declared
+# until later in this file and naming it here would be a use-before-definition.
 # dmg-bin doesn't exist as a target on Apple at all (third_party/xpwn's own
 # dmg/CMakeLists.txt skips it there — it duplicates macOS's native
 # `hdiutil`, see that file's own comment) — omit it from this list there,
@@ -1168,13 +1106,12 @@ target_include_directories(xpwn BEFORE PRIVATE ${DEPS_INCLUDE}/wolfssl)
 # dmg-bin is deliberately absent: third_party/xpwn's own dmg/CMakeLists.txt
 # skips that target on Apple entirely (it duplicates macOS's native hdiutil),
 # and naming a nonexistent target here is a hard CMake error.
-set(_wolfssl_include_targets ipsw xpwntool imagetool dripwn blackb0x_xpwntool)
+set(_wolfssl_include_targets ipsw xpwntool imagetool dripwn)
 foreach(t ${_wolfssl_include_targets})
     target_include_directories(${t} PRIVATE ${DEPS_INCLUDE})
     target_include_directories(${t} BEFORE PRIVATE ${DEPS_INCLUDE}/wolfssl)
     target_compile_options(${t} PRIVATE -include ${DEPS_INCLUDE}/wolfssl/options.h)
 endforeach()
-add_dependencies(blackb0x_xpwntool wolfssl_ext)
 
 # ---------------------------------------------------------------------------
 # blackb0x-pwn: Blackb0x's own original checkm8/SHAtter exploit, standalone.
@@ -1249,10 +1186,16 @@ target_include_directories(blackb0x PRIVATE third_party/xpwn/includes)
 # NOTE: CBPatcher and iBoot32Patcher are deliberately absent here -- both are
 # GPLv3 and are fork/exec'd as separate binaries instead of linked. See their
 # add_executable() blocks above.
+# No blackb0x_xpwntool and no xpwn here: the jailbreak binary does zero
+# decryption now. Everything that calls xpwntool's decrypt() -- patchiBSS()/
+# patchiBEC()/patchKernel() and bake-firmware's ramdisk baking -- lives in
+# PatcherPatch.cpp/BakeRamdisk.cpp, compiled into bake-firmware only. blackb0x
+# consumes bake-firmware's already-encrypted dist/ output verbatim. It still
+# links idevicerestore_img3, which is only img3 signature-stitching for
+# --stock-securerom personalization (Personalize.cpp), not decryption, and is
+# a standalone static lib with no xpwn dependency of its own.
 target_link_libraries(blackb0x PRIVATE
-    blackb0x_xpwntool
     idevicerestore_img3
-    xpwn
     deps::irecovery
     deps::imobiledevice_glue
     deps::imobiledevice
@@ -1379,14 +1322,30 @@ add_executable(bake-firmware
     src/IPSW.cpp
     src/IPSWDownloader.cpp
     src/Patcher.cpp
+    # The decrypt()/re-encrypt/GPL-patch-tool half of Patcher, split out so it
+    # is compiled into the authoring binary ONLY -- blackb0x never links it and
+    # therefore does no decryption. See PatcherPatch.cpp's own header.
+    src/PatcherPatch.cpp
+    # First-party decrypt()/IMG3 re-encrypt glue over xpwn's public API (was
+    # the vendored src/libraries/xpwntool.c + blackb0x_xpwntool library).
+    src/Img3Crypt.cpp
     src/ResourcePath.cpp)
+
+# Img3Crypt.cpp includes <xpwn/nor_files.h>, whose chain reaches a bare
+# `#include <openssl/aes.h>` that resolves only to wolfSSL's compat shim under
+# ${DEPS_INCLUDE}/wolfssl, and needs wolfssl/options.h force-included first
+# (same treatment the xpwn CLI targets get via _wolfssl_include_targets above).
+# Applied as a per-source property so it doesn't force wolfssl/options.h onto
+# every other bake-firmware translation unit.
+set_source_files_properties(src/Img3Crypt.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${DEPS_INCLUDE};${DEPS_INCLUDE}/wolfssl"
+    COMPILE_OPTIONS "-include;${DEPS_INCLUDE}/wolfssl/options.h")
 
 target_include_directories(bake-firmware PRIVATE third_party/xpwn/includes)
 
 # CBPatcher absent for the same GPLv3 reason as on blackb0x above; this target
 # fork/execs it through the same Patcher.cpp helper.
 target_link_libraries(bake-firmware PRIVATE
-    blackb0x_xpwntool
     xpwn
     deps::plist
     deps::fragmentzip

@@ -2,10 +2,21 @@
 //  Patcher.hpp
 //  Blackb0x
 //
-//  CLI port of Patcher.h/.mm. patchiBSS/patchiBEC/patchKernel are thin
-//  wrappers: decrypt() is linked, while the two GPL patch tools are
-//  fork/exec'd as separate binaries (see Patcher.cpp's own header comment).
-//  patchRamdisk is the substantial one:
+//  CLI port of Patcher.h/.mm. The class is split across two translation
+//  units by whether the method decrypts firmware:
+//    - Patcher.cpp holds the crypto-free half (baked-component loaders,
+//      useStock* which now send Apple's original img3 untouched, the
+//      dist/ existence check, and the component bookkeeping). It links no
+//      xpwntool decrypt() and is compiled into BOTH binaries.
+//    - PatcherPatch.cpp holds patchiBSS/patchiBEC/patchKernel: they
+//      decrypt() (xpwntool.c) and fork/exec the two GPL patch tools
+//      (iBoot32Patcher, CBPatcher) as separate binaries, and re-encrypt.
+//      It is compiled into bake-firmware ONLY, so the blackb0x jailbreak
+//      binary does no decryption at all -- it consumes bake-firmware's
+//      already-encrypted dist/ output verbatim.
+//
+//  The ramdisk baking (the substantial decrypt/inject/re-encrypt step) lives
+//  in BakeRamdisk.cpp now, also authoring-only. For the record it:
 //    1. decrypt()s the ramdisk (Apple's own AES-CBC encryption, via
 //       xpwntool.c).
 //    2. Detects whether the decrypted image is UDIF-wrapped ("koly" trailer)
@@ -113,97 +124,70 @@ public:
     // is no longer done at all; see its own comment for what replaced it.
     bool patchRamdisk();
 
-    // --stock-ramdisk (Cli.hpp's CliOptions): decrypts and sends the
-    // RestoreRamdisk exactly as downloaded from Apple -- no /blackb0x
-    // merge, no entrypoint.c, none of bake-firmware's own work at all
-    // -- instead of patchRamdisk()'s usual dist/<device>_<buildID>-
-    // Ramdisk.dmg lookup. A diagnostic: if the device boots this one fine,
-    // the failure is somewhere in blackb0x's own ramdisk patching or
-    // entrypoint.c; if it fails the same way even with a stock ramdisk,
-    // the failure is earlier in the chain (iBSS/iBEC/KASLR-boot-args
-    // patches, kernelcache, devicetree, or the boot trigger itself).
+    // --stock-ramdisk (Cli.hpp's CliOptions): sends the RestoreRamdisk
+    // exactly as Apple shipped it -- still encrypted, still img3-wrapped, no
+    // host-side decryption, no /blackb0x merge, no entrypoint.c -- instead of
+    // patchRamdisk()'s usual dist/ lookup. A diagnostic: if the device boots
+    // this fine, the failure is in blackb0x's own ramdisk baking; if it fails
+    // the same way, the failure is earlier in the chain (iBSS/iBEC patches,
+    // kernelcache, devicetree, or the boot trigger itself).
     //
-    // stockRecovery: whoever actually verifies this ramdisk's signature is
-    // whichever iBEC is running, not this function's own caller -- with
-    // blackb0x's own patched iBEC (stockRecovery false: --stock-ramdisk/
-    // --stock-firmware without --stock-recovery), RSA/ticket checks are
-    // already bypassed and a decrypted, unwrapped ramdisk is fine. With
-    // useStockIBEC()'s stock iBEC (stockRecovery true), those checks are
-    // intact, so decrypting first would invalidate the signature before
-    // that iBEC ever gets to check it -- send the original file untouched
-    // instead, same as useStockIBSS()/useStockIBEC() do for the same
-    // reason.
+    // Sent untouched regardless of stockRecovery. This is the correction of a
+    // wrong belief the earlier code held: that "with blackb0x's own patched
+    // iBEC, RSA/ticket checks are bypassed and a decrypted, unwrapped ramdisk
+    // is fine." It is not. iBoot32Patcher defeats ONLY iBoot's signature/
+    // ticket/KASLR checks -- never its img3 parser or its AES-decrypt path
+    // (verified against the patcher source; see docs/HISTORY.md). iBoot always
+    // parses the img3 and decrypts the DATA tag itself via the KBAG + hardware
+    // GID key, so a host-decrypted, unwrapped image is a headerless payload it
+    // cannot load -- which is exactly why the old decrypt-on-stock path never
+    // booted. The stockRecovery parameter is now vestigial.
     bool useStockRamdisk(const std::string& path, bool stockRecovery = false);
 
-    // --stock-recovery (Cli.hpp's CliOptions): decrypts and sends iBSS/iBEC
-    // exactly as downloaded from Apple -- no iBootPatcher() call at all,
-    // so no boot-args injection, no KASLR patch, no ticket/RSA-check
-    // bypass. checkm8/pwnTool still needs to run beforehand for the
-    // device to accept ANY file at all (SecureROM's own signature
-    // enforcement is what checkm8 bypasses, separate from iBoot's own
-    // patches these skip) -- this only changes which iBSS/iBEC content
-    // gets uploaded once pwned, not whether pwning happens. REQUIRES
-    // --stock-firmware (Cli.cpp's runCli() refuses to start otherwise) --
-    // no longer orthogonal to useStockRamdisk() above the way it once
-    // was: the resulting stock iBEC enforces real APTicket verification
-    // on whatever it loads next, and blackb0x's own patched kernel/
-    // ramdisk can never satisfy that regardless. If the fully-stock
-    // suite boots fine, the failure is in blackb0x's own iBSS/iBEC
-    // patches; if it fails the same way, the failure is elsewhere
-    // (kernelcache/ramdisk patches, devicetree, or the boot trigger
-    // itself).
-    // stockSecurerom (--stock-securerom, Cli.hpp's CliOptions): decrypt()ing
-    // still produces a bare, decrypted, unwrapped binary (the img3
-    // container gets stripped) -- fine for the checkm8-shaped soft-DFU
-    // upload path (boot_client() in DeviceManager.cpp), which sends raw
-    // post-verification bytes since checkm8 skips SecureROM's check
-    // entirely. But sendiBSS()'s --stock-securerom route sends this to a
-    // device whose SecureROM was never exploited via the *standard* DFU
-    // protocol, which hands the received bytes to SecureROM's own image
-    // loader -- that loader expects (and cryptographically verifies) a
-    // real img3 container, computed over the ORIGINAL encrypted bytes as
-    // signed by Apple. A decrypted/unwrapped binary fails that check
-    // immediately regardless of its content. So when stockSecurerom is set,
-    // skip decrypt() entirely and point straight at the original
-    // downloaded file, untouched -- still encrypted, still img3-wrapped,
-    // exactly as Apple shipped and signed it.
+    // --stock-recovery (Cli.hpp's CliOptions): sends iBSS/iBEC exactly as
+    // Apple shipped them -- still encrypted, still img3-wrapped, no
+    // iBootPatcher() call, so no KASLR/ticket/RSA-check patches. checkm8/
+    // pwnTool still runs beforehand for the device to accept any file at all;
+    // this only changes which iBSS/iBEC content is uploaded once pwned.
+    // REQUIRES --stock-firmware (Cli.cpp's runCli() refuses otherwise): the
+    // resulting stock iBEC enforces real APTicket verification on whatever it
+    // loads next, which blackb0x's own patched kernel/ramdisk can never
+    // satisfy. If the fully-stock suite boots, the failure is in blackb0x's
+    // own iBSS/iBEC patches; if it fails the same way, it is elsewhere.
+    //
+    // stockSecurerom is now immaterial to what is sent -- either way it is the
+    // untouched original img3. There is no host decryption here any more (see
+    // useStockRamdisk() above for why decrypting would break the boot). The
+    // one thing this cannot produce is a raw, decrypted stock iBSS for the
+    // checkm8 boot_client() upload path, which uploads the img3 DATA payload
+    // directly as code and so needs plaintext -- producing that requires
+    // decryption, which only bake-firmware does now, and a raw iBSS is exactly
+    // what the normal jailbreak path already gets from dist/. iBSS being the
+    // one component that reaches its loader decrypted is the sole exception to
+    // "everything is sent still encrypted"; see Cli.hpp's stockRecovery notes.
     bool useStockIBSS(const std::string& path, bool stockSecurerom = false);
-    // Unlike useStockIBSS() above, this one's correctness doesn't depend
-    // on stockSecurerom at all: iBEC is only ever sent once some iBSS is
-    // already running, and useStockIBEC() is only ever called when
-    // useStockIBSS() was too (both gated on stockRecovery in Cli.cpp) --
-    // meaning that running iBSS is always useStockIBSS()'s own unpatched
-    // output, whether it got there via checkm8/boot_client() or real DFU.
-    // Either way its own RSA check is intact (useStockIBSS() never calls
-    // iBootPatcher()), so it will verify iBEC's img3 signature over the
-    // original encrypted bytes exactly like a real SecureROM does for
-    // iBSS -- decrypting iBEC first invalidates that signature
-    // unconditionally, not just under --stock-securerom. Always sends the
-    // original downloaded file untouched.
+    // Sends the original downloaded iBEC untouched, unconditionally -- same
+    // reasoning as useStockRamdisk()/useStockKernel(): whichever iBEC-loader
+    // (a stock iBSS's intact RSA check, or a real SecureROM) runs next
+    // decrypts the img3 itself, and host-decrypting first would strip the
+    // img3 and hand it a payload it cannot load.
     bool useStockIBEC(const std::string& path);
 
     // --stock-firmware (Cli.hpp's CliOptions): the kernelcache half of the
-    // same idea -- decrypts and sends the kernelcache exactly as
-    // downloaded from Apple, no patch_kernel()/CBPatcher call at all (no
-    // tfp0, no AMFI/memcmp bypass, no sandbox patch). Combined with
-    // useStockIBSS()/useStockIBEC()/useStockRamdisk() (what --stock-firmware
-    // sets all of, together) this sends a completely unmodified firmware
-    // suite end to end -- devicetree is already always sent unmodified
-    // regardless (see setDeviceTreePath()'s own comment), so there's no
-    // separate stock/patched distinction to make there. If a fully-stock
-    // suite boots fine, checkm8 and the bootx trigger are both confirmed
-    // working and the failure is specifically in one of blackb0x's own
-    // patches; if it fails the same way even fully stock, the failure is
-    // somewhere checkm8/the boot trigger doesn't control at all (or this
-    // device/firmware genuinely can't complete this boot path regardless
-    // of what's sent).
+    // same idea -- sends the kernelcache exactly as Apple shipped it (still
+    // encrypted, still img3-wrapped, no host decryption), no patch_kernel()/
+    // CBPatcher call (no tfp0, no AMFI/memcmp bypass, no sandbox patch).
+    // Combined with useStockIBSS()/useStockIBEC()/useStockRamdisk() this sends
+    // a completely unmodified firmware suite end to end -- devicetree is
+    // always sent unmodified anyway (see setDeviceTreePath()). If a fully-stock
+    // suite boots, checkm8 and the bootx trigger are confirmed and the failure
+    // is in one of blackb0x's own patches; if it fails the same way, the
+    // failure is somewhere checkm8/the boot trigger doesn't control (or this
+    // device/firmware genuinely cannot complete this boot path regardless).
     //
-    // stockRecovery: same reasoning as useStockRamdisk()'s own comment
-    // above -- the kernelcache's signature is checked by whichever iBEC
-    // is running, so this needs to stay encrypted/img3-wrapped whenever
-    // that's useStockIBEC()'s stock iBEC (stockRecovery true), and can
-    // stay decrypt()-only when it's blackb0x's own patched iBEC
-    // (stockRecovery false).
+    // Sent untouched regardless of stockRecovery -- iBoot decrypts the img3
+    // itself via its KBAG + GID key in every case (see useStockRamdisk()'s own
+    // comment). The stockRecovery parameter is now vestigial.
     bool useStockKernel(const std::string& path, bool stockRecovery = false);
 
     // Feed an already-baked component straight in, with no patching and no

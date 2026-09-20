@@ -10,7 +10,10 @@ extern "C" {
 #include <libtatsu/tss.h>
 #include <plist/plist.h>
 
-#include "idevicerestore_img3.h"
+// img3_stitch_component() from the vendored idevicerestore submodule
+// (third_party/idevicerestore/src/img3.h), compiled via the idevicerestore_img3
+// static lib. Was the copied src/libraries/idevicerestore_img3.{c,h}.
+#include <img3.h>
 }
 
 #include <cstdio>

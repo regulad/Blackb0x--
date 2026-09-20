@@ -36,9 +36,9 @@
 // is still linked into bake-firmware for IPSW.cpp's sake; this translation
 // unit just no longer needs the header.
 
-extern "C" {
-#include <xpwntool.h>
-}
+// decrypt() (AES-CBC decrypt / IMG3 re-encrypt) is our own first-party glue
+// over third_party/xpwn's public API now, not the old vendored xpwntool.c.
+#include "Img3Crypt.hpp"
 
 extern "C" {
 #include <abstractfile.h>

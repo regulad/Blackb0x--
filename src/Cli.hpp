@@ -116,6 +116,16 @@ struct CliOptions {
     // lists, so anything blackb0x has patched can never pass a real
     // SecureROM/iBEC's check regardless.
     bool stockSecurerom = false;
+    // Diagnostic: send only the named stage and then exit immediately,
+    // leaving the device wherever that stage put it so it can be inspected
+    // with `irecovery -s` (e.g. to read the running iBoot version / SRTG and
+    // confirm which bootloader stage is actually live -- ours or the device's
+    // own installed iBoot after a failed handoff). "ibss" stops right after
+    // iBSS; "ibec" stops right after iBEC (iBSS then iBEC). Empty = the normal
+    // full sequence. checkm8/the exploit still runs first either way, and the
+    // usual build-selection / stock flags still apply to which iBSS/iBEC is
+    // sent. The device is NOT jailbroken by a --send-only run.
+    std::string sendOnly;
     bool help = false;
 };
 

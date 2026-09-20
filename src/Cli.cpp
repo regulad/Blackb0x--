@@ -120,6 +120,14 @@ void printCliUsage(const char* argv0) {
     printf("                            those tickets are only ever valid for the exact,\n");
     printf("                            unmodified stock components, so anything blackb0x\n");
     printf("                            has patched can never pass.\n");
+    printf("  --send-only ibss|ibec     DIAGNOSTIC: run the exploit and send only iBSS\n");
+    printf("                            (ibss) or iBSS then iBEC (ibec), then exit\n");
+    printf("                            immediately -- leaving the device where that stage\n");
+    printf("                            put it and releasing USB so you can attach with\n");
+    printf("                            `irecovery -s` to read the running iBoot version\n");
+    printf("                            and confirm which stage is actually live (ours vs\n");
+    printf("                            the device's own installed iBoot). Honors the same\n");
+    printf("                            build-selection and stock flags. NOT a jailbreak.\n");
     printf("  --help                    Show this message\n");
     printf("\n");
     printf("blackb0x needs root by default: talking to a DFU/Recovery-mode device needs\n");
@@ -158,6 +166,13 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.stockFirmwareNew = true;
         } else if (arg == "--stock-securerom") {
             options.stockSecurerom = true;
+        } else if (arg == "--send-only") {
+            options.sendOnly = nextArg("--send-only");
+            if (options.sendOnly != "ibss" && options.sendOnly != "ibec") {
+                fprintf(stderr, "--send-only takes 'ibss' or 'ibec', got '%s'\n", options.sendOnly.c_str());
+                printCliUsage(argv[0]);
+                exit(2);
+            }
         } else if (arg == "--help" || arg == "-h") {
             options.help = true;
         } else {
@@ -830,7 +845,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
 // installed OS off NAND (its `self.selected_device.jailbroken == 1`
 // branch); that whole path is gone -- see docs/HISTORY.md.
 bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device, const PatchedComponents& components,
-                             bool dryRun, bool stockRecovery, bool stockSecurerom) {
+                             bool dryRun, bool stockRecovery, bool stockSecurerom, const std::string& sendOnly) {
     if (dryRun) {
         printf("(dry run) Would send:\n");
         printf("  iBSS%s\n", components.iBSS ? "" : " (missing, would fail here)");
@@ -860,6 +875,10 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
         return false;
     }
     console::out("iBSS sent.\n");
+    if (sendOnly == "ibss") {
+        console::out("--send-only ibss: stopping here so the running stage can be inspected.\n");
+        return true;
+    }
     // iBSS running successfully means the device is about to reboot and
     // re-enumerate in Recovery mode -- sendiBEC() below (get_tv_patient())
     // blocks retrying for up to ~30s waiting for exactly that, with no
@@ -907,6 +926,10 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
         return false;
     }
     console::out("iBEC sent.\n");
+    if (sendOnly == "ibec") {
+        console::out("--send-only ibec: stopping here so the running stage can be inspected.\n");
+        return true;
+    }
 
     if (stockRecovery) {
         if (!sendStockTail()) return false;
@@ -1246,6 +1269,8 @@ int runCli(const CliOptions& options) {
     if (options.stockRecovery) stockFlags.push_back("--stock-recovery (stock iBSS/iBEC)");
     if (options.stockRamdisk && !options.stockFirmware())
         stockFlags.push_back("--stock-ramdisk (stock RestoreRamdisk)");
+    if (!options.sendOnly.empty())
+        stockFlags.push_back("--send-only " + options.sendOnly + " (send that stage, then exit for inspection)");
     if (!stockFlags.empty()) {
         std::string joined;
         for (size_t i = 0; i < stockFlags.size(); i++) {
@@ -1378,12 +1403,21 @@ int runCli(const CliOptions& options) {
     }
 
     if (!sendComponentsToDevice(deviceManager, device, *components, options.dryRun,
-                                 options.stockRecovery, options.stockSecurerom)) {
+                                 options.stockRecovery, options.stockSecurerom, options.sendOnly)) {
         return 1;
     }
 
     if (options.dryRun) {
         printf("\n(dry run) Done — nothing was written to the device.\n");
+        return 0;
+    }
+
+    if (!options.sendOnly.empty()) {
+        printf("\n--send-only %s: sent that stage and stopped. USB is released -- attach now with\n"
+               "  irecovery -s\n"
+               "and read the iBoot version/SRTG to see which stage is actually running (ours, or the\n"
+               "device's own installed iBoot after a failed handoff). The Apple TV was NOT jailbroken.\n",
+               options.sendOnly.c_str());
         return 0;
     }
 

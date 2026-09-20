@@ -81,6 +81,81 @@ directory's real `entrypoint.c`: Mach-O `armv6`, `LC_UNIXTHREAD`, zero
 `LC_LOAD_DYLIB`, `_entry` as the thread-state PC, `ldid`-signed as
 `com.apple.launchd`. The only remaining requirement is `ldid`.
 
+### What actually holds this up: `ld-classic`, not the SDK
+
+The sentence above — "Apple's own `ld` still lists `armv6`" — is true but
+understates how that works, and the mechanism is the real long-term risk to
+this build. Apple's *current* linker never implemented 32-bit ARM at all.
+`ld` detects those architectures and silently delegates to **`ld-classic`**,
+a frozen fork of the old linker still shipped inside Xcode. Measured on this
+host (Apple clang 21.0.0, `ld-1267`, built June 2026):
+
+```
+$ ld -v
+@(#)PROGRAM:ld  PROJECT:ld-1267
+configured to support archs: armv6 armv7 armv7s arm64 ...
+will use ld-classic for: armv6 armv7 armv7s i386 armv6m armv7k armv7m armv7em
+
+$ clang -arch armv7 -marm ... -Wl,-v
+@(#)PROGRAM:ld-classic  PROJECT:ld64-957.1
+```
+
+So every 32-bit ARM link here runs through a ~3.5 MB binary at
+`XcodeDefault.xctoolchain/usr/bin/ld-classic` that is pinned at `ld64-957.1`
+and receives no development. Apple has called the explicit `-ld_classic` flag
+deprecated since Xcode 15, yet the automatic delegation is still present three
+years later. Neither `-arch armv6` nor `-arch armv7` currently emits any
+warning or deprecation notice.
+
+**The consequence for planning:** the day `ld-classic` is removed, this build
+breaks — and so would any alternative that compiles ARM32 on a Mac, because
+they all route through the same linker. In particular, **pinning an iPhoneOS
+SDK would not protect against this**. An SDK is headers plus link stubs; it
+contains no compiler and no linker. The exposure lives entirely in the
+toolchain.
+
+The mitigations that actually address it, in increasing order of effort:
+
+1. **Commit the built `entrypoint`** (13 KB). A reproducible build is better,
+   but a checked-in artifact means a dead toolchain cannot stop a release.
+2. **Vendor `ld-classic`** — one 3.5 MB binary — or pin a whole Xcode.
+3. **Keep `make CC=arm-apple-darwin11-clang` documented and working.**
+   `cctools-port` is a *source* port of `ld64`/`as`, so it is immune to Apple
+   removing anything from its own toolchain. This is the half of the deleted
+   cross-toolchain dependency that genuinely bought insulation, which is why
+   the `Makefile`'s `CC` override is kept rather than ripped out.
+
+Correction to this section's own history, for accuracy: it says the old
+iPhoneOS 6.1 SDK came from "a 1.7GB archive.org copy of Xcode 4.6", implying
+that route is now unofficial. It is not. Apple still serves these itself.
+Xcode 6.4 — which carries the **iPhoneOS 8.4** SDK, matching the `12H1006`
+migration target — is at:
+
+```
+https://download.developer.apple.com/Developer_Tools/Xcode_6.4/Xcode_6.4.dmg
+```
+
+(The `developer.apple.com/services-account/download?path=...` spelling of the
+same file is the account-UI wrapper around that asset path — same download,
+same requirement, not a fallback worth listing separately.)
+
+**It needs an authenticated Apple ID session, so it cannot be fetched
+unattended.** Verified: an anonymous request to that URL 302s to
+`developer.apple.com/unauthorized/` and returns that page's HTML with a 200,
+which means a naive `curl -f` or a `%{http_code}` check *succeeds* while
+downloading 257 bytes of redirect and then an error page instead of a 2.6 GB
+disk image. Any script that fetches this must verify the payload (size and
+content type), never the status code. CI cannot fetch it at all without
+credentials.
+
+So availability is not the argument against using an SDK — it is obtainable,
+officially, today. The arguments are the two above it: an SDK does not mitigate
+the `ld-classic` exposure, because it contains no linker; and its link stubs
+describe a *different* build from the one the binary will actually run on. See
+`docs/HISTORY.md` for the measured symbol-delta evidence behind that second
+point, and for why linking against dylibs extracted from the target ramdisk has
+a structurally zero delta instead.
+
 Theos was tried first and dropped — its `tool.mk` template assumes exactly
 the opposite of what this binary needs (dynamic linking against `libSystem`,
 `LC_MAIN`, a normal `main(argc,argv,envp)` fed by crt startup glue), and its

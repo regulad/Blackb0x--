@@ -29,25 +29,25 @@ LDID ?= ldid
 CFLAGS := -arch armv6 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -Wall -Wextra -O2
 LDFLAGS := -static -Wl,-e,_entry -nostartfiles
 
-# Diagnostic reboot beacon (see entry() in entrypoint.c). Integer = the
-# approximate pre-reboot delay in seconds; 0 (the default) compiles it out
-# entirely, so the shipped binary is unaffected. `?=` is correct here --
-# unlike CC, make does not predefine this name, and make auto-imports the
-# environment, which is what makes the env-var spelling below work.
+# There is deliberately NO diagnostic switch here, and none should be added.
+# This used to carry a -D that compiled a diagnostic in or out, and it was the
+# wrong shape for this project: the ramdisk this binary lives inside is baked
+# AHEAD OF TIME -- by CI, published as the firmware-<device> artifact,
+# consumed verbatim by a `blackb0x` binary that links no ramdisk-baking code
+# at all. So flipping a compile-time flag meant re-baking the whole ramdisk
+# under sudo with Theos and afsctool, the ~30-minute job CI exists to spare
+# users, just to arm one diagnostic.
 #
-# Set it as an ENVIRONMENT VARIABLE, not `make BLACKB0X_REBOOT_BEACON=...`:
-# BakeRamdisk.cpp runs `make clean all` itself via fork+execvp, which
-# inherits environ, so
+# Diagnostics are RUNTIME DIRECTIVES read out of the kernel boot-args now (see
+# entrypoint/bootargs.h), so a stock CI-baked ramdisk can arm one without
+# being rebuilt. Boot-args are compiled into the iBEC on this hardware, so
+# arming one is a rootless, seconds-long re-bake of that instead:
 #
-#     BLACKB0X_REBOOT_BEACON=10 ./build/blackb0x ...
+#     ./build/bake-iboot --device <m> --build <b> --force \
+#         --extra-boot-args "blackb0x.skip-install=1"
 #
-# plumbs all the way through a normal jailbreak run with no C++ changes. A
-# hand-run `make BLACKB0X_REBOOT_BEACON=10` would just be overwritten by
-# that bake-time rebuild.
-BLACKB0X_REBOOT_BEACON ?= 0
-ifneq ($(BLACKB0X_REBOOT_BEACON),0)
-CFLAGS += -DBLACKB0X_REBOOT_BEACON=$(BLACKB0X_REBOOT_BEACON)
-endif
+# and the binary built here is the same binary either way. Anything new that
+# needs to be switchable on a device belongs there, not in a -D.
 
 # entrypoint replaces /sbin/launchd's content directly (see
 # BakeRamdisk.cpp's spliceFileContentInPlace() call), so it's signed under
@@ -65,11 +65,7 @@ TARGET := entrypoint
 
 all: $(TARGET)
 
-$(TARGET): entrypoint.c
-ifneq ($(BLACKB0X_REBOOT_BEACON),0)
-	@echo "*** WARNING: reboot beacon ON ($(BLACKB0X_REBOOT_BEACON)s) -- this binary"
-	@echo "*** reboots immediately as PID 1 and installs NOTHING. Diagnostic only."
-endif
+$(TARGET): entrypoint.c bootargs.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
 	$(LDID) -S -I$(LAUNCHD_IDENTIFIER) $@
 

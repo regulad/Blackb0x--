@@ -1,20 +1,27 @@
 # Blackb0x
 
-Untethered jailbreak tool for the 2nd/3rd-gen Apple TV, via the checkm8/SHAtter
-DFU-mode boot exploit. Side-loads Cydia + Kodi. A portable CLI port of the original
-macOS app, no GUI.
+Jailbreak tool for the 2nd/3rd-gen Apple TV, via the checkm8/SHAtter DFU-mode boot
+exploit. Side-loads Cydia + Kodi. A portable CLI port of the original macOS app, no
+GUI.
 
-Devices supported:
+Each device is targeted at the newest firmware Apple ever shipped it:
 
 | device | firmware | notes |
 |---|---|---|
-| Apple TV 3,2 (A1469) | tvOS 8.4.x | the only combination verified on real hardware |
-| Apple TV 3,1 (A1427) | tvOS 8.4.x | needs an Arduino running [synackuk's checkm8-A5](https://github.com/synackuk/checkm8-a5) to pwn DFU first; `blackb0x` picks up from there |
-| Apple TV 2,1 (A1378) | tvOS 6.1.4 | |
+| Apple TV 3,2 (A1469) | tvOS 8.4.x | untethered (tihmstar's etasonATV); the only model any of this has been run against |
+| Apple TV 3,1 (A1427) | tvOS 8.4.x | untethered; needs an Arduino running [synackuk's checkm8-A5](https://github.com/synackuk/checkm8-a5) to pwn DFU first; `blackb0x` picks up from there |
+| Apple TV 2,1 (A1378) | tvOS 7.1.2 | **tethered** — no untether exists for 7.x, so the boot has to be redone from the Mac after each power cycle |
+
+The exact build each device targets lives in one table, `kJailbreakTargets[]` in
+`src/Cli.cpp`. Everything else — what CI bakes, what `blackb0x` asks for — reads it
+from there.
 
 **macOS only, Apple Silicon tested.** Everything except the AppleTV3,2 path is
-implemented from protocol analysis rather than confirmed on hardware. Linux support
-was removed; `docs/HISTORY.md` has the reasoning.
+implemented from protocol analysis rather than confirmed on hardware, and **no
+device has yet come up jailbroken**: the firmware suite bakes for all three models
+and the exploit stage (`blackb0x-pwn`) works on an AppleTV3,2, which is not the
+same thing as a finished jailbreak. `docs/HISTORY.md` tracks where that stands.
+Linux support was removed; the same file has the reasoning.
 
 **Tip:** if `blackb0x-pwn` is unreliable over a direct USB-C connection, put a plain
 (non-Thunderbolt) USB hub between the Mac and the Apple TV.
@@ -101,8 +108,10 @@ both fixes spelled out.
 Point it at a different repository's artifacts with `BLACKB0X_ARTIFACT_REPO`
 (`owner/name`), for a fork or a private mirror.
 
-CI currently bakes `AppleTV3,2` only. The other two devices have to be baked
-locally; `.claude/TODO.md` item 12 explains why.
+CI bakes all three devices, one runner each, and publishes each suite as the
+artifact `firmware-<device>` — the name `blackb0x` downloads by. `AppleTV2,1` and
+`AppleTV3,1` used to be excluded because their kernelcaches failed to decrypt; that
+was a real defect in the vendored xpwn's img3 reader and it is fixed.
 
 ## Jailbreaking
 
@@ -113,9 +122,11 @@ locally; `.claude/TODO.md` item 12 explains why.
    ```sh
    sudo env "PATH=$PATH" "THEOS=$THEOS" ./build/bake-firmware
    ```
-   That does every known device/firmware combination. Narrow it with
-   `--device AppleTV3,2` and `--build 10B329a`. Existing output is skipped unless you
-   pass `--force`.
+   That does every known device/firmware combination, which is far more than you
+   need. Narrow it with `--device` and `--build`: when a suite is missing,
+   `blackb0x` names the exact device and build it wants — and, if it cannot bake
+   one itself, spells out the `bake-firmware` command for it. Existing output is
+   skipped unless you pass `--force`.
 2. Connect the Apple TV by micro-USB **and** plug in its power cable.
 3. Run `./build/blackb0x`. Add `--dry-run` to preview without touching the device.
 4. Follow the on-screen instructions to enter DFU mode.

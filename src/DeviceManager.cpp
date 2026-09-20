@@ -34,6 +34,7 @@ extern "C" {
 #include <libimobiledevice/afc.h>
 }
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -1393,16 +1394,35 @@ static int sendFileThenCommand(irecv_client_t client, const char* what, const st
         irecv_usb_control_transfer(client, 0x21, 1, 0, 0, nullptr, 0, 5000);
     }
     if (extraCommandBeforeMain) {
-        // "getenv ramdisk-delay" is genuinely fire-and-forget -- real
-        // idevicerestore ignores its result too, and nothing depends on it.
-        // "setenv boot-args ..." is not: it is the ONLY thing that puts
-        // rd=md0 and the AMFI/code-signing args in front of the kernel now
-        // that patch_boot_args() is no longer used. If it silently fails,
-        // iBoot falls back to its own compiled-in default
-        // ("rd=md0 nand-enable-reformat=1 -progress"), which has no
-        // amfi=0xff/cs_enforcement_disable=1 at all -- so entrypoint.c, an
-        // unsigned binary, could not exec as PID 1 and the boot would fail
-        // for a reason nothing in the log would explain.
+        // Today this is only ever "getenv ramdisk-delay", which is genuinely
+        // fire-and-forget -- real idevicerestore ignores its result too, and
+        // nothing depends on it. extraCommandMustSucceed exists for callers
+        // that need a hard failure instead.
+        //
+        // IT USED TO ALSO CARRY "setenv boot-args ...", and the comment here
+        // claimed that command was "the ONLY thing that puts rd=md0 and the
+        // AMFI/code-signing args in front of the kernel". That was wrong, and
+        // wrong in the way that cost this project weeks: on AppleTV3,2's
+        // iBoot-1537.9.55 the command SUCCEEDS and the variable really is
+        // set -- "boot-args" is a legitimate entry in iBoot's settable
+        // env-var name table (its one and only literal-pool xref, file offset
+        // 0x3dd1c in the decrypted image, sitting beside "auto-boot",
+        // "debug-uarts" and "filesize") -- but there is no
+        // env_get("boot-args") anywhere on the kernel-boot path to read it
+        // back. iBoot selects between an empty string and its own hardcoded
+        // "rd=md0 nand-enable-reformat=1 -progress" and snprintf()s that into
+        // the kernel command line. Stored, then never consulted: silently
+        // ignored rather than rejected, which is exactly why nothing in any
+        // log ever hinted at it.
+        //
+        // Boot-args are compiled into iBEC now (iBoot32Patcher -b, from
+        // Patcher.hpp's `bootargs` namespace, which carries the full
+        // evidence). Do not restore a runtime-setenv design here: a baked
+        // string also wins unconditionally, because patch_boot_args()
+        // repoints the fallback's LDR at the injected literal, so BOTH arms
+        // of iBoot's select land on it. The `getenv` calls elsewhere in this
+        // file are unaffected -- ramdisk-size and ramdisk-delay are real
+        // variables that iBoot itself consumes.
         irecv_error_t extraErr = irecv_send_command(client, extraCommandBeforeMain);
         if (extraErr != IRECV_E_SUCCESS) {
             fprintf(stderr, "%s: '%s' failed: %s\n", what, extraCommandBeforeMain, irecv_strerror(extraErr));
@@ -1626,90 +1646,66 @@ static bool checkDeviceLeftRecoveryModeAfterBoot(uint64_t ecid) {
     return false;
 }
 
-// Boot-args for the two kinds of boot this function triggers. These used to
-// be compiled into iBEC by iBoot32Patcher's patch_boot_args() (Patcher.cpp's
-// old args1/args2); they are set at runtime now, which is how the stock path
-// (sendStockRestoreTail() below) and real idevicerestore have always done it.
-// See patchiBEC() for why the compiled-in version was worth getting rid of.
+// BOOT-ARGS ARE NOT SENT FROM HERE. There are no kRamdiskBootArgs/
+// kTetherBootArgs constants in this file any more, and no `setenv boot-args`
+// on the boot path. The strings live in Patcher.hpp's `bootargs` namespace
+// and are COMPILED INTO the two baked iBECs by bake-iboot
+// (iBoot32Patcher -b); blackb0x picks the image that matches the mode
+// (Cli.cpp) and sends it.
 //
-// Deliberately NOT followed by `saveenv`: boot-args must apply to this one
-// boot only. The stock path saves `auto-boot false` because that is meant to
-// persist, and pointedly does not save boot-args -- persisting `rd=md0` into
-// NVRAM would leave the device trying to root-mount a ramdisk that is no
-// longer there on every subsequent normal boot.
+// WHAT WAS BELIEVED, AND WHAT THE DISASSEMBLY SHOWED. This file used to send
+// "setenv boot-args rd=md0 -v amfi=0xff ..." immediately before `bootx`, on
+// the reasoning that a runtime variable is how real idevicerestore does it
+// and is easier to change than a re-bake. The command was accepted every
+// time. It reached nothing. Decrypting this project's own baked
+// dist/iBEC-AppleTV3,2_10B329a (AES-256-CBC over the IMG3 DATA tag) shows
+// why, and the nuance is the whole reason it went unnoticed for so long:
 //
-// kRamdiskBootArgs matches what the ramdisk actually does. entrypoint.c is
-// the ramdisk's /sbin/launchd: it execs as PID 1, writes its files, and
-// reboots -- nothing else. So:
-//   rd=md0                     root device IS the ramdisk. Without this the
-//                              kernel mounts the real NAND root and runs
-//                              Apple's own launchd, and entrypoint.c never
-//                              runs at all.
-//   amfi=0xff,
-//   cs_enforcement_disable=1,
-//   amfi_get_out_of_my_way=1   entrypoint.c is our own unsigned binary, so
-//                              code-signing enforcement has to be off for it
-//                              to exec as PID 1.
-//   -v                         verbose console. The only channel this project
-//                              has for seeing a boot fail (see
-//                              checkDeviceLeftRecoveryModeAfterBoot() above),
-//                              and free.
-//   pio-error=0                carried over from the original app's args.
+//   * `setenv boot-args ...` does NOT fail, and the variable really is set.
+//     "boot-args" is a genuine entry in iBoot's settable-env-var NAME TABLE
+//     -- that is its single literal-pool xref in the entire image, at file
+//     offset 0x3dd1c, sitting beside "auto-boot", "debug-uarts" and
+//     "filesize".
+//   * There is no env_get("boot-args") ANYWHERE on the kernel-boot path.
+//     The routine at 0x1af42 loads iBoot's own hardcoded
+//     "rd=md0 nand-enable-reformat=1 -progress", 0x1af46 loads an empty
+//     string, the two are selected between on a flag, and the winner is
+//     snprintf'd into gBootArgs.commandLine. The stored value is never
+//     consulted.
 //
-// NOT here: serial=3 / debug=0x8 (kernel serial console). They ARE the
-// correct way to make the -v log observable, but the AppleTV3,2's UART is on
-// internal hardware test-points, not the micro-USB port (which is USB/DFU
-// only) -- so with no soldered tap there is nowhere to read that log. See
-// docs/HISTORY.md's "Why serial console debugging is not available" note.
-// Notably absent: nand-enable-reformat=1, and the reason is NOT that it
-// would reformat anything here. Researched rather than assumed: that arg
-// only AUTHORIZES a reformat; the format itself is performed by asr under
-// restored during a real restore. This ramdisk runs entrypoint.c as PID 1
-// and never starts restored or asr, so nothing would invoke a format and
-// the arg would simply be inert.
+// Silently ignored, not rejected. The practical consequence was that every
+// boot ran with NONE of amfi=0xff / cs_enforcement_disable=1 /
+// amfi_get_out_of_my_way=1, so an ad-hoc-signed entrypoint could not exec as
+// PID 1 -- while --stock-ramdisk, whose launchd is Apple's own properly
+// signed binary, booted fine. That asymmetry was the bug.
 //
-// It is left out because the closest real-world reference for this exact
-// job says to leave it out. Legacy-iOS-Kit uses two different boot-arg sets
-// on 32-bit devices: its SSH-ramdisk flow (boot a ramdisk, poke at the
-// existing filesystem -- the same shape as what this does) uses
-// "rd=md0 -v amfi=0xff amfi_get_out_of_my_way=1 cs_enforcement_disable=1
-// pio-error=0", with no reformat arg, while its restore/downgrade flow adds
-// nand-enable-reformat=1. The set above is that SSH-ramdisk string, modulo
-// ordering.
+// Independent corroboration from the kernel side, found later: `-v` is not a
+// kernel boot-arg at all. The literal does not exist in EITHER target
+// kernelcache; it exists in the iBEC, as `-s\0-v\0debug=\0` right after
+// `gBootArgs.commandLine = [%s]`. iBoot scans the command line IT assembles
+// for it. So every run over the `setenv` channel was also running without
+// verbose console -- the one diagnostic that might have shown the problem was
+// disabled by the same bug that caused it. See Patcher.hpp's `bootargs`
+// namespace.
 //
-// Worth knowing if flash access ever turns out to be the problem: the arg
-// IS load-bearing on some chips, where the restore ramdisk otherwise fails
-// to bring the flash stack up at all. SSHRD_Script appends
-// "nand-enable-reformat=1 -restore" for exactly three CPIDs -- 0x8960 (A7),
-// 0x7000 and 0x7001 (A8). This project's chip is 0x8947, which is not among
-// them, and no A5-specific requirement is documented anywhere. So if
-// entrypoint.c ever boots but cannot see or mount the data partition, this
-// is a cheap thing to try before anything expensive -- it cannot format
-// without asr, and the only evidence against it is that the 32-bit
-// reference tooling does not use it here.
+// `saveenv` is likewise moot now and its absence needs no defending: there is
+// no per-boot variable left to avoid persisting. (The old rationale was that
+// persisting rd=md0 into NVRAM would leave the device root-mounting a ramdisk
+// that is no longer there. True, but it applied to a mechanism that never
+// worked.) The stock restore path still saves `auto-boot false`, which is a
+// different variable that iBoot genuinely does read -- see
+// sendStockRestoreTail().
 //
-// Also absent: anything about a jailbroken userspace; the ramdisk boot is
-// only a vehicle for the file writes, so there is nothing further to ask
-// the kernel for.
-static const char* const kRamdiskBootArgs =
-    "setenv boot-args rd=md0 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
-// --tether-boot's args: rd=disk0s1s1 instead of rd=md0, so the kernel roots off
-// the OS already on NAND instead of an uploaded ramdisk (none is sent on that
-// path). rd= is NOT optional: it is the boot-arg that tells the kernel which
-// partition holds PID 1 (launchd) / the root filesystem. A restore bootloader
-// like iBEC boots a kernelcache via `bootx` without doing fsboot's automatic
-// NAND-root setup, so with no rd= at all the kernel comes up with no root
-// device and hangs -- which is exactly the "nothing happens on --tether-boot"
-// symptom. disk0s1s1 is the system partition (disk0s1s2 is /var) on this
-// device, matching entrypoint.c's own mounts and the standard iOS fstab
-// (`/dev/disk0s1s1 / hfs ro`). The AMFI/code-signing args stay -- a
-// tether-booted jailbreak's on-NAND untether/tweaks are unsigned too, and even
-// for booting a stock NAND OS they are harmless. (An earlier version of this
-// dropped rd= entirely; the original app's tether-boot had rd=md0 and
-// non-rd=md0 wired to the wrong iBECs -- see docs/HISTORY.md and
-// CliOptions::tetherBoot.)
-static const char* const kTetherBootArgs =
-    "setenv boot-args rd=disk0s1s1 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
+// Do not reintroduce a runtime-setenv design as a fallback or a
+// belt-and-braces default. It cannot win even on a bootloader that DOES honour
+// the variable: patch_boot_args() repoints the fallback's `LDR Rd, =null_str`
+// at the injected literal, so both arms of iBoot's select yield the baked
+// string and the environment is unreachable by construction.
+//
+// The `getenv` calls in this file are a separate matter and are unaffected --
+// `getenv ramdisk-size` and `getenv ramdisk-delay` name real variables that
+// iBoot itself consumes.
+
 int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid, bool skipBootCheck,
                                    bool ramdiskBoot) {
     // get_tv_patient(): same reasoning as sendiBEC() above -- this reconnect
@@ -1718,14 +1714,26 @@ int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t
     // bReq=1: see sendFileThenCommand()'s own comment -- "bootx" is one of
     // idevicerestore's two bRequest=1 boot-triggering commands.
     //
-    // The boot-args go in via extraCommandBeforeMain, which puts them after
-    // the kernelcache upload and its zero-length DFU_DNLOAD (dnloadFinish)
-    // and before 'bootx' -- byte-for-byte the order real idevicerestore uses,
-    // and the same order sendStockRestoreTail() below already follows.
-    const char* bootArgs = ramdiskBoot ? kRamdiskBootArgs : kTetherBootArgs;
-    fprintf(stderr, "sendKernelCache: %s\n", bootArgs);
-    int result = sendFileThenCommand(client, "sendKernelCache", KernelCache_Path, "bootx", false, 1, true,
-                                      bootArgs, /*extraCommandMustSucceed=*/true);
+    // NO extraCommandBeforeMain here. A "setenv boot-args ..." used to go in
+    // at this exact point, matching real idevicerestore's ordering. It has
+    // been removed rather than kept as a harmless default: on this bootloader
+    // the command succeeds and the variable is never read back (the full
+    // account is above kRamdiskBootArgs's old home, a few hundred lines up),
+    // and on any bootloader that DOES read it the baked string still wins,
+    // because patch_boot_args() repoints both arms of iBoot's select at the
+    // injected literal. There is no configuration in which sending it changes
+    // the kernel command line, so leaving it would only imply otherwise.
+    //
+    // The args now come from whichever iBEC was sent earlier in this same
+    // sequence -- dist/iBEC-<tuple> for an install, dist/iBECTether-<tuple>
+    // for --tether-boot. `ramdiskBoot` no longer selects a string here; it is
+    // kept because it still describes which image the caller chose, and
+    // logging the expectation is the only cross-check available for a mismatch
+    // between the iBEC that was uploaded and the boot that was asked for.
+    fprintf(stderr, "sendKernelCache: expecting the %s iBEC's baked boot-args (%s)\n",
+            ramdiskBoot ? "install" : "tether",
+            ramdiskBoot ? bootargs::kRamdiskBootArgs : bootargs::kTetherBootArgs);
+    int result = sendFileThenCommand(client, "sendKernelCache", KernelCache_Path, "bootx", false, 1, true);
     if (result == 0 && skipBootCheck) {
         fprintf(stderr,
                 "sendKernelCache: 'bootx' acknowledged. --no-shell-attach: not reading the recovery console; "
@@ -1908,12 +1916,8 @@ int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& 
     //     this) still wasn't enough -- the device kept resetting back to
     //     iBoot's own command prompt every time ("Boot Failure Count"
     //     still climbing) until this was added too.
-    //  3. `setenv boot-args rd=md0 nand-enable-reformat=1 -progress` --
-    //     blackb0x's own patched iBEC route doesn't need this separately
-    //     (patchiBEC()/Patcher.cpp already compiles an equivalent rd=md0
-    //     string directly into the patched iBEC itself), but
-    //     useStockIBEC()'s genuinely-unpatched stock iBEC has no such
-    //     compiled-in args and was never being told this at all.
+    //  3. `setenv boot-args rd=md0 nand-enable-reformat=1 -progress`.
+    //     KEPT, AND IT IS A NO-OP -- see the note at the call site below.
     //  4. `bootx` via bRequest=1 -- see sendFileThenCommand()'s own
     //     comment on why.
     {
@@ -1941,6 +1945,38 @@ int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& 
 
     irecv_usb_control_transfer(client, 0x21, 1, 0, 0, nullptr, 0, 5000);
 
+    // THIS COMMAND CHANGES NOTHING ON THIS BOOTLOADER, and it is kept anyway.
+    // Both halves of that are deliberate.
+    //
+    // It was added on the belief that a stock iBEC, having no compiled-in
+    // boot-args of blackb0x's, "was never being told this at all" and needed
+    // telling. The belief was wrong twice over. First, iBoot never reads the
+    // boot-args environment variable on its kernel-boot path -- "boot-args"
+    // appears exactly once in the decrypted image, as an entry in the
+    // settable-env-var name table at file offset 0x3dd1c beside "auto-boot",
+    // "debug-uarts" and "filesize". The command succeeds, the variable is
+    // stored, and nothing ever reads it back. Second, the value here is
+    // BYTE-IDENTICAL to the string iBoot already hardcodes and selects on its
+    // own ("rd=md0 nand-enable-reformat=1 -progress", at 0x38847, loaded at
+    // 0x1af42). So the stock restore path has always been getting the right
+    // args from iBoot's own fallback, and this command has always been a
+    // coincidence dressed as a cause.
+    //
+    // Kept because this whole function exists to be byte-for-byte what real
+    // idevicerestore's recovery_enter_restore() sends, so that a failure here
+    // can be attributed to something other than a protocol difference.
+    // Removing a command the reference tool sends would trade a harmless
+    // no-op for a new variable in the one diagnostic whose entire value is
+    // having none. It is also genuinely correct on any bootloader that DOES
+    // honour the variable, which is not this one.
+    //
+    // This is NOT the mechanism blackb0x's own boot path uses. That one bakes
+    // its args into iBEC (Patcher.hpp's `bootargs` namespace) and sends no
+    // setenv at all -- see sendKernelCache().
+    //
+    // Note the neighbouring `setenv auto-boot false` above is a different
+    // story entirely: auto-boot IS a variable iBoot genuinely reads, which is
+    // why that one is followed by `saveenv` and this one never was.
     err = irecv_send_command(client, "setenv boot-args rd=md0 nand-enable-reformat=1 -progress");
     if (err != IRECV_E_SUCCESS) {
         fprintf(stderr, "sendStockRestoreTail: failed to send 'setenv boot-args' command: %s\n",

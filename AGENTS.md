@@ -167,7 +167,17 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
 - `dist/` — bake-firmware's output (gitignored, not checked in): one
   flat `<Component>-<device>_<buildID>` entry per component per known
   firmware, using Apple's own BuildManifest component keys: `iBSS-`, `iBEC-`,
-  `KernelCache-`, `DeviceTree-` and `RestoreRamDisk-...dmg`. There is no
+  `iBECTether-`, `KernelCache-`, `DeviceTree-` and `RestoreRamDisk-...dmg`.
+  `iBECTether-` is the one name that is *not* an Apple manifest key: **there
+  are two iBECs per tuple**, identical but for the boot-args compiled into each
+  (`iBoot32Patcher -b`) — `rd=md0` for the install path, `rd=disk0s1s1` for
+  `--tether-boot`. They have to be separate files because this bootloader never
+  reads the `boot-args` environment variable on its kernel-boot path, so a
+  baked string wins unconditionally and `setenv boot-args` reaches nothing;
+  `blackb0x` picks one by mode and never needs both. Do not collapse them back
+  into one — see `src/Patcher.hpp`'s `bootargs` namespace for the disassembly
+  and `docs/HISTORY.md`'s "`setenv boot-args` is INERT on this bootloader".
+  There is no
   `bootchain/` subdirectory any more, and the ramdisk is no longer named
   differently from everything else. An entry that already
   exists is skipped; pass `--force` to rebuild. There is no staleness
@@ -249,7 +259,14 @@ cmake --build build --target authoring   # bake-firmware, vendored apt, tests, x
 ./build/blackb0x [--ecid <id> | --udid <id>] [--dry-run]
 ```
 
-Two binaries (three counting `blackb0x-pwn`, which `blackb0x` spawns itself).
+Five `add_executable` targets, in two groups. The **jailbreak** half is
+`blackb0x` plus `blackb0x-pwn`, which `blackb0x` spawns itself. The
+**authoring** half is `bake-firmware` plus the two standalone bake tools split
+out of it, `bake-iboot` and `bake-kernel`; both of those run rootless and in
+seconds, because they mount nothing — only `bake-firmware`'s ramdisk half needs
+privilege. `bake-iboot` is the one to reach for when arming a boot-args
+directive, since boot-args are compiled into the iBEC rather than set at
+runtime (see the `dist/` component list above and `docs/HISTORY.md`).
 
 **Root: `blackb0x` needs none; `bake-firmware` requires it unconditionally.** Linux's two
 reasons for root are gone (the loop mount and raw-USB device nodes), and `blackb0x`
@@ -279,13 +296,25 @@ same fix would apply, but that is a cache rather than build output.
   target-enumeration and filter code collapsed into one file. For every `.keys` file
   under `keys/` (i.e. every known device/firmware combination) it does
   two things:
-  - **bootchain** — downloads and patches iBSS, iBEC, KernelCache and DeviceTree into
-    `dist/` as flat `iBSS-`/`iBEC-`/`KernelCache-`/`DeviceTree-<device>_<buildID>`
+  - **bootchain** — downloads and patches iBSS, both iBECs, KernelCache and
+    DeviceTree into `dist/` as flat
+    `iBSS-`/`iBEC-`/`iBECTether-`/`KernelCache-`/`DeviceTree-<device>_<buildID>`
     entries. This is the only way to exercise
     `Patcher::patchiBSS()`/`patchiBEC()`/`patchKernel()` across every known firmware
     with no hardware attached. Each target runs in a forked child, deliberately: the
     vendored patch code does not survive being driven dozens of times in one process
-    (see `BakeFirmware.cpp`'s own comment).
+    (see `BakeFirmware.cpp`'s own comment). `patchiBEC()` takes both boot-args
+    strings and emits both images from one decrypted input; the defaults are
+    `bootargs::kRamdiskBootArgs`/`kTetherBootArgs` in `src/Patcher.hpp`, and a
+    baked string may not exceed `bootargs::kMaxBakedBootArgsLength` (179 bytes,
+    derived there from two measured limits in the decrypted iBEC). Over-long is
+    an error, never a truncation.
+    The bootchain half also exists as two standalone, **rootless** binaries,
+    `bake-iboot` and `bake-kernel`, which bake-firmware shells out to per tuple.
+    `bake-iboot --device <m> --build <b> --force --extra-boot-args "<s>"` is the
+    supported way to change what the kernel boots with: it rewrites both iBECs
+    in seconds. `blackb0x --extra-boot-args` does **not** work and exits 2
+    pointing here — there is no runtime boot-args channel on this hardware.
   - **ramdisk** — **grows the original volume and injects into it; it does not
     rebuild it.** `hdiutil resize` the decrypted image to fit the staged payload,
     `hdiutil attach -owners on`, splice `/sbin/launchd` and copy `/blackb0x` straight
@@ -311,7 +340,9 @@ same fix would apply, but that is a cache rather than build output.
   ipsw.me which builds Apple still signs so it could bake only those. That filter
   answers a question the baker has no stake in: what this project can jailbreak is
   decided by which tuples have a `.keys` file under `keys/`, and the live path pins
-  `kJailbreakTargetBuild` (`Cli.cpp`) anyway. Apple's signing window neither creates
+  a per-device target build from `kJailbreakTargets` (`Cli.cpp`) anyway — one row
+  per supported model, since the three Apple TVs topped out at different firmwares
+  and no single build is even available for all of them. Apple's signing window neither creates
   nor removes a bakeable target, so the flag only ever hid valid ones and cost a
   network round trip per device. `signedBuildsForDevice()` (`IPSW.hpp`) survives for
   the `--stock-*` diagnostic routes, which genuinely need it because a real SHSH

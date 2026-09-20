@@ -134,12 +134,31 @@ void printCliUsage(const char* argv0) {
     printf("                            If the OS comes up on screen the boot chain/kernel\n");
     printf("                            are intact; isolates the kernel from the ramdisk path.\n");
     printf("                            NOT a jailbreak; conflicts with --stock-*.\n");
+    printf("  --extra-boot-args \"<s>\"   REFUSED: this bootloader ignores runtime boot-args.\n");
+    printf("                            Boot-args are compiled into iBEC, so changing them\n");
+    printf("                            means re-baking it -- seconds, and no root:\n");
+    printf("                              ./build/bake-iboot --device <m> --build <b> --force \\\n");
+    printf("                                                 --extra-boot-args \"<s>\"\n");
+    printf("                            That is how entrypoint.c (the ramdisk's PID 1) is\n");
+    printf("                            configured without re-baking the RAMDISK: it reads\n");
+    printf("                            kern.bootargs and parses `blackb0x.*` out of it.\n");
+    printf("                              blackb0x.skip-install=1 do the console/disk/mount\n");
+    printf("                                path for real but skip the install, then reboot\n");
+    printf("                                normally -- splits a mount failure from an\n");
+    printf("                                install failure.\n");
+    printf("                            Ordinary kernel boot-args work there too.\n");
     printf("  --help                    Show this message\n");
     printf("\n");
-    printf("blackb0x needs root by default: talking to a DFU/Recovery-mode device needs\n");
-    printf("raw USB access, which the kernel restricts to root unless a udev rule grants\n");
-    printf("it to your own user (see the README's own setup section). Run it via\n");
-    printf("`sudo blackb0x ...` if you haven't set that up.\n");
+    // Was a Linux-era note telling the user to run under sudo or install a
+    // udev rule for raw USB access. Both are wrong here: this is macOS-only
+    // now, blackb0x reaches the device through IOKit with no special
+    // privilege, and there is no udev. See AGENTS.md ("Root: blackb0x needs
+    // none; bake-firmware requires it unconditionally") -- the privilege
+    // requirement lives entirely in the authoring half, which mounts things.
+    printf("blackb0x needs no special privileges: it reaches a DFU/Recovery-mode device\n");
+    printf("through IOKit. Do NOT run it under sudo. Only the authoring tools need root,\n");
+    printf("and only bake-firmware's ramdisk half, which mounts disk images -- bake-iboot\n");
+    printf("and bake-kernel run rootless in seconds.\n");
 }
 
 CliOptions parseCliOptions(int argc, char** argv) {
@@ -176,6 +195,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.noSendRestoreLogo = true;
         } else if (arg == "--tether-boot") {
             options.tetherBoot = true;
+        } else if (arg == "--extra-boot-args") {
+            options.extraBootArgs = nextArg("--extra-boot-args");
         } else if (arg == "--send-only") {
             options.sendOnly = nextArg("--send-only");
             if (options.sendOnly != "ibss" && options.sendOnly != "ibec") {
@@ -224,6 +245,48 @@ CliOptions parseCliOptions(int argc, char** argv) {
         printCliUsage(argv[0]);
         exit(2);
     }
+    // --extra-boot-args FAILS HARD. It does not warn and proceed, and it is
+    // not silently ignored.
+    //
+    // The flag used to append its value to a `setenv boot-args ...` command
+    // sent just before 'bootx'. That channel is inert on this bootloader --
+    // the variable is set and never read back (DeviceManager.cpp's
+    // sendKernelCache() carries the disassembly) -- so boot-args are compiled
+    // into iBEC now, and a compiled-in string cannot be extended at runtime
+    // by anything. There is no send-time mechanism left for this flag to use.
+    //
+    // The alternative was to have blackb0x re-bake the iBEC itself on demand.
+    // Rejected: the jailbreak binary deliberately links no decrypt path and
+    // no GPL patch tools, has no keys/ and no IPSW, and consumes dist/
+    // verbatim (AGENTS.md's Patcher/PatcherPatch split). Making one flag
+    // reach across that boundary would undo the whole arrangement to save a
+    // user one command.
+    //
+    // So it errors, and names the command that does work. The directives
+    // themselves are unaffected -- entrypoint.c still parses `blackb0x.*` out
+    // of kern.bootargs exactly as before; only the delivery changed.
+    if (!options.extraBootArgs.empty()) {
+        fprintf(stderr,
+                "--extra-boot-args cannot work at jailbreak time on this bootloader.\n"
+                "\n"
+                "  Boot-args are COMPILED INTO iBEC (iBoot32Patcher -b), because AppleTV3,2's\n"
+                "  iBoot-1537.9.55 never reads the boot-args environment variable on its\n"
+                "  kernel-boot path -- `setenv boot-args ...` is accepted, stores the value,\n"
+                "  and nothing ever reads it back. A compiled-in string cannot be appended to\n"
+                "  over USB.\n"
+                "\n"
+                "  Re-bake the iBEC instead. It takes seconds and needs no root:\n"
+                "    ./build/bake-iboot --device <model> --build <build> --force \\\n"
+                "                       --extra-boot-args \"%s\"\n"
+                "\n"
+                "  That rewrites dist/iBEC-<model>_<build> and dist/iBECTether-<model>_<build>\n"
+                "  with your directive appended to the built-in args; re-run blackb0x after.\n"
+                "  Use --boot-args / --tether-boot-args there to replace the base string\n"
+                "  outright. See `./build/bake-iboot` with no arguments for the full usage and\n"
+                "  the length budget.\n",
+                options.extraBootArgs.c_str());
+        exit(2);
+    }
     return options;
 }
 
@@ -233,12 +296,105 @@ CliOptions parseCliOptions(int argc, char** argv) {
 
 namespace {
 
-// The original hardcoded this exact firmware build for a fresh jailbreak
-// install (MainView.m's downloadInstall calling
-// downloadComponentsForBuildID:@"10B329a") — the jailbreak patches are
-// built/tested against this specific build, not a UI default to change
-// lightly.
-const std::string kJailbreakTargetBuild = "10B329a";
+// ---------------------------------------------------------------------------
+// The jailbreak target build — per device
+// ---------------------------------------------------------------------------
+//
+// This was one global constant for most of this project's life
+// (`kJailbreakTargetBuild = "10B329a"`, inherited verbatim from the original
+// app's MainView.m `downloadComponentsForBuildID:@"10B329a"`). That was
+// defensible only while a single device model was supported at a single
+// build; it is not defensible now, because the three supported models did not
+// all receive the same final firmware. There is no one build that is even
+// AVAILABLE for all three, let alone the best target for all three:
+// AppleTV2,1 never got anything past 7.1.2, while both Apple TV 3s ran on to
+// 8.4.7. A single constant necessarily targets at least one device with a
+// build it never shipped with.
+//
+// WHY THESE BUILDS — the newest build each device ever received:
+//
+//   * Both GPL patch tools handle them, measured rather than assumed.
+//     iBoot32Patcher (iBSS/iBEC) and CBPatcher (kernelcache) are pattern
+//     matchers, and whether a given signature survives into a given build is
+//     not predictable from the version string — so every known tuple was run
+//     through the real bake-iboot/bake-kernel pipeline. The results are in
+//     misc/verified_patcher_compatible.txt; every build below is `ok` for
+//     both tools there (AppleTV2,1 11D258's kernel needs the xpwn read-side
+//     16-align fix, which is in the pinned regulad/xpwn@legacy — it is the
+//     `kernel-readfix` column).
+//   * The Apple TV 3 builds need no key hunt. Apple shipped the late
+//     AppleTV3,x builds with NO KBAG element at all in iBSS, iBEC, the
+//     kernelcache or the RestoreRamDisk, so an all-empty
+//     keys/<device>/<device>_<build>.keys plist is complete, correct key
+//     material for them rather than a placeholder — "nobody published keys"
+//     was never the blocker it looked like. (docs/HISTORY.md, "The newest
+//     Apple TV 3 builds are not key-blocked; they are unencrypted".)
+//   * A matched suite has no version skew. iBSS/iBEC, kernelcache, DeviceTree
+//     and ramdisk all come from the one build named here, so the iBoot that
+//     co-authors the DeviceTree is the iBoot that shipped with the kernel
+//     reading it. Retargeting the WHOLE chain is safe in a way that pairing
+//     an old bootloader with a newer OS is not — see docs/HISTORY.md,
+//     "Corollary for retargeting kJailbreakTargetBuild".
+//
+// THIS TABLE IS MEANT TO BE EDITED, and retargeting a device is meant to be a
+// one-line change to it. No build ID is hardcoded anywhere else in the tree.
+// Three things to re-check when you move one:
+//   * misc/verified_patcher_compatible.txt must say the new tuple patches
+//     (the `iboot` and `kernel-readfix` columns).
+//   * keys/<device>/<device>_<build>.keys must exist — empty strings are
+//     fine and correct for an unencrypted build, but bake-firmware enumerates
+//     keys/ to decide what to bake, so a missing file means no baked suite.
+//   * the persistence payload: BakeRamdisk.cpp's stageVersionBranch() picks
+//     it off a ProductVersion, and only 8.4.x gets a real untether (7.x/8.x
+//     below that is the tethered dirhelper branch, 6.1.4 is p0sixspwn,
+//     anything else warns and stages common content only). And the finished
+//     ramdisk still has to fit the hard 64 MiB ceiling at the new build.
+struct JailbreakTarget {
+    const char* deviceModel;
+    const char* buildID;
+};
+const JailbreakTarget kJailbreakTargets[] = {
+    // A1469 (Apple TV 3 rev A, the checkm8 target). 12H1006 is tvOS 8.4.7,
+    // the last build Apple ever shipped it. Unencrypted boot chain.
+    {"AppleTV3,2", "12H1006"},
+    // A1427 (Apple TV 3). Same final build as AppleTV3,2, same story —
+    // unencrypted, both patchers verified.
+    {"AppleTV3,1", "12H1006"},
+    // A1378 (Apple TV 2, the SHAtter target). 11D258 is 7.1.2, the last build
+    // it ever received; Apple never shipped this model 8.x at all, so it
+    // cannot share the Apple TV 3 target no matter what that becomes.
+    {"AppleTV2,1", "11D258"},
+};
+
+// The build blackb0x targets on `deviceModel`, or an EMPTY STRING if that
+// model has no entry in the table above.
+//
+// Empty rather than a fallback, deliberately. Every candidate default is a
+// build that SOME device never shipped with, and handing a device a build it
+// never received fails far downstream and unrecognizably — a missing dist/
+// entry, a missing keys/ file, or (worst) a patched-and-baked suite that
+// simply hangs on hardware with no output. An unknown model here means this
+// project has no measured answer for it, which is exactly the thing to say
+// out loud; callers turn this into a hard error naming the models that do
+// have one (see knownJailbreakTargetsDescription() and runCli()).
+std::string jailbreakTargetBuildFor(const std::string& deviceModel) {
+    for (const auto& target : kJailbreakTargets) {
+        if (deviceModel == target.deviceModel) return target.buildID;
+    }
+    return std::string();
+}
+
+// "AppleTV3,2 (12H1006), AppleTV3,1 (12H1006), AppleTV2,1 (11D258)" — the
+// table rendered for the error message the empty return above forces, so the
+// failure names the real, current targets instead of a stale hardcoded list.
+std::string knownJailbreakTargetsDescription() {
+    std::string description;
+    for (const auto& target : kJailbreakTargets) {
+        if (!description.empty()) description += ", ";
+        description += std::string(target.deviceModel) + " (" + target.buildID + ")";
+    }
+    return description;
+}
 
 void printDeviceLine(const AppleTVDevice& d, int index) {
     printf("  [%d] %s (%llu) in %s", index, d.deviceModel.c_str(), (unsigned long long)d.ecid, d.mode.c_str());
@@ -577,7 +733,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
                                                               const std::string& buildToRequest,
                                                               bool stockRamdisk,
                                                               bool stockRecovery, bool stockFirmware,
-                                                              bool stockSecurerom) {
+                                                              bool stockSecurerom, bool tetherBoot) {
 
     printf("Downloading firmware for %s %s...\n", device.deviceModel.c_str(), buildToRequest.c_str());
     IpswFetch fetcher;
@@ -743,7 +899,14 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     } else {
         takeBaked("iBSS", "iBSS",
                   [&](const std::string& p) { patcher.setBakedIBSSPath(p); });
-        takeBaked("iBEC", "iBEC",
+        // TWO baked iBECs exist, differing only in the boot-args compiled
+        // into each; exactly one is sent. The mode is a property of the
+        // BINARY now, not of anything the sender can say at 'bootx' -- see
+        // Patcher.hpp's `bootargs` namespace for why a baked string cannot be
+        // overridden at runtime on this bootloader.
+        const char* iBECComponent =
+            tetherBoot ? bootargs::kIBECTetherComponent : bootargs::kIBECComponent;
+        takeBaked(iBECComponent, iBECComponent,
                   [&](const std::string& p) { patcher.setBakedIBECPath(p); });
     }
 
@@ -1155,6 +1318,10 @@ int runCli(const CliOptions& options) {
     // DeviceManager) — this session IS that single instance, function-local
     // rather than a dispatch_once class method.
     DeviceManager deviceManager;
+    // No setExtraBootArgs() here any more: DeviceManager sends no boot-args
+    // at all. They are compiled into the iBEC chosen below. parseCliOptions()
+    // already refused --extra-boot-args outright, with a pointer at
+    // `bake-iboot --extra-boot-args`.
     Patcher patcher;
 
     // One line per real CHANGE, not per event — this is the only place
@@ -1323,10 +1490,31 @@ int runCli(const CliOptions& options) {
     // removed (docs/HISTORY.md: an older iBoot cannot populate the DeviceTree
     // properties a newer kernel expects, and fails silently when it can't), and
     // a matched suite is what every real tool sends. blackb0x only bakes/keys
-    // kJailbreakTargetBuild, so that is the default; device.buildID only matters
-    // when re-running the real jailbreak against an already-jailbroken device
-    // (no stock flag).
-    std::string buildToRequest = kJailbreakTargetBuild;
+    // this device's own jailbreak target build, so that is the default;
+    // device.buildID only matters when re-running the real jailbreak against an
+    // already-jailbroken device (no stock flag).
+    //
+    // The target is per DEVICE (jailbreakTargetBuildFor(), see its table's own
+    // comment) — the three supported models topped out at different firmwares,
+    // so there is no single build to fall back to. Resolving it here is
+    // deliberate: this is the first point in the run where the device is
+    // actually known, and it is the only point either consumer needs it.
+    const std::string targetBuild = jailbreakTargetBuildFor(device.deviceModel);
+    if (targetBuild.empty()) {
+        // No silent default. See jailbreakTargetBuildFor()'s comment for why a
+        // guessed build is worse than no build at all. Note checkExploit()
+        // above already rejects unrecognized models — except for a device that
+        // arrives ALREADY in pwned DFU, which it lets straight through, so this
+        // really is reachable.
+        fprintf(stderr,
+                "No jailbreak target build is known for %s. blackb0x targets: %s. If %s should be "
+                "supported, add it to kJailbreakTargets (Cli.cpp) with a build that "
+                "misc/verified_patcher_compatible.txt says both patchers handle.\n",
+                device.deviceModel.c_str(), knownJailbreakTargetsDescription().c_str(),
+                device.deviceModel.c_str());
+        return 1;
+    }
+    std::string buildToRequest = targetBuild;
     if (device.jailbroken && !options.stockFirmware && !options.stockRecovery && !options.stockSecurerom &&
         !options.stockRamdisk)
         buildToRequest = device.buildID;
@@ -1336,10 +1524,11 @@ int runCli(const CliOptions& options) {
     // never runs against it, checkm8 or not) need a build the device's
     // real signature/ticket verification will actually accept -- either
     // one alone means SOMETHING in this boot chain is enforcing real
-    // Apple signing, not just SecureROM specifically. kJailbreakTargetBuild
-    // is fixed to the specific old build this project's own jailbreak
-    // patches/ImageKeys/baked ramdisks are tuned for, almost never Apple's
-    // current signing window. Apple always has at least one currently-
+    // Apple signing, not just SecureROM specifically. The per-device
+    // jailbreak target resolved above is a specific build this project's own
+    // patches/keys/baked ramdisks are tuned for — the newest that device ever
+    // received, which for this long-EOL hardware is still years outside
+    // Apple's current signing window. Apple always has at least one currently-
     // signed build for any still-supported device (this is what makes
     // ipsw.me's "latest" endpoint meaningful at all) --
     // IpswFetch::firmwareURLForDevice() already treats the literal string
@@ -1402,7 +1591,7 @@ int runCli(const CliOptions& options) {
     auto components = downloadAndPatchComponents(patcher, device, buildToRequest,
                                                    options.stockRamdisk,
                                                    options.stockRecovery, options.stockFirmware,
-                                                   options.stockSecurerom);
+                                                   options.stockSecurerom, options.tetherBoot);
     if (!components) {
         // Not "...to patch..." -- on any --stock-* route nothing here
         // actually patches anything (useStockIBSS()/useStockIBEC()/etc.
@@ -1415,36 +1604,54 @@ int runCli(const CliOptions& options) {
     }
 
     // --tether-boot boots the OS ALREADY on NAND off our patched kernel, which
-    // is built for kJailbreakTargetBuild only. If the installed OS is a
-    // different build, the kernel/kext/userspace mismatch hangs at (or after)
-    // the NAND root-mount with no visible output -- the classic "nothing
-    // happens" tether-boot symptom. We can read the installed build via
-    // lockdownd, but ONLY if the device has been seen in Normal mode (that is
-    // what populates device.buildID); in DFU/Recovery there is no way to read
-    // the on-NAND version. So warn on mismatch, and when it is simply unknown
-    // tell the user how to make it knowable (connect once in Normal mode).
-    // Purely advisory -- never refuses. tether-boot loads the
-    // kJailbreakTargetBuild kernel and roots off whatever OS is on NAND, so a
-    // build mismatch is a likely (not certain) hang: a nearby build whose
-    // kernel ABI did not change may well still boot, so we always proceed and
-    // let the hardware decide.
+    // is built for exactly one build: buildToRequest, i.e. this DEVICE's own
+    // jailbreak target (or, when re-running against an already-jailbroken
+    // device, the build already installed on it -- which is why the comparison
+    // is against buildToRequest and not the target directly: buildToRequest is
+    // what actually gets sent). If the installed OS is a different build, the
+    // kernel/kext/userspace mismatch hangs at (or after) the NAND root-mount
+    // with no visible output -- the classic "nothing happens" tether-boot
+    // symptom. We can read the installed build via lockdownd, but ONLY if the
+    // device has been seen in Normal mode (that is what populates
+    // device.buildID); in DFU/Recovery there is no way to read the on-NAND
+    // version. So warn on mismatch, and when it is simply unknown tell the user
+    // how to make it knowable (connect once in Normal mode). Purely advisory --
+    // never refuses: a nearby build whose kernel ABI did not change may well
+    // still boot, so we always proceed and let the hardware decide.
+    //
+    // The per-device target makes this test sharper, not vaguer. Against the
+    // old single global build, an AppleTV2,1 running the newest OS Apple ever
+    // gave it was reported as a mismatch purely because the constant named an
+    // Apple TV 3 build; now each device is compared against the build blackb0x
+    // really targets for it, and the message names that same build.
     if (options.tetherBoot) {
         if (device.buildID.empty()) {
             printf("\n--tether-boot: didn't see the device in Normal mode to read its OS version -- tether "
-                   "boot may not work (it needs the installed OS to be %s). Proceeding anyway.\n",
-                   kJailbreakTargetBuild.c_str());
-        } else if (device.buildID != kJailbreakTargetBuild) {
-            printf("\n--tether-boot: installed OS is %s%s but tether boot loads the %s kernel -- version "
-                   "mismatch, tether boot may not work (though it can still boot if the kernel ABI didn't "
-                   "change between these builds). Proceeding anyway.\n",
+                   "boot may not work (it needs the installed OS on this %s to be %s). Proceeding anyway.\n",
+                   device.deviceModel.c_str(), buildToRequest.c_str());
+        } else if (device.buildID != buildToRequest) {
+            printf("\n--tether-boot: installed OS is %s%s but tether boot loads this %s's %s kernel -- "
+                   "version mismatch, tether boot may not work (though it can still boot if the kernel ABI "
+                   "didn't change between these builds). Proceeding anyway.\n",
                    device.version.empty() ? "" : (device.version + " / ").c_str(), device.buildID.c_str(),
-                   kJailbreakTargetBuild.c_str());
+                   device.deviceModel.c_str(), buildToRequest.c_str());
         } else {
-            printf("\n--tether-boot: installed OS build %s matches the jailbreak target -- the NAND root and "
-                   "the patched kernel should be compatible.\n",
+            printf("\n--tether-boot: installed OS build %s matches the kernel being sent -- the NAND root "
+                   "and the patched kernel should be compatible.\n",
                    device.buildID.c_str());
         }
     }
+
+    // Echo the boot-args this run will actually boot with. They live in the
+    // iBEC that was just resolved out of dist/, not in anything sent over
+    // USB, so this is the only place the run's own log records them -- and
+    // on a device with no console it is the only record there is. A dist/
+    // baked with a custom `bake-iboot --extra-boot-args` prints the built-in
+    // string here rather than the custom one; the baker's own output is
+    // authoritative for that case.
+    printf("\nBoot-args (compiled into %s): %s\n",
+           options.tetherBoot ? bootargs::kIBECTetherComponent : bootargs::kIBECComponent,
+           options.tetherBoot ? bootargs::kTetherBootArgs : bootargs::kRamdiskBootArgs);
 
     if (!sendComponentsToDevice(deviceManager, device, *components, options.dryRun,
                                  options.stockRecovery, options.stockSecurerom, options.sendOnly,

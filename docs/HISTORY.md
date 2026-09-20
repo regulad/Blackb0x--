@@ -2470,7 +2470,12 @@ Every concrete, confirmable discrepancy found this way was fixed:
 a missing zero-length DFU_DNLOAD-class control transfer
 (`0x21`/`1`/zero-length) right after the kernelcache upload, before
 boot-args/`bootx`; a missing `setenv boot-args rd=md0 ...` for the stock
-(uncompiled-in-args) iBEC path specifically; a missing
+(uncompiled-in-args) iBEC path specifically **[superseded — that command is a
+no-op on this bootloader, and was already one when it was added. iBoot never
+reads the `boot-args` variable on its kernel-boot path, and the value sent here
+is byte-identical to the string it hardcodes anyway. It is kept for
+`idevicerestore` fidelity, not for effect; see "`setenv boot-args` is INERT on
+this bootloader" at the end of this file]**; a missing
 `irecv_usb_set_configuration(client, 1)` after the post-iBSS reconnect;
 a missing `setenv auto-boot false`/`saveenv` before RestoreLogo; a
 missing `getenv ramdisk-delay`; and a reused, potentially-stale USB
@@ -2883,6 +2888,18 @@ flushes.
 
 ### Boot-args moved out of the binary, and one of them was inverted
 
+> **SUPERSEDED, and this was the central bug.** This subsection's decision —
+> drop `-b`, set boot-args at runtime with `setenv boot-args`, collapse two
+> iBECs into one — has been reversed. `setenv boot-args` is inert on
+> AppleTV3,2's iBoot-1537.9.55: the variable is settable and nothing ever reads
+> it back, so what this change actually did was remove
+> `amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1` from every boot.
+> `-b` and the two-iBEC design are both back. The disassembly, the fix and the
+> confidence statement are in "`setenv boot-args` is INERT on this bootloader"
+> at the end of this file. Everything below is kept as the record of what was
+> believed and why — and one paragraph of it (the `patch_boot_args()` hazard
+> writeup) is still correct and still load-bearing.
+
 The patcher is now asked for `-r` (+ `-k`, + `-t` when a ticket is in play)
 and **nothing else** — no `-b`, no `-d`. Boot-args are set at runtime with
 `setenv boot-args`, which is how `sendStockRestoreTail()` and real
@@ -2939,6 +2956,18 @@ bisect, since it is the one patch that was being applied against the
 project's own stated intent.
 
 ## Tether-boot removed: one send flow, one iBEC, no `onlyBootComponents`
+
+> **Both halves of this are superseded.** `--tether-boot` came back as a
+> kernel-integrity probe ("`--tether-boot` revived (and corrected)", below), and
+> the "one iBEC" half was reversed with it once `setenv boot-args` was proven
+> inert: two baked iBECs exist again, `dist/iBEC-<tuple>` and
+> `dist/iBECTether-<tuple>`, because a compiled-in boot-args string is a
+> property of the binary and one image cannot serve both `rd=md0` and
+> `rd=disk0s1s1`. The premise stated in the first sentence below — "with
+> boot-args moved to runtime... the tether-boot path had no remaining reason to
+> exist" — rested on a runtime channel that never worked. See "`setenv
+> boot-args` is INERT on this bootloader" at the end of this file. Kept as the
+> record of what was removed and why, which is still the accurate inventory.
 
 With boot-args moved to runtime (previous entry) the tether-boot path had no
 remaining reason to exist, and keeping it was actively costing clarity: it
@@ -3231,11 +3260,27 @@ its `extraCommandBeforeMain`. That was fine when the only user was
 thing putting `rd=md0` and the AMFI/code-signing args in front of the
 kernel now that `patch_boot_args()` is gone.
 
+**Correction.** The sentence above previously ended by asserting that the
+`setenv` was "the only thing putting `rd=md0` and the AMFI/code-signing args in
+front of the kernel." It was putting **nothing** in front of the kernel.
+AppleTV3,2's iBoot never reads the `boot-args` environment variable on its
+kernel-boot path, so that command always succeeded and always did nothing, and
+the fallback described in the next paragraph was not a fallback — it was the
+only string the kernel ever saw. Boot-args are baked into iBEC again
+(`iBoot32Patcher -b`); see "`setenv boot-args` is INERT on this bootloader" at
+the end of this file. `sendKernelCache()` sends no `setenv` at all now, so the
+`extraCommandMustSucceed` flag below has no user on the jailbreak path — it is
+kept because the hazard it guards (a fire-and-forget hook silently swallowing a
+real failure) is exactly the class of bug this whole episode turned out to be.
+
 A silent failure there is not destructive -- iBoot would fall back to its own
 compiled-in `rd=md0 nand-enable-reformat=1 -progress`, which formats nothing
 without `asr` -- but that default has **no** `amfi=0xff` or
 `cs_enforcement_disable=1`, so `entrypoint.c` could not exec as PID 1 and
-the boot would fail with nothing in the log to explain why. There is now an
+the boot would fail with nothing in the log to explain why. (Read that last
+sentence again in light of the correction above: it is an accurate description
+of what was happening on **every** run, not of a hypothetical silent failure.
+The reasoning was right and only the trigger was wrong.) There is now an
 `extraCommandMustSucceed` flag, set only by `sendKernelCache()`; the
 `getenv ramdisk-delay` callers keep their fire-and-forget semantics.
 
@@ -4357,6 +4402,12 @@ panic behavior is unchanged) plus `serial=3` (serialmode bits: `0x1` output,
 `0x2` input; `3` = full bidirectional console, matching Apple's own restore
 environments' `debug-uarts=3` / `boot-args=serial=3`). A patched iBEC — which
 we already ship — is required for the kernel to honor custom boot-args at all.
+(**Sharper than it was written**: a patched iBEC is not merely required, it is
+the *only* delivery mechanism. The args have to be baked into it with
+`iBoot32Patcher -b`, because `setenv boot-args` over the recovery protocol is
+never read back — so adding `serial=3` later means a `bake-iboot` re-bake, not
+a tool flag. See "`setenv boot-args` is INERT on this bootloader" at the end of
+this file.)
 
 That was implemented and then reverted, because **the AppleTV3,2's UART is on
 internal hardware test-points, not the micro-USB port.** The micro-USB is
@@ -4366,8 +4417,10 @@ the XDA "Apple TV3 JTAG points" thread). Without a soldered tap there is
 nowhere to read the log, so `serial=3` would emit onto a wire we cannot see.
 Booting via iBEC (not full iBoot) also never initializes the framebuffer, so
 there is no on-screen console either. The `serial=3`/`debug=0x8` reasoning is
-recorded in `DeviceManager.cpp`'s `kRamdiskBootArgs` comment for anyone who
-later adds a hardware tap; it is deliberately not in the live boot-args.
+recorded in `kRamdiskBootArgs`'s own comment for anyone who later adds a
+hardware tap; it is deliberately not in the live boot-args. (That constant
+lived in `DeviceManager.cpp` when this was written; it is in `Patcher.hpp`'s
+`bootargs` namespace now, shared between the baker and the jailbreak binary.)
 
 ### The channel that is left: USB re-enumeration as a proof-of-life beacon
 
@@ -4485,6 +4538,13 @@ removed in c8c4980):
   tether path, non-rd=md0 into the install path). Boot-args are runtime now
   (`setenv boot-args`), so this is just a `bool ramdiskBoot` on
   `sendKernelCache()` picking `kRamdiskBootArgs` vs the new `kTetherBootArgs`.
+  **[Superseded: boot-args are baked into iBEC again, so this is no longer a
+  send-time choice. `bake-iboot` publishes two images —
+  `dist/iBEC-<tuple>` with `rd=md0` and `dist/iBECTether-<tuple>` with
+  `rd=disk0s1s1` — and `--tether-boot` picks the file rather than the string.
+  The `bool ramdiskBoot` survives as the selector between those two files. The
+  correction to the *original's* wiring stands; only the delivery changed. See
+  "`setenv boot-args` is INERT on this bootloader" at the end of this file.]**
 
 Dropped from the original's version and NOT revived: the "device must already be
 jailbroken / must have connected in Normal mode first / assume AppleTV2,1 =
@@ -4618,6 +4678,18 @@ standard iOS fstab `/dev/disk0s1s1 / hfs ro`). This only affects `--tether-boot`
 (the install path keeps `rd=md0`); it is a runtime `setenv boot-args`, so it
 changes only the `blackb0x` tool, not the baked firmware.
 
+**Correction to that last clause.** It was not a runtime `setenv`, in the sense
+that matters: the `setenv` was sent and ignored, so this change delivered
+`rd=disk0s1s1` to nothing and `--tether-boot` was still booting with iBoot's
+hardcoded `rd=md0 nand-enable-reformat=1 -progress` — a ramdisk root device with
+no ramdisk uploaded, which is its own sufficient explanation for "still did
+nothing". The diagnosis in this section (a `bootx` from a restore bootloader
+needs an explicit `rd=`, or the kernel comes up with no root device) is
+correct and unaffected; only the delivery mechanism was wrong. `rd=disk0s1s1`
+now lives baked into `dist/iBECTether-<tuple>`, which **does** mean this change
+touches the baked firmware and a re-bake is required for it to take effect. See
+"`setenv boot-args` is INERT on this bootloader" at the end of this file.
+
 ## `--tether-boot` visibility: send the RestoreLogo so the display comes up
 
 `--tether-boot` still showed "nothing" even with `rd=disk0s1s1`. A survey of
@@ -4702,6 +4774,17 @@ ramdisk's CONTENT: our overlay** -- `entrypoint.c` spliced in as `/sbin/launchd`
 dpkg/apt payload, and the DMG resize. So the fault is downstream of the kernel,
 in the baked ramdisk content or in entrypoint.c's own execution.
 
+**Correction to the inference, not to the observation.** It is true that the
+only bytes differing between the two runs are the ramdisk's, and the isolation
+above is sound as far as it goes. What does not follow is "therefore the fault
+is *in* the ramdisk content". The fault can equally be an *interaction*: a
+boot-arg that one ramdisk's PID 1 needs and the other's does not. That is what
+it turned out to be — ours is ad-hoc-signed and needs the AMFI/code-signing
+bypass, Apple's is properly signed and does not, and the bypass was being
+delivered over a channel that never worked. The teardown that followed this
+section spent its whole effort inside the ramdisk because of this sentence. See
+"`setenv boot-args` is INERT on this bootloader" at the end of this file.
+
 ### What "nothing" means now, and the first thing to check next session
 
 The install path DOES send RestoreLogo before the Ramdisk, so the display/
@@ -4718,6 +4801,17 @@ during a full jailbreak run**:
   - Truly nothing (no logo, no text) -> the kernel is not booting our ramdisk at
     all (early md0 mount panic before console), which points at the DMG/HFS we
     rebuilt.
+
+**`-v` was not in the boot-args either.** The premise of this whole subsection —
+"`-v` is in the boot-args, therefore the kernel should render verbose boot
+text" — is false for every run made before the baked-boot-args fix. `-v` was
+being delivered by `setenv boot-args`, which this bootloader never reads, so the
+kernel booted with iBoot's hardcoded `rd=md0 nand-enable-reformat=1 -progress`
+and produced no verbose output at all. **A dark screen was therefore the
+expected outcome of a perfectly healthy boot**, and the three-way observation
+above could not have distinguished anything. `-v` is baked into both iBECs now,
+so the experiment is worth running for the first time. See "`setenv boot-args`
+is INERT on this bootloader" at the end of this file.
 Also worth distinguishing from before: is it the old "USB drops + LED cadence
 slows + no reboot" state (kernel booted, entrypoint didn't finish), or truly
 dark (kernel not booting)? That single observation splits the remaining tree.
@@ -4740,6 +4834,13 @@ dark (kernel not booting)? That single observation splits the remaining tree.
    boot-args carry `amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1`,
    so this should be covered -- but if AMFI still refuses an ad-hoc-signed PID 1
    the kernel would fail to exec init. The `-v` log would show it.
+   **[Correction, and this is now the leading candidate rather than a
+   long shot: the boot-args did NOT carry those three args. They were being
+   sent with `setenv boot-args`, which this bootloader accepts and never reads,
+   so the kernel booted with iBoot's hardcoded default and code-signing
+   enforcement fully on. "This should be covered" was false for every run ever
+   made. See "`setenv boot-args` is INERT on this bootloader" at the end of this
+   file.]**
 4. **Framebuffer console renders nothing** even though it booted (least likely
    now that RestoreLogo is sent) -- would make a working boot look dark.
 
@@ -5147,6 +5248,15 @@ Ranked by how plausibly each could explain the failure:
    collateral `rc.boot` overwrite (irrelevant — its launchd never runs it);
    signature identifier `launchd` vs `com.apple.launchd` and CD v0x20200 vs
    v0x20400; the original's compiled-in boot-args vs our runtime superset.
+   **[The last item is struck: it was misfiled here. "Compiled-in boot-args vs
+   our runtime superset" was neither cosmetic nor by design — it is the one
+   difference on this list that turned out to matter, and it is the leading
+   candidate for the whole failure. The original baked its args into iBEC
+   because that is the only channel this bootloader has; our "runtime superset"
+   was a superset of nothing, since `setenv boot-args` is accepted and never
+   read back. This teardown spotted the difference, recorded it accurately, and
+   then dismissed it. See "`setenv boot-args` is INERT on this bootloader" at
+   the end of this file.]**
 
 ### 5. armv6 as PID 1: settled, and it is NOT the cause (~97%)
 
@@ -5279,6 +5389,18 @@ before and after the change** — the shipped artifact is provably unaffected.
   *less* conformant than ours on every axis — and it booted on this hardware.
   With `cs_enforcement_disable=1 amfi=0xff amfi_get_out_of_my_way=1` on top,
   there is no signing theory left standing.
+  **[REVIVED, and it is now the leading candidate. The verdict above turns on
+  two premises. The first — the original's PID 1 being less conformant than
+  ours and booting anyway — is still true and still correctly measured. The
+  second, "with `cs_enforcement_disable=1 amfi=0xff amfi_get_out_of_my_way=1`
+  on top", is false: those args were delivered with `setenv boot-args`, which
+  this bootloader accepts and never reads, so they were on top of nothing and
+  every boot ran with code-signing enforcement active. The original's PID 1
+  booted *because its iBEC carried those args baked in*, which is precisely the
+  comparison this bullet thought it was controlling for. So the hypothesis was
+  right about the mechanism and wrong about which component was failing to
+  supply the bypass. See "`setenv boot-args` is INERT on this bootloader" at the
+  end of this file.]**
 - **Hypothesis 4, "the framebuffer renders nothing" — DEMOTED, not disproven.**
   RestoreLogo is sent on the install path so the framebuffer is initialized, but
   nobody has yet watched the HDMI output during a full run and reported the last
@@ -5438,13 +5560,32 @@ independently-derived plaintext, which is what finally settled it here.
 
 `keys/` stops at 12H914 for both `AppleTV3,1` and `AppleTV3,2`, and 12H923,
 12H937 and 12H1006 were assumed untargetable for want of published keys. They
-are not. Apple shipped those builds — and 12H903, 12H911 and 12H914 before
-them — with **no KBAG element at all** in iBSS, iBEC, the kernelcache or the
-RestoreRamDisk. The Apple Wiki publishes only a RootFS key for them for
-precisely that reason, not because anyone failed to extract the rest. The
-repository already encodes this for the three it knows about:
-`keys/AppleTV3,2/AppleTV3,2_12H914.keys` is a plist of empty strings, which is
-the correct and complete key material for an unencrypted build.
+are not. Apple shipped those builds — and 12H903 and 12H911 before them — with
+**no KBAG element at all** in iBSS, iBEC or the kernelcache. The Apple Wiki
+publishes only a RootFS key for them for precisely that reason, not because
+anyone failed to extract the rest. The repository already half-encodes this:
+`keys/AppleTV3,2/AppleTV3,2_12H914.keys` is a plist of empty strings for the
+boot chain, which is the correct and complete key material for an unencrypted
+component, rather than a placeholder nobody got around to filling in.
+
+**But "this build is unencrypted" is not uniform across components, and
+assuming it is would have broken the ramdisk bake.** An IMG3 tag-list probe
+run directly against the remote IPSWs settles it per component. At 12H914 the
+RestoreRamDisk is still genuinely **encrypted** — two `KBAG(56)` elements,
+cryptStates 1 and 2, aesType 256 — which is exactly why that same `.keys` file
+carries a real `RestoreRamdisk` key sitting beside all those empty strings, and
+why 12H911's does too. Apple stopped encrypting the ramdisk somewhere between
+12H914 (December 2020) and 12H923 (April 2021). From 12H923 onward, and at
+12H1006, every component is clean: the ramdisk's entire tag list is
+`TYPE DATA SEPO`.
+
+An earlier revision of this section asserted the ramdisk was unencrypted at
+12H914 as well. That was wrong, and it is the kind of wrong that costs a bake:
+`bakeRamdisk()` must decrypt the ramdisk to mount it, so an empty key there
+would have failed at the one step that cannot be skipped. The general lesson is
+the one this log keeps relearning — check each component's own bytes, because
+Apple's encryption policy changed per component and per build, not per build
+alone.
 
 Verified by construction rather than by inspection: running the real
 `bake-iboot`/`bake-kernel` pipeline against synthetic all-empty `.keys` files
@@ -5470,3 +5611,245 @@ that version *skew* between iBoot and the tree it hands off is the hazard, and
 that a matched suite has none by construction. Retargeting to 12H1006 is
 exactly a matched suite: patched iBSS/iBEC, kernelcache, DeviceTree and
 ramdisk all from the one build. It needs no cross-version handoff to work.
+
+## `setenv boot-args` is INERT on this bootloader: the kernel has been booting with code-signing enforcement on
+
+This is the strongest mechanism-level explanation this project has produced for
+its central bug, and it is **not yet confirmed on hardware**. Read every
+"explains" below as "explains, pending a hardware run" — the disassembly is
+solid and reproducible, the fix is landed and verified against the artifacts it
+produces, and nothing has yet been booted on a real AppleTV3,2 with it.
+
+### The symptom, unchanged for weeks
+
+`blackb0x --stock-ramdisk` — patched iBSS, patched iBEC, patched kernelcache,
+patched DeviceTree, and **Apple's stock, untouched RestoreRamDisk** — boots on
+a real AppleTV3,2. The actual jailbreak — the identical chain with **our**
+baked ramdisk, whose `/sbin/launchd` is our ad-hoc-signed `entrypoint` binary —
+does nothing at all.
+
+Everything that differs between those two runs had been chased into the
+ramdisk's *contents*: the forensic teardown above compared our baked image to a
+pristine one file by file, rebuilt the original tool's ramdisk independently for
+comparison, and exonerated the container, the HFS+ volume, the decmpfs
+compression, the ownership, and armv6-as-PID-1. The ramdisk kept coming back
+clean because the ramdisk was never the problem.
+
+The difference is in the boot-args, and they were never reaching the kernel.
+
+### Proving the channel inert: the disassembly
+
+Two agents independently decrypted **this project's own published
+`dist/iBEC-AppleTV3,2_10B329a`** — AES-256-CBC over the IMG3 DATA tag, keys out
+of `keys/`, image base `0x9ff00000` per iBoot32Patcher's own
+`get_iboot_base_address()` — and searched the plaintext, rather than reasoning
+about what a bootloader ought to do.
+
+- **`"boot-args"` has exactly ONE reference in the whole image.** The string is
+  at file offset `0x31c7c` (VA `0x9ff31c7c`). The single 32-bit literal naming
+  it is at `0x3dd1c`, sitting in iBoot's **settable-env-var name table**,
+  immediately after `"auto-boot"` and before `"debug-uarts"`/`"filesize"`. That
+  table is the list of variables you are allowed to *set*; membership in it is
+  not a read. A separate scan of every Thumb-2 `MOVW`/`MOVT.W` pair that could
+  materialize that address found **zero** hits, which closes the obvious escape
+  ("the real xref is register-materialized, not in a literal pool").
+- **The kernel-boot routine builds its command line out of compiled-in
+  constants.** Its literal pool at `0x1b190`–`0x1b1a4` holds, in order: an
+  empty string, `"rd=md0 nand-enable-reformat=1 -progress"`, a second empty
+  string, `"is-tethered"`, `"%s force-usb-power=1 "` and `"%s "`. The code at
+  `0x1af42` loads the hardcoded restore string and `0x1af46` loads the null
+  string; `0x1af5c`/`0x1af66` query the `is-tethered` env var to select between
+  those two arms; the winner is `snprintf`'d into `gBootArgs.commandLine`.
+  **`env_get("boot-args")` does not appear anywhere on that path.**
+
+So on AppleTV3,2's iBoot-1537.9.55, `setenv boot-args ...` over the recovery
+protocol is **accepted, stores the value, and is never read back**. It does not
+fail, it does not warn, and `irecv_send_command()` returns success — because the
+command really did succeed. It set a variable. Nothing reads that variable.
+
+### Why this explains the stock-vs-ours asymmetry exactly
+
+With the `setenv` dead, the kernel had been receiving iBoot's own hardcoded
+`rd=md0 nand-enable-reformat=1 -progress` on every single run, and **none** of
+`amfi=0xff`, `cs_enforcement_disable=1` or `amfi_get_out_of_my_way=1`.
+
+Code-signing enforcement was therefore active on every boot this project has
+ever performed. Under enforcement an ad-hoc-signed binary cannot be exec'd as
+PID 1 — and that is the one axis on which the two ramdisks differ:
+`--stock-ramdisk` ships Apple's own properly-signed `launchd`, which needs no
+bypass at all and boots exactly as it always did; ours ships `entrypoint`,
+ad-hoc-signed with `ldid`, which needs the bypass and never got it. The
+asymmetry is not a property of the ramdisk's contents, its size, its filesystem
+or its ownership. It is a property of which of the two `launchd`s requires a
+boot-arg that was never delivered.
+
+Note what this does to hypothesis 3 of the CHECKPOINT section ("AMFI refuses an
+ad-hoc-signed PID 1"), which was marked **DEAD** in the ramdisk teardown above.
+The evidence that killed it was sound as far as it went — the original tool's
+own PID 1 is strictly *less* conformant than ours on every axis and booted on
+this hardware — but it was killed partly on the grounds that
+`cs_enforcement_disable=1 amfi=0xff amfi_get_out_of_my_way=1` were "on top" of
+it. They were not on top of anything. The original's PID 1 booted because the
+original's iBEC carried those args **baked in**; ours did not carry them at all.
+The hypothesis was right about the mechanism and wrong about which component
+was failing to provide the bypass.
+
+### Corroboration from the original tool
+
+The original NSSpiral/Blackb0x is the only configuration ever observed to boot
+on this hardware, so what it did is evidence and not merely precedent. Its
+`Blackb0x/Source/Patcher.mm`'s `-patchiBEC:flags:ticket:` (clone at
+`/Users/regulad/repositories/blackb0x-scratch/original/upstream/`) **baked** its
+boot-args into the image, passing them as the `args` parameter of its vendored
+`iBootPatcher(infile, outfile, args, RSA, debug, ticket, kaslr)` — that
+library's spelling of iBoot32Patcher's `-b`. And it called that function
+**twice** against one decrypted input, producing two iBECs differing only in the
+baked string:
+
+    args1 = "rd=md0 amfi=0xff cs_enforcement_disable=1 pio-error=0"
+    args2 = "amfi=0xff cs_enforcement_disable=1 pio-error=0 amfi_get_out_of_my_way=1 cs_enforcement_disable=1"
+
+(`args2` really does repeat `cs_enforcement_disable=1`, and really does omit any
+`rd=`; both are reproduced here verbatim rather than tidied. `-v` is commented
+out on both lines.)
+
+This port had collapsed that two-iBEC design into one, on the explicit reasoning
+that a runtime `setenv` made the second image redundant and was "strictly
+better" — recorded above under "Boot-args moved out of the binary" and
+"Tether-boot removed: one send flow, one iBEC". That reasoning was wrong at its
+root. The two iBECs were not redundancy; they were **the mechanism**. A baked
+string is a property of the binary, so a binary that boots off `rd=md0` and a
+binary that boots off NAND physically cannot be the same file.
+
+### The fix as landed
+
+In the working tree, not yet committed at the time of writing:
+
+- **`-b` is restored in `patchiBEC()`**, which now produces **two** patched
+  iBECs from one decrypted input — identical in every flag but the `-b` string —
+  published as `dist/iBEC-<tuple>` and `dist/iBECTether-<tuple>`. `blackb0x`
+  picks one by mode (`--tether-boot`); it never needs both.
+- **`bake-iboot` gained `--boot-args` / `--tether-boot-args` /
+  `--extra-boot-args`.** This is the piece that keeps the baked design cheap to
+  work with: arming a directive now costs a seconds-long, rootless `bake-iboot`
+  re-bake instead of a ~30-minute rooted ramdisk bake.
+- **`--extra-boot-args` on `blackb0x` now fails hard (exit 2)**, naming the
+  `bake-iboot` command that does work. It is not warned about and not silently
+  ignored, because the whole failure being corrected here was a flag that
+  reached nothing while reporting success.
+- **`setenv boot-args` is gone from `sendKernelCache()`.** `DeviceManager.cpp`
+  carries no `kRamdiskBootArgs`/`kTetherBootArgs` of its own any more; it only
+  reports which string the `dist/` component it is about to send was baked with.
+
+**It is deliberately KEPT in `sendStockRestoreTail()`**, and that is worth
+recording as a genuine curiosity rather than an inconsistency. That function's
+entire value is being byte-for-byte what real `idevicerestore`'s
+`recovery_enter_restore()` sends, so that a failure there can be attributed to
+something other than a protocol difference; removing a command the reference
+tool sends would trade a harmless no-op for a new variable in the one diagnostic
+whose worth is having none. And the command is harmless for a reason nobody
+could have spotted: its value is **byte-identical to iBoot's own hardcoded
+default** (`rd=md0 nand-enable-reformat=1 -progress`, the string at `0x38847`
+loaded at `0x1af42`). The stock restore path has always been getting correct
+boot-args — from iBoot's fallback, never from its own command. The channel was
+dead there too, and it was invisible precisely because the dead channel and the
+live fallback agreed.
+
+### The 179-byte ceiling, and the 127 it replaces
+
+A baked string has a length limit, and it is not the one previously recorded.
+Two independent limits were measured in the decrypted iBEC; the smaller binds.
+
+1. **The relocation site.** `patch_boot_args()` only relocates when the injected
+   string is longer than iBoot's own 39-byte default, and it relocates by
+   `strcpy`ing — unbounded, with no length check of its own — over the "Reliance
+   on this certificate..." string. In this image that C string is 193 bytes long
+   (file offset `0x3ebf4`), so a write of up to 193 characters provably touches
+   only bytes that were already inside it. But only the **first 179** are the
+   pure-ASCII certificate boilerplate; the trailing 14 are DER bytes from the
+   embedded Apple root cert that happen to precede the next NUL, and those vary
+   between builds. 179 is therefore the figure that holds for *any* build rather
+   than for this one.
+2. **The kernel command line.** iBoot `snprintf`s the selected string into
+   `gBootArgs.commandLine` with size `0x100` — confirmed as `MOV.W r1, #0x100`
+   at file offsets `0x1af7a` and `0x1af9c`, the two `snprintf` calls in the
+   kernel-boot routine — matching XNU's `BOOT_LINE_LENGTH` of 256 on 32-bit ARM.
+   iBoot then appends its own `" force-usb-power=1 "` (19) and
+   `" backlight-level=%d "` (~22), leaving roughly 214.
+
+179 binds, and it is **enforced as an error, never a truncation**: both limits
+truncate silently, which is the same failure class as the dead `setenv`, so
+`bake-iboot` and `patchiBEC()` refuse an over-long string instead of shortening
+one. The shipped strings are 81 (ramdisk) and 87 (tether) bytes, leaving ~90 for
+directives.
+
+**This supersedes an earlier 127-byte figure** that appears in this log and in
+the code's history. That number was never wrong — it is
+`DeviceManager::kMaxRecoveryCommandLength`, the budget of iBoot's recovery
+*command* parser — it simply belongs to a channel a baked string never passes
+through. Recorded rather than deleted because "127" is the kind of number that
+gets remembered and re-applied.
+
+### Verification: decrypt the output, don't trust a clean build
+
+The patch was confirmed by decrypting the images actually produced, not by
+observing that `bake-iboot` exited zero. In **both** published images the string
+at `0x3ebf4` is the injected boot-args (the certificate boilerplate is gone,
+overwritten as designed), the kernel-boot pool slot at `[0x1b194]` points at it,
+and **both** arms of iBoot's select resolve to it — the boot-args arm (`LDR` at
+`0x1af42`) and the former null-string fallback (`LDR` at `0x1af46`).
+
+That last detail is why a baked string wins unconditionally and why no `setenv`
+could ever have overridden one even on a bootloader that read the variable:
+`patch_boot_args()` repoints **both** arms, so whichever way the `is-tethered`
+test goes, the injected string is what gets `snprintf`'d.
+
+This check is not optional hygiene. `patch_boot_args()` is the most invasive
+patch in iBoot32Patcher and the only one that can mis-apply without saying so —
+it `strcpy`s unbounded, scans byte-by-byte for an `IT` instruction with no
+end-of-buffer guard (the author's own comment calls it "kinda hacky"), and
+writes an 8-bit PC-relative immediate with no range check
+(`ldr_rd_null_str->imm8 = (diff / 0x4)` truncates past 255 in silence). That
+criticism was made correctly when `-b` was *removed*, and it survives the
+decision to bring `-b` back; the answer to it is the length check plus this
+verification, not avoidance of the patch.
+
+### Confidence, stated plainly
+
+What is proven: the disassembly, in this project's own shipped artifact. The
+`"boot-args"` xref count, the contents of the kernel-boot literal pool, the
+absence of `env_get("boot-args")`, the 193/179-byte certificate string, the
+`0x100` `snprintf` size, and the post-patch state of both select arms are all
+direct reads of real bytes, reproducible by anyone with the keys.
+
+What is inferred: that this is *the* cause of the jailbreak's failure. The
+inference is strong — it is a single mechanism that predicts the exact observed
+asymmetry, it matches what the one known-booting configuration did, and it
+identifies a specific missing precondition (code-signing bypass) for a specific
+observed non-event (our PID 1 never running). But it is an inference. **No
+device has been booted with the fixed chain.** The hypotheses the CHECKPOINT
+section left standing — entrypoint reaching PID 1 and dying inside
+`do_install()`, the empty apt lists cache, the single bake-time persistence
+payload — are all still live, and at least two of them independently produce the
+same "nothing happened". If the next hardware run still does nothing, this
+section is a real bug fixed and not the root cause, and it should be recorded
+that way.
+
+### The meta-lesson, which this log keeps relearning
+
+**A component that accepts a command and silently ignores it is worse than one
+that errors.** `setenv boot-args` returned success for the entire life of this
+project. Every layer above it was correct: the command was well-formed, the
+transport delivered it, the return code was checked, and an
+`extraCommandMustSucceed` flag was even added specifically to make sure a
+failure there could not pass unnoticed. None of that could detect a command that
+succeeded at doing nothing. The same shape has now appeared three times in this
+log — xpwn's self-consistent-but-corrupt kernelcache, whose regenerated adler32
+laundered the damage; `patch_boot_args()`'s unchecked 8-bit immediate; and this.
+
+**The only trustworthy check is to inspect the artifact that was actually
+produced.** A clean build, a zero exit status, a successful return code and a
+self-consistent output are all statements about the pipeline, not about the
+thing the pipeline made. This fix was verified by decrypting the two iBECs and
+reading the bytes at `0x3ebf4`, `0x1b194`, `0x1af42` and `0x1af46` — the same
+method that finally settled the IMG3 alignment bug, and for the same reason.

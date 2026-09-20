@@ -138,10 +138,12 @@ bool Patcher::useStockIBSS(const std::string& path, bool stockSecurerom) {
 }
 
 
-// See Patcher.hpp's own comment. Same shape as patchiBEC() above: there is
-// no downgrade-vs-boot distinction in the binary at all any more, so both
-// PatchedComponents fields point at one file. Here that file is the plain
-// decrypted iBEC, since no patching happens on this path.
+// See Patcher.hpp's own comment. Unlike patchiBEC(), this produces ONE image
+// and leaves outputs_.iBECTether unset -- there is no install-vs-tether
+// distinction to make here, because nothing is patched and Apple's own iBEC
+// carries Apple's own compiled-in boot-args either way. A --stock-recovery
+// run therefore cannot tether-boot meaningfully; that is inherent to sending
+// an unmodified bootloader, not a gap in this function.
 bool Patcher::useStockIBEC(const std::string& path) {
     // See this method's own comment in Patcher.hpp -- always sent
     // untouched, unconditionally: whichever iBSS is now running

@@ -1284,6 +1284,19 @@ add_test(NAME RamdiskOverlayTests
          COMMAND blackb0x_tests
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# entrypoint/bootargs.h — the boot-args directive parser entrypoint.c runs as
+# PID 1. Its production build is a freestanding armv6 Mach-O with no libc, no
+# console and no crash handler, on hardware whose only observable is whether
+# it power-cycles, so the parser is a dependency-free header specifically so
+# it can be compiled here, on the host, and hammered with adversarial input
+# for free. Same source, not a copy — see BootArgsTests.cpp's own header.
+add_executable(blackb0x_bootargs_tests
+    src/tests/BootArgsTests.cpp)
+
+add_test(NAME BootArgsTests
+         COMMAND blackb0x_bootargs_tests
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # ---------------------------------------------------------------------------
 # bake-firmware
 #
@@ -1647,5 +1660,5 @@ add_custom_target(jailbreak
     COMMENT "Built the jailbreak binaries (blackb0x and blackb0x-pwn)")
 
 add_custom_target(authoring
-    DEPENDS bake-firmware bake-kernel bake-iboot apt blackb0x_tests xpwntool iBoot32Patcher CBPatcher
+    DEPENDS bake-firmware bake-kernel bake-iboot apt blackb0x_tests blackb0x_bootargs_tests xpwntool iBoot32Patcher CBPatcher
     COMMENT "Built the authoring tools (bake-firmware, bake-kernel, bake-iboot, vendored apt, tests, xpwntool)")

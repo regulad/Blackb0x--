@@ -52,13 +52,15 @@ struct CliOptions {
     // digests BuildManifest.plist lists -- blackb0x's own patched
     // kernel/ramdisk can never match those. This also means stockRecovery
     // requests whatever build Apple currently signs ("latest") instead of
-    // this project's own fixed jailbreak-target build -- see runCli()'s
+    // this project's own per-device jailbreak-target build -- see runCli()'s
     // buildToRequest comment.
     //
     // Deliberately NOT required to also carry stockSecurerom: useStockIBSS()
     // still needs a real local .keys entry to decrypt the stock iBSS for
     // checkm8's boot_client() path when stockSecurerom isn't set, and
-    // blackb0x only ever ships one for kJailbreakTargetBuild, essentially
+    // blackb0x ships keys only for the builds it actually targets -- one per
+    // device model (jailbreakTargetBuildFor(), Cli.cpp), plus the older
+    // builds keys/ happens to carry, essentially
     // never whatever "latest" resolves to -- but that's a per-build data
     // gap, not an incoherent combination, and it's a legitimate
     // troubleshooting run in its own right (does checkm8 + a stock
@@ -79,8 +81,10 @@ struct CliOptions {
     // patches are implicated.
     //
     // The whole suite (kernelcache, ramdisk, DeviceTree, RestoreLogo) comes
-    // from the SAME build the patched iBSS/iBEC are for, kJailbreakTargetBuild
-    // -- self-consistent end to end, and the build stockRecovery/
+    // from the SAME build the patched iBSS/iBEC are for -- this device's own
+    // jailbreak target build (jailbreakTargetBuildFor(), Cli.cpp; it is per
+    // device model, since the three supported models topped out at different
+    // firmwares) -- self-consistent end to end, and the build stockRecovery/
     // stockSecurerom below also pair with.
     //
     // There used to be a second flag here, --stock-firmware-new, which pulled
@@ -151,7 +155,12 @@ struct CliOptions {
     bool noSendRestoreLogo = false;
     // DIAGNOSTIC: tether-boot instead of the ramdisk install. Sends
     // iBSS -> iBEC -> RestoreLogo -> DeviceTree -> KernelCache('bootx') -- NO
-    // Ramdisk -- with NAND-root boot-args (rd=disk0s1s1 instead of rd=md0), so
+    // Ramdisk. It sends a DIFFERENT iBEC: dist/iBECTether-<tuple> rather than
+    // dist/iBEC-<tuple>. The two are the same patched bootloader with
+    // different boot-args compiled in, and they have to be separate files
+    // because a baked string cannot be overridden at runtime on this
+    // bootloader (Patcher.hpp's `bootargs` namespace). The tether image
+    // carries NAND-root boot-args (rd=disk0s1s1 instead of rd=md0), so
     // the patched kernel boots the OS already on the device's NAND rather than
     // the install ramdisk. RestoreLogo is kept because its setpicture is what
     // initializes the display -- without it a NAND boot is invisible whether
@@ -170,13 +179,73 @@ struct CliOptions {
     // one), and the NAND-root args are actually the ones WITHOUT rd=md0 (the
     // original had the two arg sets wired up backwards).
     //
-    // Boots whatever build blackb0x targets (kJailbreakTargetBuild), so the
-    // device's NAND should be running that same build for a clean boot -- a
-    // large kernel/userspace version skew may panic. Even a partial boot
+    // Boots whatever build blackb0x targets for THIS device model
+    // (jailbreakTargetBuildFor(), Cli.cpp), so the device's NAND should be
+    // running that same build for a clean boot -- a large kernel/userspace
+    // version skew may panic. runCli() reads the installed build over
+    // lockdownd where it can and says which build it is comparing against, so
+    // the preflight warning is now specific to the connected model rather
+    // than to one project-wide constant. Even a partial boot
     // (screen lights up / boot logo) still proves the kernel decompressed and
     // executed. Mutually exclusive with the --stock-* diagnostics (they drive
     // their own send paths); parseCliOptions() refuses the combination.
     bool tetherBoot = false;
+    // --extra-boot-args. ACCEPTED BY THE PARSER, THEN REFUSED WITH AN ERROR.
+    // Never empty-and-ignored, never warned-about-and-honoured: if it is set
+    // at all, parseCliOptions() prints the working alternative and exits 2.
+    //
+    // WHY IT CANNOT WORK, which is the whole story of this project's central
+    // bug. The flag used to append its value to a `setenv boot-args ...`
+    // command sent over the recovery protocol just before 'bootx'. That
+    // command is accepted by AppleTV3,2's iBoot-1537.9.55 and really does set
+    // the variable -- "boot-args" is a legitimate entry in its settable
+    // env-var name table. Nothing ever reads it back: there is no
+    // env_get("boot-args") on the kernel-boot path, which selects between an
+    // empty string and iBoot's own hardcoded "rd=md0 nand-enable-reformat=1
+    // -progress" and snprintf()s that into the kernel command line. Stored
+    // and never consulted -- ignored silently rather than rejected, which is
+    // why it took weeks to find. Boot-args are compiled into iBEC now
+    // (Patcher.hpp's `bootargs` namespace), and a compiled-in string wins
+    // unconditionally, so there is nothing left at send time to append to.
+    //
+    // WHAT IT WAS FOR, AND WHERE THAT WENT. It is how a `blackb0x.*`
+    // directive reaches entrypoint.c -- the ramdisk's PID 1 -- without
+    // re-baking the ramdisk. That need is real and unchanged: everything on
+    // the ramdisk is baked ahead of time, CI publishes dist/ as an artifact,
+    // and a ramdisk re-bake costs sudo, Theos, afsctool and ~30 minutes on a
+    // machine set up for authoring. Paying that to flip one diagnostic bit is
+    // backwards, doubly so for diagnostics that only reproduce on hardware.
+    //
+    // The answer is now an iBEC re-bake instead of a send-time flag, which is
+    // seconds and needs no privilege:
+    //
+    //     ./build/bake-iboot --device AppleTV3,2 --build 10B329a --force \
+    //                        --extra-boot-args "blackb0x.skip-install=1"
+    //
+    // That appends to the built-in args in BOTH baked iBECs; --boot-args /
+    // --tether-boot-args replace a base string outright. The directive
+    // MECHANISM is unchanged -- entrypoint.c still reads kern.bootargs and
+    // parses `blackb0x.*` out of it (entrypoint/bootargs.h), the same
+    // relationship systemd has with the Linux kernel command line. Ordinary
+    // kernel args (nand-enable-reformat=1, serial=3 debug-uarts=3) go through
+    // the same route.
+    //
+    // The VOCABULARY did shrink: `blackb0x.beacon=<seconds>`, a reboot-as-
+    // proof-of-life probe for "did the kernel exec us as PID 1 at all", was
+    // removed deliberately once `setenv boot-args` was proven inert, since
+    // that root cause answers the beacon's question directly. `skip-install`
+    // is what remains. If a hardware run with the baked args still fails, the
+    // beacon comes back verbatim out of git history -- the fix is not yet
+    // confirmed on hardware, and that is the honest caveat on removing it.
+    //
+    // LENGTH IS CHECKED THERE, NOT HERE, AND AGAINST A DIFFERENT NUMBER.
+    // bake-iboot measures against bootargs::kMaxBakedBootArgsLength (179),
+    // which comes from the size of the string patch_boot_args() relocates
+    // into and from iBoot's 256-byte kernel command line -- NOT from
+    // DeviceManager::kMaxRecoveryCommandLength (127), which bounds recovery
+    // COMMANDS that a baked string never passes through. Over-long is an
+    // error there too; nothing is ever truncated.
+    std::string extraBootArgs;
     bool help = false;
 };
 

@@ -210,47 +210,103 @@ bool Patcher::patchiBSS(const std::string& path) {
     checkPatching();
     return true;
 }
-bool Patcher::patchiBEC(const std::string& path) {
+bool Patcher::patchiBEC(const std::string& path, const std::string& bootArgs,
+                        const std::string& tetherBootArgs) {
     const FirmwareKeyPair* k = keyFor("iBEC");
     if (!k) {
         fprintf(stderr, "patchiBEC: no iBEC keys loaded\n");
         return false;
     }
 
+    // Refuse rather than let patch_boot_args() strcpy() past the end of the
+    // certificate boilerplate it relocates into. See
+    // bootargs::kMaxBakedBootArgsLength for how that ceiling was measured --
+    // it is NOT the 127-byte recovery-command budget, which applies to a
+    // different channel entirely.
+    for (const auto& [label, args] : {std::pair<const char*, const std::string&>{"boot-args", bootArgs},
+                                      std::pair<const char*, const std::string&>{"tether boot-args",
+                                                                                 tetherBootArgs}}) {
+        if (args.empty()) {
+            fprintf(stderr, "patchiBEC: %s is empty -- an iBEC with no baked boot-args cannot boot our "
+                            "ramdisk (see Patcher.hpp's bootargs namespace)\n",
+                    label);
+            return false;
+        }
+        if (args.size() > bootargs::kMaxBakedBootArgsLength) {
+            fprintf(stderr,
+                    "patchiBEC: %s is %zu bytes and the baked limit is %zu. iBoot32Patcher would strcpy() "
+                    "it over the embedded certificate blob with no bounds check, and iBoot would truncate "
+                    "the kernel command line without reporting anything. Shorten it.\n",
+                    label, args.size(), bootargs::kMaxBakedBootArgsLength);
+            return false;
+        }
+    }
+
     std::string decPath = decryptedPathFor(path);
     std::string patchedPath = patchedPathFor(path);
-    // prebootPathFor()/downgradePathFor() are no longer used: patchiBEC()
-    // produces one output, not a downgrade/boot pair (see below).
     std::string outPath = outputPathFor(path);
+    // The second image. Named off the same base so both land beside the
+    // downloaded original in the IPSW cache; BakeIboot.cpp publishes them as
+    // dist/iBEC-<tuple> and dist/iBECTether-<tuple>.
+    std::string tetherPatchedPath = replaceExtension(path, "tether.patched");
+    std::string tetherOutPath = replaceExtension(path, "tether");
 
     printf("Patching iBEC...\n");
 
     decrypt(const_cast<char*>(path.c_str()), const_cast<char*>(decPath.c_str()),
             const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE", nullptr);
 
-    // No -b: boot-args are NOT compiled into iBEC any more. They are set at
-    // runtime with `setenv boot-args ...` + `saveenv` over the recovery
-    // console, which is how the stock restore path (DeviceManager.cpp's
-    // sendStockRestoreTail()) and real idevicerestore have always done it.
+    // -b <args>: the boot-args are COMPILED IN. This is not an optimization
+    // or a belt-and-braces default -- it is the only channel that works.
+    // AppleTV3,2's iBoot-1537.9.55 never reads the boot-args environment
+    // variable on its kernel-boot path at all; the full disassembly evidence
+    // (the single literal-pool xref in the env-var name table, the
+    // kernel-boot literal pool, the absence of any MOVW/MOVT materialization)
+    // is written up in Patcher.hpp's `bootargs` namespace comment, and the
+    // original NSSpiral/Blackb0x -- the only configuration ever seen to boot
+    // on real hardware -- baked its args the same way.
     //
-    // Two reasons that is strictly better than patch_boot_args():
-    //  1. The patch is the most invasive one in iBoot32Patcher and the only
-    //     one that can mis-patch silently. Both boot-args strings blackb0x
-    //     used were longer than iBoot's own "rd=md0 nand-enable-reformat=1
-    //     -progress", which triggers its relocation path: it repoints the
-    //     xref into the "Reliance on this certificate" string, strcpy()s
-    //     there unbounded, scans byte-by-byte for an IT instruction with no
-    //     end-of-buffer guard, and finally writes an 8-bit PC-relative
-    //     immediate with no range check. Nothing about that reports failure
-    //     if it lands wrong.
-    //  2. `setenv` needs no iBEC rebuild to change, so the args can be
-    //     matched to what the ramdisk actually does.
+    // This overturns the reasoning that used to sit here, which claimed
+    // runtime `setenv boot-args` was "strictly better" than patch_boot_args()
+    // and collapsed a former two-iBEC design into one. Both of its premises
+    // were wrong in the same way: `setenv` does not reach the kernel on this
+    // bootloader, so what it actually bought was a kernel booting with NONE
+    // of amfi=0xff / cs_enforcement_disable=1 / amfi_get_out_of_my_way=1 --
+    // which is exactly why an ad-hoc-signed entrypoint could never exec as
+    // PID 1 while Apple's own signed launchd (--stock-ramdisk) booted fine.
     //
-    // No -d either: that patch forces `debug-enabled` to answer 1 forever,
+    // The old comment's ONE correct observation is kept, because it is still
+    // a live hazard: patch_boot_args() is the most invasive patch in
+    // iBoot32Patcher and the only one that can mis-apply without saying so.
+    // It strcpy()s unbounded into the "Reliance on this certificate" string,
+    // scans byte-by-byte for an IT instruction with no end-of-buffer guard,
+    // and writes an 8-bit PC-relative immediate with no range check. The
+    // mitigations are the length check above and, more importantly,
+    // VERIFYING THE RESULT: decrypt the published iBEC and confirm the
+    // injected string is present and that the null-string LDR now points at
+    // the boot-args literal. A -b that silently fails reproduces this exact
+    // bug class.
+    //
+    // No -d: that patch forces `debug-enabled` to answer 1 forever,
     // and blackb0x never wanted it -- Patcher.mm passed debug="FALSE" too.
     // It was being applied anyway because zzanehip's iBootPatcher() entry
     // point tested its RSA argument twice (fixed on our fork's branch, but
     // the CLI never had the bug at all).
+    //
+    // -d IS A KNOWN, DELIBERATELY DEFERRED FOLLOW-UP, not a closed question.
+    // It is the enabling half of adding `debug=0x14e` to the baked boot-args:
+    // DB_LOG_PI_SCRN (0x100) makes the kernel render PANIC info onto the
+    // framebuffer, which would be the only panic-visibility channel this
+    // device has (-v covers ordinary printf, not the panic UI). That flag is
+    // gated by PE_i_can_has_debugger / the device-tree `debug-enabled`
+    // property, which is 0 on a production-fused retail unit, and
+    // patch_debug_enabled() -- iBoot32Patcher's -d -- is exactly what forces
+    // it true. It is deliberately NOT landing with the -b fix: the debug bit
+    // meanings are community-documented rather than decoded out of these
+    // kernels, the debug-enabled gate is inferred rather than observed, and
+    // changing the boot-args CHANNEL and adding a debug gate in one step
+    // would make a hardware failure uninterpretable. Do it on its own, after
+    // -b is confirmed on hardware. See Patcher.hpp's `bootargs` namespace.
     // -r, -k and -t, all three unconditional.
     //
     // -k (patch_kaslr) disables iBoot's kernel-slide randomization. This is
@@ -294,44 +350,65 @@ bool Patcher::patchiBEC(const std::string& path) {
     // cause (why iBoot decodes 38 bytes short of a stream that decodes fully
     // off-device) is tracked down. The fork keeps the -z capability, unused;
     // see docs/HISTORY.md.
-    std::vector<std::string> iBECArgs = {"-r", "-k", "-t"};
+    const std::vector<std::string> iBECArgs = {"-r", "-k", "-t"};
 
-    // ONE patched iBEC now, not two. The downgrade/boot pair only ever
-    // differed by the boot-args compiled into each (args1 carried rd=md0,
-    // args2 did not); every other patch flag was identical. With boot-args
-    // moved to runtime `setenv`, the two builds are byte-for-byte the same
-    // file, so producing both was pure duplication -- and worse, it made the
-    // downgrade-vs-boot distinction look like a property of the binary when
-    // it is really a property of which boot-args the sender sets.
+    // TWO patched iBECs, deliberately, from the one decrypted input -- the
+    // design the original app used and this port had collapsed. They differ
+    // ONLY in the -b string; every other flag is identical.
     //
-    // Both PatchedComponents fields therefore point at the same output, in
-    // exactly the way useStockIBEC() below already does.
-    std::vector<std::string> patchedArgs = {decPath, patchedPath};
-    patchedArgs.insert(patchedArgs.end(), iBECArgs.begin(), iBECArgs.end());
-
-    int patchedResult = runIBoot32Patcher(patchedArgs);
-    if (patchedResult != 0) {
-        // Same reasoning as patchiBSS()'s own comment -- iBoot32Patcher
-        // never writes its output file on failure (e.g. patch_ticket_check()/
-        // patch_rsa_check() couldn't find their target instruction pattern
-        // in this specific iBEC build), and decrypt()ing a missing/stale
-        // file next would silently ship garbage that still fails
-        // verification once sent, rather than failing cleanly here.
-        fprintf(stderr, "patchiBEC: iBoot32Patcher failed for %s (exit %d)\n", path.c_str(), patchedResult);
-        std::error_code ec;
-        fs::remove(decPath, ec);
-        return false;
-    }
-
-    decrypt(const_cast<char*>(patchedPath.c_str()), const_cast<char*>(outPath.c_str()),
-            const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE",
-            const_cast<char*>(path.c_str()));
-
+    // The collapse was sound ONLY while boot-args were a runtime `setenv`,
+    // because then the two builds really were byte-identical and the
+    // install-vs-tether distinction really was a property of the sender. Now
+    // that the string is compiled in and wins unconditionally, one image
+    // physically cannot serve both rd=md0 and rd=disk0s1s1 -- the mode is a
+    // property of the binary again, so there have to be two binaries.
+    //
+    // The alternative considered and rejected: bake one iBEC and have
+    // blackb0x re-bake on demand when the mode changes. That needs the IPSW,
+    // keys/ and the GPL patch tools, none of which the jailbreak binary has
+    // (see AGENTS.md's Patcher/PatcherPatch split), and it would turn a
+    // diagnostic flag into a network round trip. Two files in dist/ cost a
+    // few hundred KB and one extra iBoot32Patcher exec.
     std::error_code ec;
+    auto runOne = [&](const char* what, const std::string& args, const std::string& toPatched,
+                      const std::string& toOut) -> bool {
+        std::vector<std::string> argv = {decPath, toPatched, "-b", args};
+        argv.insert(argv.end(), iBECArgs.begin(), iBECArgs.end());
+        int rc = runIBoot32Patcher(argv);
+        if (rc != 0) {
+            // Same reasoning as patchiBSS()'s own comment -- iBoot32Patcher
+            // never writes its output file on failure (e.g.
+            // patch_ticket_check()/patch_rsa_check()/patch_boot_args()
+            // couldn't find their target instruction pattern in this
+            // specific iBEC build), and decrypt()ing a missing/stale file
+            // next would silently ship garbage that still fails verification
+            // once sent, rather than failing cleanly here.
+            fprintf(stderr, "patchiBEC: iBoot32Patcher failed for the %s image of %s (exit %d)\n", what,
+                    path.c_str(), rc);
+            return false;
+        }
+        decrypt(const_cast<char*>(toPatched.c_str()), const_cast<char*>(toOut.c_str()),
+                const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE",
+                const_cast<char*>(path.c_str()));
+        if (!fs::exists(toOut, ec) || fs::file_size(toOut, ec) == 0) {
+            fprintf(stderr, "patchiBEC: re-encrypt produced no usable %s image at %s\n", what,
+                    toOut.c_str());
+            return false;
+        }
+        printf("patchiBEC: %s image baked with boot-args \"%s\"\n", what, args.c_str());
+        return true;
+    };
+
+    const bool ok = runOne("install", bootArgs, patchedPath, outPath) &&
+                    runOne("tether", tetherBootArgs, tetherPatchedPath, tetherOutPath);
+
     fs::remove(decPath, ec);
     fs::remove(patchedPath, ec);
+    fs::remove(tetherPatchedPath, ec);
+    if (!ok) return false;
 
     outputs_.iBEC = outPath;
+    outputs_.iBECTether = tetherOutPath;
 
     checkPatching();
     return true;

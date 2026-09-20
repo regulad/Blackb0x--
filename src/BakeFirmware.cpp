@@ -4,7 +4,7 @@
 //
 //  The single ahead-of-time baker: for every (device model, firmware build)
 //  combination this port has decryption keys for, download and patch the
-//  whole firmware suite — iBSS, iBEC, KernelCache and DeviceTree into
+//  whole firmware suite — iBSS, both iBECs (see below), KernelCache and DeviceTree into
 //  dist/ as flat <Component>-<device>_<buildID> entries (Apple's own
 //  BuildManifest component keys), the ramdisk as
 //  dist/RestoreRamDisk-<device>_<buildID>.dmg.
@@ -54,8 +54,9 @@
 //  builds Apple is still actively signing and baked only those. It is gone,
 //  because the question it answered is not one this tool has any stake in.
 //  What blackb0x can jailbreak is decided entirely by what has a .keys file
-//  under keys/ and patches that work against it — and the live path pins
-//  kJailbreakTargetBuild (Cli.cpp) regardless. Apple's current signing
+//  under keys/ and patches that work against it — and the live path pins one
+//  target build per device model (kJailbreakTargets / jailbreakTargetBuildFor(),
+//  Cli.cpp) regardless. Apple's current signing
 //  window neither adds a bakeable target nor removes one, so filtering on it
 //  only ever hid targets that were still perfectly valid to bake, at the
 //  cost of a network round trip per device. Use --device/--build to narrow a
@@ -145,7 +146,14 @@ static std::vector<std::pair<std::string, std::string>> knownFirmwareTargets() {
 }
 
 // ---------------------------------------------------------------------------
-// Bootchain half: iBSS, iBEC, KernelCache, DeviceTree
+// Bootchain half: iBSS, iBEC + iBECTether, KernelCache, DeviceTree
+//
+// TWO iBECs. They are the same patched bootloader with a different boot-args
+// string compiled in -- rd=md0 for the install path, rd=disk0s1s1 for
+// --tether-boot. They cannot be one file: this bootloader never reads the
+// boot-args environment variable on its kernel-boot path, so the baked string
+// is the only one there is and it wins unconditionally. Patcher.hpp's
+// `bootargs` namespace carries the disassembly that establishes this.
 // ---------------------------------------------------------------------------
 
 // What one target produced. Each bootchain component is tracked separately
@@ -295,7 +303,8 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
     // treated as done -- that would make a failure sticky and invisible on
     // the next run, which is the opposite of what this tool is for.
     if (!force && fs::exists(outDir + "/iBSS" + tupleSuffix) &&
-        fs::exists(outDir + "/iBEC" + tupleSuffix) &&
+        fs::exists(outDir + "/" + bootargs::kIBECComponent + tupleSuffix) &&
+        fs::exists(outDir + "/" + bootargs::kIBECTetherComponent + tupleSuffix) &&
         fs::exists(outDir + "/KernelCache" + tupleSuffix) &&
         fs::exists(outDir + "/DeviceTree" + tupleSuffix)) {
         printf("already built, skipping (use --force to rebuild)\n");
@@ -378,7 +387,17 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
     // already present; each tool reuses this same ipswDataRoot() download cache
     // and publishes straight to outDir, so there are no in-process patch*()
     // calls or publish() calls for these below.
-    if (!force && fs::exists(outDir + "/iBSS" + tupleSuffix) && fs::exists(outDir + "/iBEC" + tupleSuffix)) {
+    //
+    // THREE files, not two: bake-iboot emits an install iBEC and a tether
+    // iBEC, which differ only in the boot-args compiled into each. They have
+    // to be separate images because a baked boot-args string wins
+    // unconditionally on this bootloader -- see Patcher.hpp's `bootargs`
+    // namespace. `result.iBEC` tracks the pair; a half-written pair counts as
+    // a failure so it is never silently reused.
+    const std::string iBECPath = outDir + "/" + bootargs::kIBECComponent + tupleSuffix;
+    const std::string iBECTetherPath = outDir + "/" + bootargs::kIBECTetherComponent + tupleSuffix;
+    if (!force && fs::exists(outDir + "/iBSS" + tupleSuffix) && fs::exists(iBECPath) &&
+        fs::exists(iBECTetherPath)) {
         result.iBSS = result.iBEC = true;
     } else {
         std::vector<std::string> iargs = {resolveBakeIbootPath(), "--device", device, "--build", buildID,
@@ -386,7 +405,7 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
         if (force) iargs.push_back("--force");
         bool ok = runSubprocess(iargs);
         result.iBSS = ok && fs::exists(outDir + "/iBSS" + tupleSuffix);
-        result.iBEC = ok && fs::exists(outDir + "/iBEC" + tupleSuffix);
+        result.iBEC = ok && fs::exists(iBECPath) && fs::exists(iBECTetherPath);
         if (!result.iBSS || !result.iBEC) addNote(result.note, "iBSS/iBEC: bake-iboot failed");
     }
     // KernelCache is baked by the standalone, rootless `bake-kernel` tool
@@ -461,7 +480,13 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
                   << "# One name per line; the file is <name>" << tupleSuffix << ".\n"
                   << "# Read by Cli.cpp's loadComponentsFromDist(). RestoreRamDisk is\n"
                   << "# listed here but baked separately by the ramdisk half.\n"
-                  << "iBSS\niBEC\nKernelCache\nDeviceTree\n";
+                  << "# iBEC and iBECTether are the same bootloader with different\n"
+                  << "# boot-args compiled in (rd=md0 vs rd=disk0s1s1); blackb0x sends\n"
+                  << "# exactly one of them, chosen by --tether-boot.\n"
+                  << "iBSS\n"
+                  << bootargs::kIBECComponent << "\n"
+                  << bootargs::kIBECTetherComponent << "\n"
+                  << "KernelCache\nDeviceTree\n";
             for (const auto& name : extraComponents) index << name << "\n";
         }
         index.close();
@@ -674,13 +699,18 @@ static RamdiskOutcome bakeRamdiskForTarget(const std::string& device, const std:
     // of persistence/untether payload must be the real target DEVICE's
     // likely OS version, NOT manifest->productVersion (this specific
     // (device, buildID) tuple's own ramdisk vehicle version). Those are
-    // two different things: kJailbreakTargetBuild (Cli.cpp) pins one
-    // fixed, old ramdisk vehicle build used for every real jailbreak
-    // run regardless of device model or what OS the actual device is
-    // running — e.g. baking AppleTV3,2's "10B329a" tuple has a real
-    // ProductVersion around 6.x, but a real AppleTV3,2 being jailbroken
-    // today is almost certainly running something much newer (most
-    // real devices auto-update to the latest available). Persistence
+    // two different things: this baker walks EVERY tuple keys/ knows,
+    // most of them old builds nothing will ever be jailbroken at, and
+    // a live run picks just one of them per device model (Cli.cpp's
+    // kJailbreakTargets) — e.g. baking AppleTV3,2's "10B329a" tuple has
+    // a real ProductVersion around 6.x, but a real AppleTV3,2 being
+    // jailbroken today is almost certainly running something much newer
+    // (most real devices auto-update to the latest available). That the
+    // live target is now the NEWEST build each model ever received means
+    // these two answers happen to agree for the target tuple itself;
+    // they still disagree for every other tuple baked, so the
+    // newest-known-version lookup below stays the right source.
+    // Persistence
     // payloads and firmware-gated Depends: lines need to match what's
     // actually installed on the device's own NAND, which this baked
     // ramdisk never touches or reflects — so assume the newest known

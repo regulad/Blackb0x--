@@ -99,6 +99,45 @@ public:
     void setEventSink(DeviceEventSink sink) { sink_ = std::move(sink); }
     DeviceEventSink& sink() { return sink_; }
 
+    // The longest recovery COMMAND this bootloader will accept intact. Kept,
+    // and still accurate, but note what it no longer applies to: boot-args
+    // are compiled into iBEC now (Patcher.hpp's `bootargs` namespace), and a
+    // baked string never passes through this buffer at all. Its ceiling is
+    // bootargs::kMaxBakedBootArgsLength, which is a different number derived
+    // from different hardware facts -- do not carry 127 over to it.
+    //
+    // What this DOES still bound is every `setenv`/`getenv`/`bootx`/`ramdisk`
+    // command sent over the recovery protocol. The tightest limit is iBoot's
+    // own, it is far below the obvious 256, and it TRUNCATES SILENTLY:
+    //
+    //  1. iBoot's recovery command parser allocates a 0x80-byte command
+    //     buffer and hard-NULs it at [127] (command_parse_and_run, verified
+    //     by disassembling iBoot-1537.9.55 for this exact device/build),
+    //     with argc capped at 8 tokens. 127 bytes is all of any command that
+    //     survives -- and nothing anywhere reports the loss. THE BINDING
+    //     LIMIT.
+    //  2. libirecovery refuses a recovery command of 0x100 bytes or more
+    //     (irecv_send_command_breq() -> IRECV_E_INVALID_INPUT,
+    //     third_party/libirecovery/src/libirecovery.c). That is the only
+    //     limit on this path that fails LOUDLY -- and it sits at twice
+    //     iBoot's, so anything between 128 and 255 bytes is accepted by
+    //     libirecovery, crosses USB intact, and is then quietly chopped.
+    //     Enforcing libirecovery's number would be exactly the
+    //     silent-truncation failure worth avoiding.
+    //
+    // Two further limits bound the kernel command line rather than a
+    // command, and they are the ones a BAKED string has to respect:
+    //  3. XNU's ARM boot_args carries CommandLine[BOOT_LINE_LENGTH], a fixed
+    //     256 bytes on 32-bit ARM (pexpert/pexpert/arm/boot.h; 608 on arm64,
+    //     which is not this device). iBoot snprintf()s straight into it with
+    //     size 0x100 -- confirmed as `MOV.W r1, #0x100` at file offsets
+    //     0x1af7a and 0x1af9c of the decrypted iBEC -- so it truncates
+    //     silently too.
+    //  4. The kern.bootargs sysctl entrypoint.c reads the string back
+    //     through is itself `char buf[256]` (sysctl_sysctl_bootargs(),
+    //     bsd/kern/kern_sysctl.c).
+    static const size_t kMaxRecoveryCommandLength = 127;
+
     // --- Exploits (ported verbatim from the original; see DeviceManager.cpp) ---
     int SHAtter(uint64_t ecid);
     // Shells out to blackb0x-pwn, this project's only pwntool. There used to
@@ -140,18 +179,27 @@ public:
                  const std::string& buildID = "");
     int sendiBEC(const std::string& path, uint64_t ecid);
     int sendRamdisk(const std::string& path, uint64_t ecid);
-    // Boot-args (including rd=md0, since a Ramdisk is always sent before
-    // this now) are set at runtime with `setenv boot-args` rather than
-    // compiled into iBEC -- see sendKernelCache()'s own comment and
-    // Patcher.cpp's patchiBEC().
+    // NO BOOT-ARGS ARE SENT FROM HERE. This used to say they were "set at
+    // runtime with `setenv boot-args` rather than compiled into iBEC"; that
+    // is the exact inversion of what is true, and believing it cost this
+    // project weeks. iBoot never reads the boot-args environment variable on
+    // its kernel-boot path, so the args are COMPILED INTO the iBEC that was
+    // sent earlier in this same sequence (iBoot32Patcher -b, from
+    // Patcher.hpp's `bootargs` namespace, which carries the disassembly).
     // skipBootCheck: when true, return right after 'bootx' is acknowledged
     // instead of reconnecting to poll/read the recovery console
     // (checkDeviceLeftRecoveryModeAfterBoot()). Frees USB immediately so the
     // console can be inspected interactively -- see CliOptions::noShellAttach.
-    // ramdiskBoot: true (default) roots off the uploaded ramdisk (rd=md0);
-    // false uses NAND-root boot-args (no rd=md0) for --tether-boot, which
-    // sends no ramdisk and boots the installed OS off NAND -- see
-    // CliOptions::tetherBoot and the two boot-arg constants in the .cpp.
+    // ramdiskBoot: true (default) means the caller sent dist/iBEC-<tuple>,
+    // whose baked args root off the uploaded ramdisk (rd=md0); false means it
+    // sent dist/iBECTether-<tuple>, whose baked args root off the installed
+    // OS on NAND (rd=disk0s1s1) with no ramdisk uploaded at all. rd= is NOT
+    // omitted in the tether case -- `bootx` from a restore bootloader skips
+    // fsboot's automatic NAND-root setup, so no rd= means no root device.
+    // This flag therefore only selects logging/ordering here; the actual
+    // difference lives in which iBEC image was uploaded. See
+    // CliOptions::tetherBoot and Patcher.hpp's `bootargs` namespace -- there
+    // are no boot-arg constants in the .cpp any more.
     int sendKernelCache(const std::string& path, uint64_t ecid, bool skipBootCheck = false,
                         bool ramdiskBoot = true);
     int sendDeviceTree(const std::string& path, uint64_t ecid);
@@ -215,6 +263,12 @@ public:
 
 private:
     static DeviceManager* instance_;
+
+    // (An orphaned comment fragment used to sit here, describing an
+    // --extra-boot-args member "appended to the boot-args sent at 'bootx'".
+    // There is no such member and no such channel: extra boot-args are baked
+    // in by `bake-iboot --extra-boot-args`, and `blackb0x --extra-boot-args`
+    // hard-fails pointing there. Removed rather than left half-written.)
 
     // RAII window during which this process stays completely off USB and
     // says nothing about what the device is doing -- held while an external

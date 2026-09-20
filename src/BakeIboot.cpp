@@ -36,8 +36,7 @@ static void usage() {
             "usage: %s --device <model> --build <buildID> [--out <dir>] [--force]\n"
             "  Decrypts, patches (iBoot32Patcher) and re-encrypts iBSS + iBEC into\n"
             "  <out>/iBSS-<device>_<buildID> and <out>/iBEC-<device>_<buildID>\n"
-            "  (default <out> = dist). No root needed; reuses bake-firmware's IPSW cache.\n"
-            "  The iBEC gets the -z (lzss size/adler bypass) patch; see PatcherPatch.cpp.\n",
+            "  (default <out> = dist). No root needed; reuses bake-firmware's IPSW cache.\n",
             kProg);
 }
 

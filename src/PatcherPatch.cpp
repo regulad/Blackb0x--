@@ -281,13 +281,20 @@ bool Patcher::patchiBEC(const std::string& path) {
     // cannot find its pattern on some early build, iBoot32Patcher exits
     // nonzero and this function fails loudly, which is a far better outcome
     // than silently shipping an iBEC that still wants a ticket.
-    // -z (patch_lzss_check, our iBoot32Patcher fork) neuters the kernelcache
-    // complzss size + adler32 checks. blackb0x's re-encoded kernelcache decodes
-    // a few trailing (padding) bytes short of the complzss header on this iBoot,
-    // so the stock checks reject a functionally-complete kernel. Only the iBEC
-    // loads the kernelcache, so this is applied here, not on iBSS. See
-    // docs/HISTORY.md (the LZSS investigation) for why this is safe.
-    std::vector<std::string> iBECArgs = {"-r", "-k", "-t", "-z"};
+    // NO -z. The -z patch (patch_lzss_check in our iBoot32Patcher fork) neuters
+    // iBoot's kernelcache complzss size + adler32 checks, on the theory that the
+    // 38-byte-short decode was harmless trailing padding. That theory is WRONG:
+    // with -z applied, --tether-boot (which boots the NAND OS off the patched
+    // kernel, no ramdisk) still fails, and iBoot's *Boot Failure Count*
+    // increments while its *Panic Fail Count* does NOT -- i.e. iBoot never hands
+    // control to the kernel (no panic), it aborts the boot because the kernel
+    // image it produced is invalid. Suppressing the size/adler check just hid
+    // the complaint; the kernelcache is genuinely malformed as iBoot receives
+    // it. So -z is walked back to restore the check as our oracle while the real
+    // cause (why iBoot decodes 38 bytes short of a stream that decodes fully
+    // off-device) is tracked down. The fork keeps the -z capability, unused;
+    // see docs/HISTORY.md.
+    std::vector<std::string> iBECArgs = {"-r", "-k", "-t"};
 
     // ONE patched iBEC now, not two. The downgrade/boot pair only ever
     // differed by the boot-args compiled into each (args1 carried rd=md0,

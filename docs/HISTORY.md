@@ -4492,3 +4492,110 @@ that same build for a clean boot (a large version skew may panic; even a partial
 boot still proves the kernel decompressed and executed). It installs nothing —
 `needsPostInstall` stays unset — and is mutually exclusive with the `--stock-*`
 diagnostics, which drive their own send paths.
+
+## SOLVED: the kernelcache "Size mismatch from lzss" was an IMG3 DATA alignment bug (xpwn PR #7), not compression
+
+After a long chase this was root-caused, fixed, and verified. The whole "the
+kernelcache is malformed / compression is broken" saga above resolves to a
+one-line regression in the vendored xpwn, in the IMG3 re-encryption — nothing to
+do with LZSS itself.
+
+### How it was cornered
+
+1. **`--tether-boot` isolated it to the kernel.** Booting the stock NAND OS off
+   our patched kernel (no ramdisk) failed the same way, and iBoot's **Boot
+   Failure Count incremented while Panic Fail Count did NOT** — i.e. iBoot never
+   handed control to the kernel; it rejected the image at load. So the fault was
+   in the kernelcache load, common to both the install and tether paths, and the
+   `-z` lzss-check bypass had only ever *masked* the complaint (it was walked
+   back).
+
+2. **The earlier "compression exonerated" finding had tested the wrong oracle.**
+   Every off-device round-trip used xpwn's own decoder (and a reimplementation),
+   which agreed with xpwn's own encoder — of course it did. The real oracle is
+   iBoot, and the hardware said no.
+
+3. **A byte-structure audit of the IMG3 DATA element** (stock download vs our
+   re-encrypted output, keys not even needed — the tag headers are cleartext)
+   showed both declare `length_uncompressed = 0xa00000`, so the complzss header
+   was fine. The difference was structural:
+
+   | | DATA `dataLength` | `dataLength % 16` | `totalLength - 12` (AES body) | `% 16` |
+   |---|---|---|---|---|
+   | **Stock (boots)** | 0x5ba041 | 1 | 0x5ba050 | **0** |
+   | **Ours (fails)** | 0x5b9fd9 | 9 | 0x5b9fdc | **12** |
+
+   Apple pads the DATA element so its AES body is **16-aligned**; ours was only
+   **4-aligned**, leaving a partial final AES-CBC block.
+
+4. **A survey settled that it is a universal Apple invariant, not a
+   coincidence.** Across **108 DATA elements — 27 IPSWs, 10 devices (iPhone3,1 …
+   AppleTV3,2), 10 iOS versions (4.3–10.3), components kernelcache/iBSS/iBEC/LLB
+   — `(totalLength - 12) % 16 == 0` held in every single case, zero exceptions**,
+   while `dataLength` stayed the true (usually not-16-aligned) length and TYPE/
+   KBAG were only 4-aligned. So Apple always 16-aligns the *encrypted DATA*
+   element specifically; the true length lives in `dataLength`.
+
+### Root cause
+
+The DATA payload is AES-CBC encrypted. AES-CBC only processes whole 16-byte
+blocks; both Apple's tooling and xpwn leave anything past the last full block as
+plaintext. Apple avoids the problem entirely by padding the DATA element to a
+16-byte boundary, so **there is never a partial final block** — the whole
+compressed stream is inside full, encrypted blocks. Our re-encryption produced a
+DATA element ending 9 bytes into a partial block, so the last 9 compressed bytes
+were left un-encrypted, and iBoot's handling of that partial tail corrupted them
+— the complzss decoder then hit garbage near the end and stopped ~38 output
+bytes short of the declared `0xa00000` ("Size mismatch from lzss 0x9fffda,
+should be 0xa00000"). The stock kernel survives the same class of layout because
+its stream happens to end only **1** byte into the tail (tolerable); ours ended
+**9** bytes in (several LZSS tokens).
+
+The regression is **xpwn [PR #7](https://github.com/planetbeing/xpwn/pull/7)**
+(Djayb6). Upstream originally computed `size = (((dataSize + 16) / 16) * 16) +
+sizeof(AppleImg3Header)` — a 16-aligned DATA body. PR #7 replaced it with
+`size = dataSize + sizeof(AppleImg3Header)` plus a 4-byte align, to stop xpwn
+adding a stray 16 bytes to *already*-16-aligned bootloaders (which broke SHSH
+partial-hash byte-identity). That fix was right for bootloaders but threw out the
+alignment kernelcaches depend on. Our fork sat on the post-PR-#7 behavior, so
+`bake-kernel`'s output was 4-aligned. This also finally explains why the original
+NSSpiral/Blackb0x — which links the *same* xpwn `compress_lzss` and img3 path —
+was fragile here: whether a given kernel booted came down to where its compressed
+length happened to land relative to 16.
+
+### The fix (in the `regulad/xpwn@legacy` fork, `ipsw-patch/img3.c`)
+
+Three coordinated changes, scoped to the encrypted DATA element:
+
+- **`writeImg3()` grow path:** 16-align the element body with a true ceiling,
+  `alignedBody = ((dataSize + 15) / 16) * 16`. This adds nothing when `dataSize`
+  is already 16-aligned (so iBSS/iBEC output is byte-for-byte unchanged and PR
+  #7's "no stray 16 bytes" goal is still honored) and rounds up only when it is
+  not — i.e. only the kernelcache moves. The buffer is allocated to
+  `alignedBody + IMG3_AES_OVERREAD_PAD` and everything past the true `dataSize`
+  (the 16-align pad and the wolfSSL over-read slack) is zeroed so the padding
+  encrypts deterministically.
+- **`closeImg3()` encrypt:** encrypt the whole aligned body,
+  `((size - sizeof(AppleImg3Header)) / 16) * 16`, instead of
+  `(dataSize / 16) * 16` — so the last real bytes are inside a full encrypted
+  block, no plaintext tail. `setKeyImg3()`'s decrypt already uses this length, so
+  the round-trip stays symmetric.
+- **`writeImg3Default()`:** for the encrypted DATA element only, write the whole
+  encrypted body (`size - sizeof(AppleImg3Header)`) straight from the buffer,
+  rather than `dataSize` bytes plus fresh zeros — otherwise the encrypted pad
+  (the tail of the final cipher block) would be replaced by zeros on disk and
+  corrupt the last real block on decrypt. Other elements, and the already-aligned
+  bootloaders (`paddingSize == 0`), keep the original zero-fill path.
+
+### Verified
+
+`bake-kernel` output for AppleTV3,2 10B329a now has DATA body `0x5b9fe0`
+(`% 16 == 0`) with `dataLength` still the true `0x5b9fd9`; decrypting the full
+body and decompressing yields exactly `0xa00000` with a valid `FEEDFACE` Mach-O
+at the front — byte-structurally identical to how Apple lays out the DATA
+element. iBSS/iBEC output is unchanged (their `dataLength` is already
+16-aligned). A separate check confirmed the CI kernelcache itself always
+contained a complete, real XNU kernel (`Darwin Kernel Version 13.0.0 …
+xnu-2107.7.55.2.2 … RELEASE_ARM_S5L8947X`) — the artifact was never the problem,
+only its IMG3 packaging. Hardware confirmation via `--tether-boot` is the next
+step.

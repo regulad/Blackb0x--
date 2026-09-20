@@ -281,7 +281,13 @@ bool Patcher::patchiBEC(const std::string& path) {
     // cannot find its pattern on some early build, iBoot32Patcher exits
     // nonzero and this function fails loudly, which is a far better outcome
     // than silently shipping an iBEC that still wants a ticket.
-    std::vector<std::string> iBECArgs = {"-r", "-k", "-t"};
+    // -z (patch_lzss_check, our iBoot32Patcher fork) neuters the kernelcache
+    // complzss size + adler32 checks. blackb0x's re-encoded kernelcache decodes
+    // a few trailing (padding) bytes short of the complzss header on this iBoot,
+    // so the stock checks reject a functionally-complete kernel. Only the iBEC
+    // loads the kernelcache, so this is applied here, not on iBSS. See
+    // docs/HISTORY.md (the LZSS investigation) for why this is safe.
+    std::vector<std::string> iBECArgs = {"-r", "-k", "-t", "-z"};
 
     // ONE patched iBEC now, not two. The downgrade/boot pair only ever
     // differed by the boot-args compiled into each (args1 carried rd=md0,

@@ -371,13 +371,24 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
         return true;
     };
 
-    // Matches the non-stock branches of Cli.cpp's downloadAndPatchComponents()
-    // exactly -- this tool only ever produces the real jailbreak suite, so
-    // none of the --stock-* diagnostic routes apply.
-    result.iBSS = fetchAndPatch("iBSS", manifest->iBSSPath,
-                                 [&](const std::string& p) { return patcher.patchiBSS(p); });
-    result.iBEC = fetchAndPatch("iBEC", manifest->iBECPath,
-                                 [&](const std::string& p) { return patcher.patchiBEC(p); });
+    // iBSS + iBEC are baked by the standalone, rootless `bake-iboot` tool
+    // (BakeIboot.cpp), and the kernelcache by `bake-kernel`, rather than
+    // in-process -- so each patch pipeline can be run and instrumented
+    // independently of a full bake. Shell out unless the dist/ outputs are
+    // already present; each tool reuses this same ipswDataRoot() download cache
+    // and publishes straight to outDir, so there are no in-process patch*()
+    // calls or publish() calls for these below.
+    if (!force && fs::exists(outDir + "/iBSS" + tupleSuffix) && fs::exists(outDir + "/iBEC" + tupleSuffix)) {
+        result.iBSS = result.iBEC = true;
+    } else {
+        std::vector<std::string> iargs = {resolveBakeIbootPath(), "--device", device, "--build", buildID,
+                                          "--out", outDir};
+        if (force) iargs.push_back("--force");
+        bool ok = runSubprocess(iargs);
+        result.iBSS = ok && fs::exists(outDir + "/iBSS" + tupleSuffix);
+        result.iBEC = ok && fs::exists(outDir + "/iBEC" + tupleSuffix);
+        if (!result.iBSS || !result.iBEC) addNote(result.note, "iBSS/iBEC: bake-iboot failed");
+    }
     // KernelCache is baked by the standalone, rootless `bake-kernel` tool
     // (BakeKernel.cpp) rather than in-process, so the kernel patch pipeline
     // can be run and instrumented independently of a full bake. Shell out to
@@ -430,9 +441,8 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
     }
 
     const PatchedComponents& out = patcher.components();
-    if (result.iBSS && out.iBSS) result.iBSS = publish(*out.iBSS, outDir, "iBSS" + tupleSuffix, result.note);
-    if (result.iBEC && out.iBEC) result.iBEC = publish(*out.iBEC, outDir, "iBEC" + tupleSuffix, result.note);
-    // KernelCache is published by bake-kernel itself (shelled out above), not here.
+    // iBSS/iBEC are published by bake-iboot, and KernelCache by bake-kernel
+    // (both shelled out above), not here.
     if (result.deviceTree && out.deviceTree)
         result.deviceTree = publish(*out.deviceTree, outDir, "DeviceTree" + tupleSuffix, result.note);
 

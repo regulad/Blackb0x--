@@ -55,6 +55,11 @@ std::string resolveBakeFirmwarePath();
 // this per tuple for the kernelcache half.
 std::string resolveBakeKernelPath();
 
+// Absolute path to the sibling `bake-iboot` binary, overridable via
+// $BLACKB0X_BAKE_IBOOT. bake-firmware shells out to it per tuple for the
+// iBSS/iBEC half, same as bake-kernel for the kernelcache.
+std::string resolveBakeIbootPath();
+
 // Resolves the path to the `iBoot32Patcher` binary (see CMakeLists.txt --
 // built from the third_party/iBoot32Patcher submodule as its own executable,
 // landing alongside blackb0x itself): $BLACKB0X_IBOOT32PATCHER if set,

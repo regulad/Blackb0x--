@@ -1394,7 +1394,7 @@ target_link_libraries(bake-firmware PRIVATE
 # binary for the tool to do anything. A build dependency rather than a link
 # one.
 add_dependencies(bake-firmware
-    iBoot32Patcher bake-kernel
+    iBoot32Patcher bake-kernel bake-iboot
     libplist_ext libfragmentzip_ext libgeneral_ext
     wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
 
@@ -1439,6 +1439,46 @@ target_link_libraries(bake-kernel PRIVATE
 
 add_dependencies(bake-kernel
     CBPatcher
+    libplist_ext libfragmentzip_ext libgeneral_ext
+    wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
+
+# ---------------------------------------------------------------------------
+# bake-iboot — standalone, rootless iBSS+iBEC baker (BakeIboot.cpp)
+#
+# Same split/rationale as bake-kernel, for the bootloader half. bake-firmware
+# shells out to it per tuple (resolveBakeIbootPath()). Same deps as bake-kernel
+# but fork/execs iBoot32Patcher (patchiBSS/patchiBEC), not CBPatcher.
+# ---------------------------------------------------------------------------
+add_executable(bake-iboot
+    src/BakeIboot.cpp
+    src/IPSW.cpp
+    src/IPSWDownloader.cpp
+    src/Patcher.cpp
+    src/PatcherPatch.cpp
+    src/Img3Crypt.cpp
+    src/StockIBSSCrypt.cpp
+    src/ResourcePath.cpp)
+
+target_include_directories(bake-iboot PRIVATE third_party/xpwn/includes)
+
+target_link_libraries(bake-iboot PRIVATE
+    xpwn
+    deps::plist
+    deps::fragmentzip
+    deps::general
+    deps::curl
+    deps::wolfssl
+    ZLIB::ZLIB)
+
+target_link_libraries(bake-iboot PRIVATE
+    "-framework CoreFoundation"
+    "-framework Security"
+    "-framework SystemConfiguration")
+
+# iBoot32Patcher is fork/exec'd by patchiBSS()/patchiBEC() at runtime, so it
+# must exist next to this binary.
+add_dependencies(bake-iboot
+    iBoot32Patcher
     libplist_ext libfragmentzip_ext libgeneral_ext
     wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
 
@@ -1607,5 +1647,5 @@ add_custom_target(jailbreak
     COMMENT "Built the jailbreak binaries (blackb0x and blackb0x-pwn)")
 
 add_custom_target(authoring
-    DEPENDS bake-firmware bake-kernel apt blackb0x_tests xpwntool iBoot32Patcher CBPatcher
-    COMMENT "Built the authoring tools (bake-firmware, bake-kernel, vendored apt, tests, xpwntool)")
+    DEPENDS bake-firmware bake-kernel bake-iboot apt blackb0x_tests xpwntool iBoot32Patcher CBPatcher
+    COMMENT "Built the authoring tools (bake-firmware, bake-kernel, bake-iboot, vendored apt, tests, xpwntool)")

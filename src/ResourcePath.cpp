@@ -89,6 +89,15 @@ std::string resolveBakeKernelPath() {
     return "bake-kernel";
 }
 
+std::string resolveBakeIbootPath() {
+    if (const char* override_ = getenv("BLACKB0X_BAKE_IBOOT")) {
+        return std::string(override_);
+    }
+    std::string dir = resolveOwnExecutableDir();
+    if (!dir.empty()) return dir + "/bake-iboot";
+    return "bake-iboot";
+}
+
 std::string resolveIBoot32PatcherPath() {
     if (const char* override_ = getenv("BLACKB0X_IBOOT32PATCHER")) {
         return std::string(override_);

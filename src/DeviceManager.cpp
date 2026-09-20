@@ -1302,10 +1302,35 @@ int DeviceManager::sendiBEC(const std::string& iBECpath, uint64_t ecid) {
     irecv_error_t err = irecv_send_file(client, iBECpath.c_str(), IRECV_SEND_OPT_DFU_NOTIFY_FINISH);
     if (err != IRECV_E_SUCCESS) {
         fprintf(stderr, "sendiBEC: failed to send %s: %s\n", iBECpath.c_str(), irecv_strerror(err));
+        irecv_close(client);
+        sleep(2);
+        return -1;
     }
+
+    // Execute the just-uploaded iBEC, matching real idevicerestore's
+    // dfu_enter_recovery() (dfu.c) / recovery_send_ibec() (recovery.c) rather
+    // than the original blackb0x, which sent nothing here and relied on
+    // IRECV_SEND_OPT_DFU_NOTIFY_FINISH alone to jump into the image. Favouring
+    // idevicerestore, the maintained reference: after the upload it does
+    // sleep(1), then `go` as a bRequest=1 command (irecv_send_command_breq),
+    // then a zero-length DFU_DNLOAD-class control transfer (0x21/1, wLength=0)
+    // -- the "commit/execute" step, gated on build_major < 20 there, always
+    // true for this A5 hardware. NOTIFY_FINISH finalizes the download; `go` is
+    // the actual jump. `go` is best-effort here (logged, not fatal): the
+    // device re-enumerates into Recovery mode as it executes iBEC, so the
+    // command can legitimately return before the follow-up transfer lands, and
+    // the next step (RestoreLogo) reconnects with get_tv_patient() regardless.
+    sleep(1);
+    irecv_error_t goErr = irecv_send_command_breq(client, "go", 1);
+    if (goErr != IRECV_E_SUCCESS) {
+        fprintf(stderr, "sendiBEC: 'go' after iBEC returned %s (continuing -- iBEC likely already executing)\n",
+                irecv_strerror(goErr));
+    }
+    irecv_usb_control_transfer(client, 0x21, 1, 0, 0, nullptr, 0, 5000);
+
     irecv_close(client);
     sleep(2);
-    return (err == IRECV_E_SUCCESS) ? 0 : -1;
+    return 0;
 }
 
 // Shared by sendRamdisk()/sendKernelCache()/sendDeviceTree() below: send a

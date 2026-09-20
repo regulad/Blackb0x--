@@ -4144,3 +4144,49 @@ groups), prep, and parse:
 
 The separate, ultimate goal — a real jailbroken boot via the patched `dist/`
 ramdisk — is untouched by this and remains open.
+
+## Three-way send-flow comparison (original blackb0x vs idevicerestore vs our port): the missing `go` after iBEC
+
+"No path boots." Rather than keep guessing, the post-exploit send sequence was
+extracted faithfully from two references and compared line-by-line against our
+port: (a) the ORIGINAL Objective-C blackb0x (`git show 907b64b^:...`,
+`MainView.m -componentsReady:`, `DeviceManager.m`, `Patcher.mm`) — a
+known-working AppleTV 2/3 jailbreak — and (b) the vendored idevicerestore
+(`recovery.c`/`dfu.c`/`idevicerestore.c`).
+
+What the comparison **ruled out** (so nobody re-chases them):
+
+- **iBEC encrypted vs decrypted** — our `patchiBEC()` re-encrypts via the
+  template trick (`decrypt(patched, out, key, iv, "FALSE", original)`), so the
+  baked iBEC is a signed/encrypted img3, exactly like the original's, which
+  iBSS's iBoot AES-decrypts via KBAG+GID. Correct on both.
+- **ATV3 iBSS decrypted** — both send the decrypted+patched iBSS for the
+  boot_client route. Correct.
+- **`setenv auto-boot false` + `saveenv`** — the original never sent it and
+  worked; its omission on our non-stock path is intentional (confirmed by the
+  maintainer), not the cause.
+- **Component order** — the original untethered order is
+  iBSS→iBEC→DeviceTree→Ramdisk→Kernel; idevicerestore and we use
+  Ramdisk→DeviceTree. Left as-is: both images are tagged before `bootx`, so
+  iBoot doesn't care, and it's not worth churning.
+
+The **one substantive divergence acted on**: after uploading iBEC, real
+idevicerestore **executes it** — `dfu_enter_recovery()` does `sleep(1)`,
+`irecv_send_command_breq(client, "go", 1)`, then a zero-length DFU_DNLOAD-class
+control transfer `(0x21, 1, 0, 0, NULL, 0)` (guarded `build_major < 20`, always
+true for A5), and `recovery_send_ibec()` does the same `go`+zero-length. The
+original blackb0x sent **nothing** after the iBEC file — it relied on
+`IRECV_SEND_OPT_DFU_NOTIFY_FINISH` alone to jump into the image — and our port
+inherited that. Per the maintainer's call to favour idevicerestore (the
+maintained reference) over the OG here, `sendiBEC()` now issues the same
+`go` (bRequest=1) + zero-length execute transfer after the upload. `go` is
+best-effort (logged, non-fatal): the device re-enumerates into Recovery as
+iBEC starts, so the command can return before the follow-up transfer lands, and
+the next step reconnects via `get_tv_patient()` anyway.
+
+If iBEC was previously not fully executing (NOTIFY_FINISH finalizing the
+download without a clean jump), that also plausibly explains the
+`--stock-securerom` panic right at RestoreLogo/`setpicture 4` — the first
+command issued to a not-properly-running iBEC. RestoreLogo/`setpicture` is kept
+(per the maintainer) rather than dropped; the `go` fix is the first thing to
+retest before investigating `setpicture` further.

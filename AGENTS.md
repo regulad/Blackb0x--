@@ -95,7 +95,14 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   files above) has been fully ported and deleted — check `docs/HISTORY.md`/git
   history if you need to see what it looked like. `checkm8.h`/`SHAtter.h` are exploit
   payload byte arrays, `#include`d directly by `DeviceManager.cpp` — not leftover
-  Cocoa, keep these.
+  Cocoa, keep these. `bootkit.c`/`bootkit.h` are vendored C too: `dfu_boot()`, copied
+  and trimmed from NyanSatan's [checkm8_bootkit](https://github.com/NyanSatan/checkm8_bootkit)
+  (flattened form the original app carried), it boots the iBSS on **AppleTV3,2** via
+  ipwndfu's `"exec"` USB protocol + a CPID-0x8947 trampoline — the checkm8 payload
+  won't run a raw upload. `sendiBSS_ATV32()` calls it instead of `boot_client()` (which
+  stays for AppleTV3,1). checkm8_bootkit declares no license; kept under the same
+  research-tool terms as `checkm8.h`/`SHAtter.h`, with provenance in the file header.
+  Only what's needed is copied — one CPID config, no `main`/tool/debug paths.
 - `src/Pwn/` — the standalone `blackb0x-pwn` exploit binary's own C sources
   (`main.c`, `Checkm8Pwn.c`), separate from the main CLI.
 - `src/libraries/` is **gone**. It held copied/adapted upstream C

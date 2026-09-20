@@ -4190,3 +4190,45 @@ download without a clean jump), that also plausibly explains the
 command issued to a not-properly-running iBEC. RestoreLogo/`setpicture` is kept
 (per the maintainer) rather than dropped; the `go` fix is the first thing to
 retest before investigating `setpicture` further.
+
+## AppleTV3,2 iBSS never executed: the missing checkm8_bootkit trampoline (`dfu_boot`)
+
+The `--send-only ibss|ibec` diagnostic (added for exactly this) settled where the
+boot chain dies on a real AppleTV3,2 (CPID 0x8947). After `--send-only ibss`,
+`irecovery -s` reported **iBoot-2261.30.37 on both the stock and non-stock paths** —
+which is *not* any build we upload (our jailbreak build 10B329a is iBoot-1458.2). That
+version is the device's own installed OS iBoot (Apple TV Software 7.x / iOS 8.x era):
+our uploaded iBSS never ran, the device reset, and it fell back to NAND iBoot, which is
+what printed "Memory image not valid" and what the recovery serial at the end reported.
+So the whole downstream hunt (RestoreLogo/`setpicture`, kernelcache) was moot — the
+failure is right at the top, the iBSS handoff.
+
+Root cause, found by comparing against the original Objective-C app: the original
+delivered iBSS on **AppleTV3,2 specifically** via `libbootkit`'s `dfu_boot()`, not the
+`boot_client()` it used for AppleTV3,1. `libbootkit` is NyanSatan's
+[checkm8_bootkit](https://github.com/NyanSatan/checkm8_bootkit) (flattened into the
+app). Its `dfu_boot()` wraps the iBSS in an `"exec"` `usb_command_t` (ipwndfu's custom
+protocol) followed by a device-specific ARM boot trampoline carrying the CPID-0x8947
+SecureROM offsets (`platform_bootprep`, `arch_cpu_quiesce`, `memmove`,
+`platform_get_boot_trampoline`, …). The checkm8 payload our exploit installs
+(`checkm8_payload_8947`) only *executes* an uploaded image when it sees that `"exec"`
+command; it ignores a raw image. Our port had dropped `libbootkit` and routed
+AppleTV3,2 through `boot_client()` — a raw image upload with no `"exec"` wrapper and no
+trampoline — so the payload uploaded the iBSS to RAM and never jumped to it.
+
+Fix: vendored the needed piece of checkm8_bootkit into flat `src/` — `bootkit.c` /
+`bootkit.h`, `dfu_boot()` plus its helpers (`validate_device`, `construct_command`,
+`construct_payload`, `send_command`, `send_chunks`, `get_config`), the CPID-0x8947
+config, and the trampoline payload blob (reproduced from `payload.S` in a comment, not
+cross-compiled). `sendiBSS_ATV32()` now calls `dfu_boot()`; `boot_client()` stays for
+AppleTV3,1. Only what's needed was copied — no `main`/tool, no logging/ops/protocol
+split of current upstream, no `save_command`/debug dump, no configs for other SoCs.
+checkm8_bootkit declares no license; kept under the same research-tool terms as
+`checkm8.h`/`SHAtter.h`, attributed in the file header. Considered a proper git
+submodule but rejected it: upstream has no license, its current form is refactored and
+depends on its own `lilirecovery` fork + Objective-C, and it never contained the
+flattened single-file `dfu_boot()` we actually use.
+
+Retest with `--send-only ibss`: if `irecovery -s` now reports **iBoot-1458.2**, our
+iBSS is finally executing and the investigation moves to the iBEC load; if it still
+reports 2261.30.37, `dfu_boot()`'s trampoline/offsets need another look.

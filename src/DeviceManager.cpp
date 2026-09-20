@@ -24,6 +24,7 @@
 #include "Personalize.hpp"
 #include "ResourcePath.hpp"
 #include "SHAtter.h"
+#include "bootkit.h"
 
 #include <plist/plist.h>
 
@@ -1964,7 +1965,16 @@ static int sendiBSS_ATV32(uint64_t ecid, const char* path, bool allowUnpwned) {
         return -1;
     }
 
-    int ret = boot_client(client, buffer, buffer_size, allowUnpwned);
+    // AppleTV3,2 boots iBSS via checkm8_bootkit's dfu_boot() (bootkit.c), NOT
+    // boot_client(): the checkm8 payload only executes an image wrapped in the
+    // "exec" usb_command_t + the CPID-0x8947 trampoline dfu_boot() builds. The
+    // old port wrongly reused the AppleTV3,1 raw-upload boot_client() here, so
+    // the iBSS was uploaded but never run (device fell back to installed
+    // iBoot). dfu_boot() validates PWND:[checkm8] itself, so allowUnpwned no
+    // longer applies on this path; it does not close `client`, so close here.
+    (void)allowUnpwned;
+    int ret = dfu_boot(client, buffer, (size_t)buffer_size);
+    irecv_close(client);
     free(buffer);
     close(handle);
     return (ret == 0) ? 0 : 1;

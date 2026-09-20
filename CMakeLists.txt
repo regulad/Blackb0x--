@@ -1175,6 +1175,9 @@ add_executable(blackb0x
     src/Cli.cpp
     src/Console.cpp
     src/DeviceManager.cpp
+    # checkm8_bootkit's dfu_boot() (AppleTV3,2 iBSS boot). Vendored C, see
+    # src/bootkit.c's provenance header. Uses only deps::irecovery (propagated).
+    src/bootkit.c
     src/IPSW.cpp
     src/IPSWDownloader.cpp
     src/Patcher.cpp

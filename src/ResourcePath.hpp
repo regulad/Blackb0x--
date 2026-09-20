@@ -49,6 +49,12 @@ std::string resolvePwnPath();
 // a mount.
 std::string resolveBakeFirmwarePath();
 
+// Absolute path to the sibling `bake-kernel` binary (next to the running
+// executable), overridable via $BLACKB0X_BAKE_KERNEL. Same resolution
+// strategy as resolveBakeFirmwarePath() above -- bake-firmware shells out to
+// this per tuple for the kernelcache half.
+std::string resolveBakeKernelPath();
+
 // Resolves the path to the `iBoot32Patcher` binary (see CMakeLists.txt --
 // built from the third_party/iBoot32Patcher submodule as its own executable,
 // landing alongside blackb0x itself): $BLACKB0X_IBOOT32PATCHER if set,

@@ -244,6 +244,30 @@ static bool publish(const std::string& from, const std::string& toDir, const std
     return true;
 }
 
+// Fork/exec/wait a foreground subprocess, inheriting stdio so its output
+// (e.g. bake-kernel's [size] instrumentation) prints straight through. Same
+// shape as Cli.cpp's runForeground(); kept local rather than shared to avoid
+// pulling Cli.cpp's other machinery into this authoring binary.
+static bool runSubprocess(const std::vector<std::string>& argv) {
+    std::vector<char*> cargv;
+    cargv.reserve(argv.size() + 1);
+    for (const auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
+    cargv.push_back(nullptr);
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "runSubprocess: fork() failed for %s: %s\n", argv[0].c_str(), strerror(errno));
+        return false;
+    }
+    if (pid == 0) {
+        execvp(cargv[0], cargv.data());
+        fprintf(stderr, "runSubprocess: cannot execute %s: %s\n", cargv[0], strerror(errno));
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 static TargetResult bakeBootchainInProcess(const std::string& device, const std::string& buildID,
                                             const std::string& outRoot, bool force) {
     TargetResult result;
@@ -354,9 +378,21 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
                                  [&](const std::string& p) { return patcher.patchiBSS(p); });
     result.iBEC = fetchAndPatch("iBEC", manifest->iBECPath,
                                  [&](const std::string& p) { return patcher.patchiBEC(p); });
-    result.kernel = fetchAndPatch("KernelCache", manifest->kernelCachePath, [&](const std::string& p) {
-        return patcher.patchKernel(p, manifest->productVersion);
-    });
+    // KernelCache is baked by the standalone, rootless `bake-kernel` tool
+    // (BakeKernel.cpp) rather than in-process, so the kernel patch pipeline
+    // can be run and instrumented independently of a full bake. Shell out to
+    // it unless the dist/ kernel is already present -- it reuses this same
+    // ipswDataRoot() download cache and publishes straight to outDir, so
+    // there is no in-process patchKernel() call or kernel publish() below.
+    if (!force && fs::exists(outDir + "/KernelCache" + tupleSuffix)) {
+        result.kernel = true;
+    } else {
+        std::vector<std::string> kargs = {resolveBakeKernelPath(), "--device", device, "--build", buildID,
+                                          "--out", outDir};
+        if (force) kargs.push_back("--force");
+        result.kernel = runSubprocess(kargs) && fs::exists(outDir + "/KernelCache" + tupleSuffix);
+        if (!result.kernel) addNote(result.note, "KernelCache: bake-kernel failed");
+    }
     // DeviceTree is sent unmodified (see Patcher.hpp's setDeviceTreePath()) --
     // there is no patch step to fail, only the download.
     result.deviceTree = fetchAndPatch("DeviceTree", manifest->deviceTreePath, [&](const std::string& p) {
@@ -396,8 +432,7 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
     const PatchedComponents& out = patcher.components();
     if (result.iBSS && out.iBSS) result.iBSS = publish(*out.iBSS, outDir, "iBSS" + tupleSuffix, result.note);
     if (result.iBEC && out.iBEC) result.iBEC = publish(*out.iBEC, outDir, "iBEC" + tupleSuffix, result.note);
-    if (result.kernel && out.kernel)
-        result.kernel = publish(*out.kernel, outDir, "KernelCache" + tupleSuffix, result.note);
+    // KernelCache is published by bake-kernel itself (shelled out above), not here.
     if (result.deviceTree && out.deviceTree)
         result.deviceTree = publish(*out.deviceTree, outDir, "DeviceTree" + tupleSuffix, result.note);
 

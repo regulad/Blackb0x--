@@ -400,6 +400,15 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
         return false;
     }
 
+    // [size instrumentation] The kernelcache boot failure ("Size mismatch from
+    // lzss ..., should be ...") is a complzss length problem: iBoot decompresses
+    // fewer bytes than the header claims. Log the byte size at each stage so a
+    // bake pinpoints where the length diverges -- decPath is xpwn's
+    // decompression of the original kernelcache; patchedPath is CBPatcher's
+    // output; outPath is the re-encrypted result. See docs/HISTORY.md.
+    fprintf(stderr, "patchKernel: [size] decrypted/decompressed kernel = %llu bytes (decPath)\n",
+            (unsigned long long)fs::file_size(decPath, decEc));
+
     int patchResult = runCBPatcher({decPath, patchedPath, internalFirmware});
     if (patchResult != 0) {
         // CBPatcher never writes patchedPath on failure — the previous
@@ -413,12 +422,35 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
         fs::remove(decPath, ec);
         return false;
     }
+    {
+        std::error_code szEc;
+        unsigned long long decSz = (unsigned long long)fs::file_size(decPath, szEc);
+        unsigned long long patSz = (unsigned long long)fs::file_size(patchedPath, szEc);
+        fprintf(stderr,
+                "patchKernel: [size] CBPatcher output = %llu bytes (patchedPath); input was %llu -- %s\n",
+                patSz, decSz,
+                (patSz == decSz) ? "unchanged (in-place patch, as expected)"
+                                 : "*** SIZE CHANGED -- CBPatcher altered the kernel length ***");
+    }
+
     decrypt(const_cast<char*>(patchedPath.c_str()), const_cast<char*>(outPath.c_str()),
             const_cast<char*>(k->key.c_str()), const_cast<char*>(k->iv.c_str()), (char*)"FALSE",
             const_cast<char*>(path.c_str()));
 
+    {
+        std::error_code szEc;
+        fprintf(stderr, "patchKernel: [size] re-encrypted kernelcache = %llu bytes (outPath)\n",
+                (unsigned long long)fs::file_size(outPath, szEc));
+    }
+
     std::error_code ec;
-    fs::remove(decPath, ec);
+    // Debug: BLACKB0X_KEEP_KERNEL_TEMPS keeps decPath (the decrypted/
+    // decompressed, UNPATCHED kernel fed into CBPatcher) for inspection --
+    // used when diffing patcher output or the complzss pipeline. patchedPath
+    // (CBPatcher's output) is already left in place regardless. Off by default.
+    if (!getenv("BLACKB0X_KEEP_KERNEL_TEMPS")) {
+        fs::remove(decPath, ec);
+    }
 
     outputs_.kernel = outPath;
     checkPatching();

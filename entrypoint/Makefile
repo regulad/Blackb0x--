@@ -38,16 +38,8 @@ LDFLAGS := -static -Wl,-e,_entry -nostartfiles
 # under sudo with Theos and afsctool, the ~30-minute job CI exists to spare
 # users, just to arm one diagnostic.
 #
-# Diagnostics are RUNTIME DIRECTIVES read out of the kernel boot-args now (see
-# entrypoint/bootargs.h), so a stock CI-baked ramdisk can arm one without
-# being rebuilt. Boot-args are compiled into the iBEC on this hardware, so
-# arming one is a rootless, seconds-long re-bake of that instead:
-#
-#     ./build/bake-iboot --device <m> --build <b> --force \
-#         --extra-boot-args "blackb0x.skip-install=1"
-#
-# and the binary built here is the same binary either way. Anything new that
-# needs to be switchable on a device belongs there, not in a -D.
+# The runtime alternative that briefly replaced it is gone too. See
+# entrypoint.c's header comment.
 
 # entrypoint replaces /sbin/launchd's content directly (see
 # BakeRamdisk.cpp's spliceFileContentInPlace() call), so it's signed under
@@ -65,7 +57,7 @@ TARGET := entrypoint
 
 all: $(TARGET)
 
-$(TARGET): entrypoint.c bootargs.h
+$(TARGET): entrypoint.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
 	$(LDID) -S -I$(LAUNCHD_IDENTIFIER) $@
 

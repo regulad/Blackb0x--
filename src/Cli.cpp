@@ -139,14 +139,9 @@ void printCliUsage(const char* argv0) {
     printf("                            means re-baking it -- seconds, and no root:\n");
     printf("                              ./build/bake-iboot --device <m> --build <b> --force \\\n");
     printf("                                                 --extra-boot-args \"<s>\"\n");
-    printf("                            That is how entrypoint.c (the ramdisk's PID 1) is\n");
-    printf("                            configured without re-baking the RAMDISK: it reads\n");
-    printf("                            kern.bootargs and parses `blackb0x.*` out of it.\n");
-    printf("                              blackb0x.skip-install=1 do the console/disk/mount\n");
-    printf("                                path for real but skip the install, then reboot\n");
-    printf("                                normally -- splits a mount failure from an\n");
-    printf("                                install failure.\n");
-    printf("                            Ordinary kernel boot-args work there too.\n");
+    printf("                            Arbitrary kernel boot-args must be BAKED that way;\n");
+    printf("                            there is no runtime channel for them on this\n");
+    printf("                            hardware.\n");
     printf("  --help                    Show this message\n");
     printf("\n");
     // Was a Linux-era note telling the user to run under sudo or install a
@@ -262,9 +257,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
     // reach across that boundary would undo the whole arrangement to save a
     // user one command.
     //
-    // So it errors, and names the command that does work. The directives
-    // themselves are unaffected -- entrypoint.c still parses `blackb0x.*` out
-    // of kern.bootargs exactly as before; only the delivery changed.
+    // So it errors, and names the command that does work: arbitrary boot-args
+    // have to be baked into the iBEC, not passed at jailbreak time.
     if (!options.extraBootArgs.empty()) {
         fprintf(stderr,
                 "--extra-boot-args cannot work at jailbreak time on this bootloader.\n"
@@ -280,7 +274,7 @@ CliOptions parseCliOptions(int argc, char** argv) {
                 "                       --extra-boot-args \"%s\"\n"
                 "\n"
                 "  That rewrites dist/iBEC-<model>_<build> and dist/iBECTether-<model>_<build>\n"
-                "  with your directive appended to the built-in args; re-run blackb0x after.\n"
+                "  with your args appended to the built-in ones; re-run blackb0x after.\n"
                 "  Use --boot-args / --tether-boot-args there to replace the base string\n"
                 "  outright. See `./build/bake-iboot` with no arguments for the full usage and\n"
                 "  the length budget.\n",

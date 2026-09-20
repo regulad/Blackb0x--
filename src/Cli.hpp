@@ -208,35 +208,17 @@ struct CliOptions {
     // (Patcher.hpp's `bootargs` namespace), and a compiled-in string wins
     // unconditionally, so there is nothing left at send time to append to.
     //
-    // WHAT IT WAS FOR, AND WHERE THAT WENT. It is how a `blackb0x.*`
-    // directive reaches entrypoint.c -- the ramdisk's PID 1 -- without
-    // re-baking the ramdisk. That need is real and unchanged: everything on
-    // the ramdisk is baked ahead of time, CI publishes dist/ as an artifact,
-    // and a ramdisk re-bake costs sudo, Theos, afsctool and ~30 minutes on a
-    // machine set up for authoring. Paying that to flip one diagnostic bit is
-    // backwards, doubly so for diagnostics that only reproduce on hardware.
-    //
-    // The answer is now an iBEC re-bake instead of a send-time flag, which is
-    // seconds and needs no privilege:
+    // WHERE ARBITRARY BOOT-ARGS GO INSTEAD. They are baked, not passed at
+    // jailbreak time. An iBEC re-bake takes seconds and needs no privilege:
     //
     //     ./build/bake-iboot --device AppleTV3,2 --build 10B329a --force \
-    //                        --extra-boot-args "blackb0x.skip-install=1"
+    //                        --extra-boot-args "debug=0x14e"
     //
     // That appends to the built-in args in BOTH baked iBECs; --boot-args /
-    // --tether-boot-args replace a base string outright. The directive
-    // MECHANISM is unchanged -- entrypoint.c still reads kern.bootargs and
-    // parses `blackb0x.*` out of it (entrypoint/bootargs.h), the same
-    // relationship systemd has with the Linux kernel command line. Ordinary
-    // kernel args (nand-enable-reformat=1, serial=3 debug-uarts=3) go through
-    // the same route.
-    //
-    // The VOCABULARY did shrink: `blackb0x.beacon=<seconds>`, a reboot-as-
-    // proof-of-life probe for "did the kernel exec us as PID 1 at all", was
-    // removed deliberately once `setenv boot-args` was proven inert, since
-    // that root cause answers the beacon's question directly. `skip-install`
-    // is what remains. If a hardware run with the baked args still fails, the
-    // beacon comes back verbatim out of git history -- the fix is not yet
-    // confirmed on hardware, and that is the honest caveat on removing it.
+    // --tether-boot-args replace a base string outright. Ordinary kernel args
+    // (nand-enable-reformat=1, serial=3 debug-uarts=3) all go through that
+    // route, and nothing on the ramdisk side reads boot-args at all --
+    // entrypoint.c consumes none (see its header comment).
     //
     // LENGTH IS CHECKED THERE, NOT HERE, AND AGAINST A DIFFERENT NUMBER.
     // bake-iboot measures against bootargs::kMaxBakedBootArgsLength (179),

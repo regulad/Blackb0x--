@@ -23,13 +23,15 @@
  * reverse-engineering writeup this is built from (strings, the original
  * Patcher.mm, a full Ghidra decompilation, and raw disassembly of every
  * syscall trampoline).
+ *
+ * This entrypoint deliberately consumes NO boot-args: the `blackb0x.*`
+ * runtime-directive mechanism (and the raw kern.bootargs sysctl read behind
+ * it) was removed once the inert-`setenv boot-args` root cause was found, and
+ * is recoverable verbatim from git history if it is ever wanted again.
+ *
+ * There are no #includes at all: -nostdlib means there are no system headers
+ * to include, and nothing local is needed either.
  */
-
-/* The one #include in this file, and it is a local, header-only, libc-free
- * parser rather than a system header: -nostdlib means there are no system
- * headers to include. See bootargs.h for the runtime-directive vocabulary
- * and why these are boot-args rather than a compile-time -D. */
-#include "bootargs.h"
 
 /* ---------------------------------------------------------------------- */
 /* Raw syscalls — no libc. Numbers verified via llvm-objdump disassembly   */
@@ -64,17 +66,6 @@
 #define SYS_fstat     189
 #define SYS_getdirentries 196
 #define SYS_execve  59
-/* __sysctl(2). Verified against the SDK's own <sys/syscall.h> (SYS_sysctl
- * 202) rather than assumed; the number has not moved since 4.4BSD and is
- * the same on this vintage of XNU. Used to read `kern.bootargs` — see
- * read_boot_args() below. NOT SYS_sysctlbyname (274): that syscall is a
- * much later addition and does not exist on a 2012-era kernel, which is
- * why the two-step name2oid dance below is necessary. */
-#define SYS_sysctl  202
-/* <sys/sysctl.h>'s CTL_MAXNAME -- the longest OID any sysctl name can
- * resolve to. 12 since 4.4BSD and unchanged in every XNU. Spelled with a
- * _LOCAL suffix purely because nothing here includes the real header. */
-#define CTL_MAXNAME_LOCAL 12
 
 typedef unsigned int uint32;
 typedef unsigned long size_t_;
@@ -131,46 +122,6 @@ static inline long __syscall4(long n, long a0, long a1, long a2, long a3) {
     __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12), "r"(r1), "r"(r2), "r"(r3) : "memory", "cc");
     return r0;
 }
-
-/* __sysctl(2) takes SIX arguments, two more than the __syscallN helpers
- * above can express, and on 32-bit ARM the extra two are NOT passed in
- * registers: r0-r3 carry arguments 1-4 and the kernel reads arguments 5 and
- * 6 out of the caller's own stack at [sp] and [sp+4]. That is precisely
- * where AAPCS already puts them, which is why libSystem's own generated
- * stub for a six-argument syscall is byte-for-byte identical to its stub
- * for a four-argument one: set r12, svc, convert the carry flag. This is
- * that stub, written out as module-level assembly rather than an inline-asm
- * wrapper for exactly one reason -- an inline-asm wrapper sits inside a C
- * function whose prologue is free to move sp, and the layout the kernel
- * reads from would then depend on the compiler's frame decisions. Module
- * asm has no frame at all, so the caller's stack IS the argument area, with
- * nothing in between.
- *
- * Verified, not assumed: `otool -tV` on the built binary shows this
- * assembling as pure ARM (mov r12, #202 / svc #0x80 / rsbhs r0, r0, #0 /
- * bx lr -- rsbhs and rsbcs are the same encoding) and shows the call site
- * doing `stm sp, {r1, r2}` for arguments 5 and 6 immediately before the
- * `bl`, which is the layout above.
- *
- * `rsbcs` for the same carry-flag reason as every __syscallN above: Darwin
- * signals syscall errors in the carry flag and leaves a POSITIVE errno in
- * r0, so a failed sysctl would otherwise read as a plausible success.
- *
- * Failure mode if any of this is ever wrong on real hardware: name2oid
- * below gets a bad name pointer/length, returns an error, read_boot_args()
- * reports "could not read", and the parser sees an empty string -- i.e.
- * the shipped default behaviour, with a console line saying so. It cannot
- * fault or silently enable a directive. */
-__asm__(".text\n"
-        ".align 2\n"
-        ".globl _bb_raw_sysctl\n"
-        "_bb_raw_sysctl:\n"
-        "    mov r12, #202\n"     /* SYS_sysctl */
-        "    svc #128\n"
-        "    rsbcs r0, r0, #0\n"  /* carry set -> r0 is a positive errno */
-        "    bx lr\n");
-extern long bb_raw_sysctl(const int *name, unsigned namelen, void *oldp, unsigned long *oldlenp,
-                          const void *newp, unsigned long newlen);
 
 static int sys_open(const char *p, int flags, int mode) { return (int)__syscall3(SYS_open, (long)p, flags, mode); }
 static int sys_close(int fd) { return (int)__syscall1(SYS_close, fd); }
@@ -734,143 +685,6 @@ static void set_auto_boot(void) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* Runtime directives: reading kern.bootargs freestanding.                 */
-/* ---------------------------------------------------------------------- */
-
-/* The boot-args string, and the directives parsed out of it. Both in BSS,
- * not on entry()'s stack: this binary runs on a small freestanding stack
- * and a 512-byte buffer is not worth risking there, and the directives need
- * to outlive the read anyway. */
-static char g_bootArgs[BLACKB0X_BOOT_ARGS_MAX];
-static struct blackb0x_directives g_directives;
-
-/* Fills g_bootArgs from the kernel and returns its length, or -1 if it
- * could not be read at all (which is a normal outcome to handle, not an
- * error to panic on -- it simply means no directives).
- *
- * THAT THIS WORKS AT ALL ON THIS KERNEL IS THE LOAD-BEARING FACT of the
- * whole runtime-directive design, so it was established from Apple's own
- * published sources rather than from modern-macOS behaviour. iOS 6.1.3 runs
- * xnu-2107.7.55.2.2, which Apple never published -- but it sits between
- * xnu-2050.18.24 (iOS 6 / OS X 10.8) and xnu-2422.1.72 (iOS 7 / OS X 10.9),
- * and in BOTH of those bsd/kern/kern_sysctl.c carries, byte for byte:
- *
- *   STATIC int sysctl_sysctl_bootargs(...) {
- *       char buf[256];
- *       strlcpy(buf, PE_boot_args(), 256);
- *       return sysctl_io_string(req, buf, 256, 0, NULL);
- *   }
- *   SYSCTL_PROC(_kern, OID_AUTO, bootargs,
- *       CTLFLAG_LOCKED | CTLFLAG_RD | CTLFLAG_KERN | CTLTYPE_STRING,
- *       NULL, 0, sysctl_sysctl_bootargs, "A", "bootargs");
- *
- * Three things matter there and all three were checked, not assumed:
- *  - It is inside no #if at all. Not CONFIG_EMBEDDED, not SECURE_KERNEL,
- *    not DEVELOPMENT||DEBUG. iOS kernels of this era have it.
- *  - CTLFLAG_RD with no CTLFLAG_MASKED, and the suser() checks on this path
- *    are all guarded on req->newptr (writes) -- so the read needs no
- *    privilege whatsoever, and this is PID 1 as root regardless.
- *  - The restriction that exists on modern systems is not in XNU and is not
- *    this sysctl being removed: it is Sandbox/MACF, whose name-aware
- *    mac_system_check_sysctlbyname() hook only arrived in xnu-2782 (OS X
- *    10.10 / iOS 8). Before that the hook was numeric-MIB-only and could
- *    not match "kern.bootargs" by name at all -- and nothing sandboxes
- *    PID 1 on a restore ramdisk either way.
- *
- * There is no sysctlbyname(3) here and there cannot be: that is a libc
- * function built on the SYS_sysctlbyname syscall, which a 2012-era kernel
- * does not have, and this binary has no libc regardless. The portable way
- * to resolve a dotted sysctl name with nothing but the raw __sysctl(2) trap
- * is the two-step "magic MIB" dance BSD has carried since 4.4:
- *
- *   1. __sysctl({CTL_UNSPEC, 3}, 2, oid, &oidlen, "kern.bootargs", 13)
- *      {0, 3} is sysctl.name2oid, registered in the same era's
- *      bsd/kern/kern_newsysctl.c as
- *        SYSCTL_PROC(_sysctl, 3, name2oid,
- *            CTLFLAG_RW|CTLFLAG_ANYBODY|CTLFLAG_KERN|CTLFLAG_LOCKED, ...)
- *      -- CTLFLAG_ANYBODY, i.e. explicitly unprivileged. It takes the
- *      dotted NAME as the *new value* (which is why the 5th and 6th
- *      arguments have to be right, and why the stub above is written the
- *      way it is) and returns the numeric OID as the *old value*.
- *   2. __sysctl(oid, n, buf, &len, 0, 0) reads the string itself.
- *
- * The OID is resolved rather than hardcoded on purpose. kern.bootargs is
- * registered with OID_AUTO, so its numeric component is assigned in
- * registration order and is not stable across kernel builds -- it is 160 on
- * one host checked here, and there is no KERN_* constant for it in any
- * <sys/sysctl.h>. Hardcoding it would read some unrelated node on a kernel
- * that happened to differ, which is a far worse failure than not reading it
- * at all.
- *
- * Every failure path leaves g_bootArgs an empty string, so the parser sees
- * no directives and entrypoint behaves exactly as it does today. */
-static int read_boot_args(void) {
-    g_bootArgs[0] = '\0';
-
-    /* {CTL_UNSPEC, 3} = sysctl.name2oid. */
-    static const int nameToOidMib[2] = {0, 3};
-    static const char kBootArgsName[] = "kern.bootargs";
-
-    int oid[CTL_MAXNAME_LOCAL];
-    unsigned long oidLen = sizeof(oid);
-    if (bb_raw_sysctl(nameToOidMib, 2, oid, &oidLen, kBootArgsName, sizeof(kBootArgsName) - 1) < 0) {
-        return -1;
-    }
-    unsigned oidCount = (unsigned)(oidLen / sizeof(int));
-    if (oidCount == 0 || oidCount > CTL_MAXNAME_LOCAL) {
-        return -1;
-    }
-
-    /* Leave room for a terminator we write ourselves: the kernel does
-     * NUL-terminate this string and counts the terminator in the returned
-     * length, but relying on that for a buffer the parser then walks is not
-     * a bet worth taking as PID 1.
-     *
-     * The buffer must also be big enough for the WHOLE string: the handler
-     * calls sysctl_io_string(..., trunc=0), so an oldlen smaller than
-     * strlen+1 returns ENOMEM and yields nothing at all rather than a short
-     * read. BLACKB0X_BOOT_ARGS_MAX is 512 against a kernel that can hold at
-     * most 255 characters (BOOT_LINE_LENGTH, and the handler's own
-     * char buf[256]), so there is no way to hit that. */
-    unsigned long len = sizeof(g_bootArgs) - 1;
-    if (bb_raw_sysctl(oid, oidCount, g_bootArgs, &len, 0, 0) < 0) {
-        g_bootArgs[0] = '\0';
-        return -1;
-    }
-    if (len >= sizeof(g_bootArgs)) len = sizeof(g_bootArgs) - 1;
-    g_bootArgs[len] = '\0';
-    return (int)len;
-}
-
-/* Reads and parses in one step, leaving g_directives usable either way.
- * Called as the very first thing entry() does, BEFORE the console is open:
- * nothing here needs a file descriptor, a mount or a disk, so a directive
- * that ever needs to act earlier than the console can. */
-static void load_directives(void) {
-    int len = read_boot_args();
-    if (len < 0) {
-        blackb0x_parse_boot_args(0, 0, &g_directives);
-        return;
-    }
-    blackb0x_parse_boot_args(g_bootArgs, len, &g_directives);
-}
-
-/* Prints what was read, once the console exists. Free, and the only way
- * anyone watching a -v boot ever learns that a directive was mistyped: a
- * rejected directive and an absent one look identical from the outside
- * otherwise, which is exactly the ambiguity these directives exist to
- * remove. */
-static void report_directives(void) {
-    console_print("boot-args: ");
-    console_print(g_bootArgs[0] ? g_bootArgs : "(unreadable or empty)");
-    console_print("\n");
-    if (g_directives.rejected > 0) {
-        console_print("WARNING: one or more blackb0x.* directives were rejected "
-                      "(unknown name, missing or non-numeric value)\n");
-    }
-}
-
-/* ---------------------------------------------------------------------- */
 /* entry() — matches the original's Mach-O entry point exactly: console   */
 /* fd setup, disk wait, the two mount()s + devfs, do_install(), then       */
 /* unmount everything and reboot. LC_UNIXTHREAD jumps straight here — no   */
@@ -878,34 +692,9 @@ static void report_directives(void) {
 /* ---------------------------------------------------------------------- */
 
 int entry(void) {
-    /* FIRST, before anything else: read the kernel's boot-args and parse our
-     * own directives out of them. Nothing here needs a file descriptor, a
-     * mount or a disk, so this stays the earliest point at which a directive
-     * can take effect. See bootargs.h for the vocabulary.
-     *
-     * A `blackb0x.beacon=<seconds>` directive used to fire right here -- an
-     * immediate busy_wait() + sys_reboot() before the console, the disk wait
-     * or any mount, so that a host watching USB re-enumeration could tell
-     * "the kernel never exec'd us as PID 1" from "it did, and we died in
-     * do_install()". It was removed deliberately once `setenv boot-args` was
-     * proven INERT on this bootloader (Patcher.hpp's `bootargs` namespace):
-     * that finding answers the beacon's question at the mechanism level --
-     * every previous boot ran with none of the AMFI/code-signing args, so an
-     * ad-hoc-signed PID 1 could not have exec'd -- which leaves the beacon
-     * measuring something already known. The hedge, stated because it is not
-     * yet confirmed on hardware: if a hardware run with the baked args still
-     * fails, the beacon is recoverable verbatim from git history. */
-    load_directives();
-
     int consoleFd = sys_open("/dev/console", O_WRONLY, 0);
     sys_dup2(consoleFd, 1);
     sys_dup2(consoleFd, 2);
-
-    /* Before the disk wait, which is an unbounded loop: if the disk never
-     * appears this is the last thing a -v console ever prints, and knowing
-     * what boot-args the kernel actually received is worth more at that
-     * point than anywhere later. */
-    report_directives();
 
     console_print("Searching for disk...\n");
     /* Original waits on a stat() of /dev/disk0s1s1 succeeding — matches
@@ -960,31 +749,7 @@ int entry(void) {
     }
     console_print("Devices mounted\n");
 
-    if (g_directives.skip_install) {
-        /* `blackb0x.skip-install=1` — a bisect that costs no hardware
-         * instrumentation.
-         *
-         * Of everything entry() does, is it do_install() that kills us, or
-         * the boot path around it? Everything above this line still runs for
-         * real -- the console open, the unbounded disk wait, both HFS mounts
-         * and devfs -- and everything below it still runs too, including
-         * set_auto_boot(). Only the merge is skipped.
-         *
-         * The outcomes are distinguishable with no console, which is the
-         * whole point on this hardware:
-         *   - device reboots into the NAND OS, nothing installed  -> the
-         *     mounts and the boot path are fine and do_install() is the
-         *     suspect.
-         *   - device does nothing, exactly as without this directive -> the
-         *     failure is at or before the disk wait / mounts, and
-         *     do_install() is exonerated.
-         *
-         * Safe to run on a real device: nothing is written to /mnt1 at all
-         * on this path, so unlike a normal run it cannot touch dpkg state. */
-        console_print("blackb0x.skip-install=1: skipping do_install()\n");
-    } else {
-        do_install();
-    }
+    do_install();
 
     sys_unmount("/mnt1/dev", 0);
     sys_unmount("/mnt1", 0);

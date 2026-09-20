@@ -137,6 +137,13 @@ void printCliUsage(const char* argv0) {
     printf("                            and confirm which stage is actually live (ours vs\n");
     printf("                            the device's own installed iBoot). Honors the same\n");
     printf("                            build-selection and stock flags. NOT a jailbreak.\n");
+    printf("  --tether-boot             DIAGNOSTIC: tether-boot the OS on NAND with the\n");
+    printf("                            patched kernel instead of installing. Sends iBSS,\n");
+    printf("                            iBEC, DeviceTree, KernelCache -- no RestoreLogo, no\n");
+    printf("                            Ramdisk -- with NAND-root boot-args (no rd=md0). If\n");
+    printf("                            the OS comes up on screen the boot chain/kernel are\n");
+    printf("                            intact; isolates the kernel from the ramdisk path.\n");
+    printf("                            NOT a jailbreak; conflicts with --stock-*.\n");
     printf("  --help                    Show this message\n");
     printf("\n");
     printf("blackb0x needs root by default: talking to a DFU/Recovery-mode device needs\n");
@@ -179,6 +186,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.noShellAttach = true;
         } else if (arg == "--no-send-restorelogo") {
             options.noSendRestoreLogo = true;
+        } else if (arg == "--tether-boot") {
+            options.tetherBoot = true;
         } else if (arg == "--send-only") {
             options.sendOnly = nextArg("--send-only");
             if (options.sendOnly != "ibss" && options.sendOnly != "ibec") {
@@ -224,6 +233,17 @@ CliOptions parseCliOptions(int argc, char** argv) {
         fprintf(stderr,
                 "--no-pwn and --stock-securerom require opposite device states (already pwned vs. not) -- "
                 "combining them is not useful.\n");
+    }
+    // --tether-boot drives its own send path (no RestoreLogo/Ramdisk, NAND-root
+    // args) and boots the OS already on NAND. The --stock-* diagnostics each
+    // drive a DIFFERENT send path (stockRecovery's single-connection tail, the
+    // stock kernel/ramdisk suites) around the ramdisk install, so combining
+    // them with tether-boot is incoherent rather than merely redundant.
+    if (options.tetherBoot &&
+        (options.stockRecovery || options.stockFirmware() || options.stockRamdisk || options.stockSecurerom)) {
+        fprintf(stderr, "--tether-boot cannot be combined with the --stock-* diagnostics.\n");
+        printCliUsage(argv[0]);
+        exit(2);
     }
     return options;
 }
@@ -852,23 +872,28 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
 // iBSS first; aborts back to a fresh DFU wait if that fails (matching the
 // original's "spawn the DFU helper again" recovery path).
 //
-// There is exactly one flow now: iBSS -> iBEC -> RestoreLogo -> Ramdisk ->
-// DeviceTree -> KernelCache('bootx'). The original app also had a
-// tether-boot variant that skipped Ramdisk/DeviceTree and booted the
-// installed OS off NAND (its `self.selected_device.jailbroken == 1`
-// branch); that whole path is gone -- see docs/HISTORY.md.
+// The normal (install) flow: iBSS -> iBEC -> RestoreLogo -> Ramdisk ->
+// DeviceTree -> KernelCache('bootx'). tetherBoot is a diagnostic variant that
+// skips RestoreLogo and Ramdisk and boots the OS already on NAND off the
+// patched kernel (NAND-root args, no rd=md0) -- a fixed revival of the
+// original app's tether-boot (`self.selected_device.jailbroken == 1`) that
+// this port had removed; see CliOptions::tetherBoot and docs/HISTORY.md. It
+// keeps DeviceTree (the kernel needs one; the original tether path wrongly
+// sent none). stockRecovery and tetherBoot are mutually exclusive
+// (parseCliOptions() enforces it), so their branches below never overlap.
 bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device, const PatchedComponents& components,
                              bool dryRun, bool stockRecovery, bool stockSecurerom, const std::string& sendOnly,
-                             bool noShellAttach, bool noSendRestoreLogo) {
+                             bool noShellAttach, bool noSendRestoreLogo, bool tetherBoot) {
     if (dryRun) {
         printf("(dry run) Would send:\n");
         printf("  iBSS%s\n", components.iBSS ? "" : " (missing, would fail here)");
         printf("  iBEC%s\n", components.iBEC ? "" : " (missing)");
-        if (components.restoreLogo) printf("  RestoreLogo\n");
-        printf("  Ramdisk%s\n", components.ramdisk ? "" : " (missing)");
+        if (!tetherBoot && components.restoreLogo) printf("  RestoreLogo\n");
+        if (!tetherBoot) printf("  Ramdisk%s\n", components.ramdisk ? "" : " (missing)");
         printf("  DeviceTree%s\n", components.deviceTree ? "" : " (missing)");
-        printf("  KernelCache%s\n", components.kernel ? "" : " (missing, would fail here)");
-        printf("(dry run) Would then wait for the Apple TV to reboot\n");
+        printf("  KernelCache%s%s\n", components.kernel ? "" : " (missing, would fail here)",
+               tetherBoot ? " (NAND-root boot-args, no rd=md0)" : "");
+        printf("(dry run) Would then wait for the Apple TV to %s\n", tetherBoot ? "boot" : "reboot");
         return true;
     }
 
@@ -961,7 +986,12 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     // iBEC and Ramdisk. Non-fatal on failure: RestoreLogo is a cosmetic boot
     // image, not something the boot depends on, so a failed send shouldn't
     // abort a run that would otherwise proceed.
-    if (components.restoreLogo && !noSendRestoreLogo) {
+    // tetherBoot skips RestoreLogo and Ramdisk entirely (see this function's
+    // header): it boots the OS on NAND, so there is no install ramdisk to root
+    // off, and the cosmetic recovery logo is not wanted. DeviceTree and
+    // KernelCache below are still sent -- the kernel needs a DeviceTree
+    // regardless of where it roots.
+    if (!tetherBoot && components.restoreLogo && !noSendRestoreLogo) {
         console::out("Sending RestoreLogo...\n");
         if (deviceManager.sendRestoreLogo(*components.restoreLogo, device.ecid) != 0) {
             console::err("Failed to send RestoreLogo (continuing -- it is a cosmetic boot image).\n");
@@ -970,13 +1000,15 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
         }
     }
 
-    console::out("Sending Ramdisk...\n");
-    i = components.ramdisk ? deviceManager.sendRamdisk(*components.ramdisk, device.ecid) : -1;
-    if (i != 0) {
-        console::err("Failed to send Ramdisk. Re-enter DFU mode and try again.\n");
-        return false;
+    if (!tetherBoot) {
+        console::out("Sending Ramdisk...\n");
+        i = components.ramdisk ? deviceManager.sendRamdisk(*components.ramdisk, device.ecid) : -1;
+        if (i != 0) {
+            console::err("Failed to send Ramdisk. Re-enter DFU mode and try again.\n");
+            return false;
+        }
+        console::out("Ramdisk sent.\n");
     }
-    console::out("Ramdisk sent.\n");
 
     console::out("Sending DeviceTree...\n");
     i = components.deviceTree ? deviceManager.sendDeviceTree(*components.deviceTree, device.ecid) : -1;
@@ -986,20 +1018,27 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     }
     console::out("DeviceTree sent.\n");
 
-    device.needsPostInstall = 1;
+    // needsPostInstall drives the post-boot install steps; a tether-boot
+    // installs nothing (it just boots the OS on NAND), so leave it unset there.
+    if (!tetherBoot) {
+        device.needsPostInstall = 1;
+    }
 
     // Only reached when stockRecovery is unset -- sendStockTail() above
     // already includes KernelCache and returns directly otherwise.
     //
-    // A Ramdisk and DeviceTree were just sent, so the kernel boots from the
-    // ramdisk: sendKernelCache() sets `rd=md0` unconditionally now. The old
-    // tether-boot path was the only caller that wanted anything else, and it
-    // had the two boot-args sets wired up backwards anyway -- the compiled-in
-    // args WITH rd=md0 went into the iBEC that sent no ramdisk, and the ones
-    // WITHOUT it into this path, so entrypoint.c could never have run as
-    // PID 1. See docs/HISTORY.md.
+    // ramdiskBoot = !tetherBoot. The install path just sent a Ramdisk and
+    // DeviceTree, so the kernel roots off the ramdisk (rd=md0). --tether-boot
+    // sent a DeviceTree but no Ramdisk and roots off NAND (no rd=md0). This is
+    // the arg selection the original app got backwards -- it put rd=md0 into
+    // the iBEC its tether path sent and non-rd=md0 into the install path, so
+    // the install ramdisk's entrypoint.c could never have run as PID 1. See
+    // docs/HISTORY.md.
     console::out("Sending KernelCache...\n");
-    int kernelResult = components.kernel ? deviceManager.sendKernelCache(*components.kernel, device.ecid, noShellAttach) : -1;
+    int kernelResult = components.kernel
+                           ? deviceManager.sendKernelCache(*components.kernel, device.ecid, noShellAttach,
+                                                           /*ramdiskBoot=*/!tetherBoot)
+                           : -1;
     if (kernelResult != 0) {
         console::err("Failed to send KernelCache.\n");
         return false;
@@ -1007,7 +1046,7 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     console::out("KernelCache sent.\n");
 
     device.waitForRecovery = 1;
-    console::out("Waiting for Apple TV to reboot\n");
+    console::out("Waiting for Apple TV to %s\n", tetherBoot ? "boot" : "reboot");
     return true;
 }
 
@@ -1419,7 +1458,7 @@ int runCli(const CliOptions& options) {
 
     if (!sendComponentsToDevice(deviceManager, device, *components, options.dryRun,
                                  options.stockRecovery, options.stockSecurerom, options.sendOnly,
-                                 options.noShellAttach, options.noSendRestoreLogo)) {
+                                 options.noShellAttach, options.noSendRestoreLogo, options.tetherBoot)) {
         return 1;
     }
 
@@ -1437,7 +1476,13 @@ int runCli(const CliOptions& options) {
         return 0;
     }
 
-    if (!stockFlags.empty()) {
+    if (options.tetherBoot) {
+        printf("\nDone. --tether-boot DIAGNOSTIC: the Apple TV should now boot the OS already on\n"
+               "NAND using the patched kernel (no ramdisk, no rd=md0). If the OS comes up on the\n"
+               "TV screen, checkm8 -> iBEC -> the patched/-z KernelCache is intact end to end and a\n"
+               "jailbreak failure is downstream in the ramdisk/entrypoint.c path; if it hangs the\n"
+               "same way, the kernel/DeviceTree is implicated. The Apple TV was NOT jailbroken.\n");
+    } else if (!stockFlags.empty()) {
         std::string joined;
         for (size_t i = 0; i < stockFlags.size(); i++) {
             joined += (i ? ", " : "") + stockFlags[i];

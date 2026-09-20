@@ -1693,7 +1693,17 @@ static bool checkDeviceLeftRecoveryModeAfterBoot(uint64_t ecid) {
 // the kernel for.
 static const char* const kRamdiskBootArgs =
     "setenv boot-args rd=md0 -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
-int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid, bool skipBootCheck) {
+// --tether-boot's args: the ramdisk set MINUS rd=md0, so the kernel roots off
+// the OS already on NAND instead of an uploaded ramdisk (none is sent on that
+// path). The AMFI/code-signing args stay -- a tether-booted jailbreak's
+// on-NAND untether/tweaks are unsigned too, and even for booting a stock NAND
+// OS they are harmless. This is the arg set the original app's tether-boot
+// MEANT to use; it had rd=md0 and non-rd=md0 wired to the wrong iBECs (see
+// docs/HISTORY.md and CliOptions::tetherBoot).
+static const char* const kTetherBootArgs =
+    "setenv boot-args -v amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
+int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t ecid, bool skipBootCheck,
+                                   bool ramdiskBoot) {
     // get_tv_patient(): same reasoning as sendiBEC() above -- this reconnect
     // follows Ramdisk's own NOTIFY_FINISH-triggered reset.
     irecv_client_t client = get_tv_patient(ecid);
@@ -1704,9 +1714,10 @@ int DeviceManager::sendKernelCache(const std::string& KernelCache_Path, uint64_t
     // the kernelcache upload and its zero-length DFU_DNLOAD (dnloadFinish)
     // and before 'bootx' -- byte-for-byte the order real idevicerestore uses,
     // and the same order sendStockRestoreTail() below already follows.
-    fprintf(stderr, "sendKernelCache: %s\n", kRamdiskBootArgs);
+    const char* bootArgs = ramdiskBoot ? kRamdiskBootArgs : kTetherBootArgs;
+    fprintf(stderr, "sendKernelCache: %s\n", bootArgs);
     int result = sendFileThenCommand(client, "sendKernelCache", KernelCache_Path, "bootx", false, 1, true,
-                                      kRamdiskBootArgs, /*extraCommandMustSucceed=*/true);
+                                      bootArgs, /*extraCommandMustSucceed=*/true);
     if (result == 0 && skipBootCheck) {
         fprintf(stderr,
                 "sendKernelCache: 'bootx' acknowledged. --no-shell-attach: not reading the recovery console; "

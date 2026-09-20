@@ -148,7 +148,12 @@ public:
     // instead of reconnecting to poll/read the recovery console
     // (checkDeviceLeftRecoveryModeAfterBoot()). Frees USB immediately so the
     // console can be inspected interactively -- see CliOptions::noShellAttach.
-    int sendKernelCache(const std::string& path, uint64_t ecid, bool skipBootCheck = false);
+    // ramdiskBoot: true (default) roots off the uploaded ramdisk (rd=md0);
+    // false uses NAND-root boot-args (no rd=md0) for --tether-boot, which
+    // sends no ramdisk and boots the installed OS off NAND -- see
+    // CliOptions::tetherBoot and the two boot-arg constants in the .cpp.
+    int sendKernelCache(const std::string& path, uint64_t ecid, bool skipBootCheck = false,
+                        bool ramdiskBoot = true);
     int sendDeviceTree(const std::string& path, uint64_t ecid);
     // RestoreLogo for the reconnect-per-step (non-stockRecovery) path, sent
     // between iBEC and Ramdisk with iBoot's "setpicture 4" command -- the

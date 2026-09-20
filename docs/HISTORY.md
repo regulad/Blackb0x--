@@ -4450,3 +4450,45 @@ freestanding with no mach layer at all, and the ATV3 LED's specific service
 name/selector is undocumented, so this is impractical without abandoning the
 freestanding design. The `reboot(2)` beacon remains the one viable, host-visible
 (USB re-enumeration) proof-of-life signal.
+
+## `--tether-boot` revived (and corrected) as a kernel-integrity probe
+
+The ramdisk-install path stalls after `bootx` (kernel boots — USB drops, LED
+cadence changes — but entrypoint.c never completes its reboot), and it is a bad
+path to debug: no serial (hardware test-points only), no framebuffer (iBEC never
+inits the display), and a blind PID-1 installer. So `--tether-boot` was brought
+back as a diagnostic that sidesteps all of that.
+
+It sends `iBSS -> iBEC -> DeviceTree -> KernelCache('bootx')` — **no RestoreLogo,
+no Ramdisk** — with NAND-root boot-args (the ramdisk set **minus `rd=md0`**), so
+the patched kernel boots the OS already on the device's NAND instead of an
+install ramdisk. The payoff is observability: a NAND boot brings up the real OS,
+which initializes the framebuffer and comes up **on the TV screen**. That makes
+it a clean bisection — if the OS appears, checkm8 -> iBEC -> the patched/`-z`
+KernelCache is proven intact end to end and the jailbreak failure is downstream
+in the ramdisk/entrypoint path; if it hangs the same way, the kernel /
+DeviceTree / `-z` patch is implicated. The existing
+`checkDeviceLeftRecoveryModeAfterBoot()` already reads the right signal (leaving
+Recovery == the kernel booted the OS).
+
+Two corrections over the original app's tether-boot (the one this port had
+removed in c8c4980):
+
+- **It sends a DeviceTree.** The original tether path (`tetherbootClick`) sent
+  iBEC + KernelCache and no DeviceTree at all — but the kernel needs one to
+  boot, so the original was either broken or leaned on something undocumented.
+- **The NAND-root args are the ones actually without `rd=md0`.** The original
+  had `patchiBEC()`'s two arg sets wired to the wrong iBECs (rd=md0 into the
+  tether path, non-rd=md0 into the install path). Boot-args are runtime now
+  (`setenv boot-args`), so this is just a `bool ramdiskBoot` on
+  `sendKernelCache()` picking `kRamdiskBootArgs` vs the new `kTetherBootArgs`.
+
+Dropped from the original's version and NOT revived: the "device must already be
+jailbroken / must have connected in Normal mode first / assume AppleTV2,1 =
+7.1.2" preflight, and requesting the device's own installed build instead of the
+pinned `kJailbreakTargetBuild`. This tether-boot deliberately boots the
+jailbreak-target build's patched kernel, so the device's NAND should be running
+that same build for a clean boot (a large version skew may panic; even a partial
+boot still proves the kernel decompressed and executed). It installs nothing —
+`needsPostInstall` stays unset — and is mutually exclusive with the `--stock-*`
+diagnostics, which drive their own send paths.

@@ -141,6 +141,32 @@ struct CliOptions {
     // this isolates whether the RestoreLogo upload / setpicture step is what
     // disturbs a later component (e.g. the kernelcache load).
     bool noSendRestoreLogo = false;
+    // DIAGNOSTIC: tether-boot instead of the ramdisk install. Sends
+    // iBSS -> iBEC -> DeviceTree -> KernelCache('bootx') -- NO RestoreLogo and
+    // NO Ramdisk -- with NAND-root boot-args (the ramdisk set minus rd=md0),
+    // so the patched kernel boots the OS already on the device's NAND rather
+    // than the install ramdisk. The point is to test the boot chain in
+    // isolation: if the device leaves Recovery and the real OS comes up on the
+    // TV screen, checkm8 -> iBEC -> the -z/patched KernelCache is proven intact
+    // end to end and any jailbreak failure is downstream in the ramdisk/
+    // entrypoint.c path; if it hangs the same way, the kernel/DeviceTree/-z
+    // patch is implicated. Nothing is installed -- the device is NOT
+    // jailbroken by a --tether-boot run.
+    //
+    // This revives (and fixes) the original app's `tetherbootClick`/
+    // `self.selected_device.jailbroken == 1` flow that this port had removed;
+    // see docs/HISTORY.md. Two corrections over the original: the kernel gets
+    // a DeviceTree (the original tether path sent none, and the kernel needs
+    // one), and the NAND-root args are actually the ones WITHOUT rd=md0 (the
+    // original had the two arg sets wired up backwards).
+    //
+    // Boots whatever build blackb0x targets (kJailbreakTargetBuild), so the
+    // device's NAND should be running that same build for a clean boot -- a
+    // large kernel/userspace version skew may panic. Even a partial boot
+    // (screen lights up / boot logo) still proves the kernel decompressed and
+    // executed. Mutually exclusive with the --stock-* diagnostics (they drive
+    // their own send paths); parseCliOptions() refuses the combination.
+    bool tetherBoot = false;
     bool help = false;
 };
 

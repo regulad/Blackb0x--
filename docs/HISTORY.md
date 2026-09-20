@@ -4035,3 +4035,68 @@ submodule if that work starts, rather than treating its absence as a decision ab
 One cosmetic leftover: the libirecovery fork's branch is still named
 `libusb-async-cancel-fix`, after libusb fixes this project no longer compiles. Renaming a
 pushed branch that `.gitmodules` pins is not worth the churn.
+
+## Stock diagnostic paths after the decryption strip: two prep bugs fixed, and why `--stock-recovery` alone became structurally impossible on A5
+
+Revisiting the boot failure after the library-vendoring work, three separate
+things were wrong with the `--stock-*` diagnostic routes, all consequences of
+the earlier decision to strip every host-side `decrypt()` call out of the
+`blackb0x` jailbreak binary (crypto now lives only in `bake-firmware`; see the
+Patcher/PatcherPatch split above). None of these existed while `blackb0x`
+still decrypted stock components itself — they only surfaced once it stopped.
+
+**1. `--stock-firmware --stock-recovery` failed at prep with "missing
+DeviceTree."** The bake gate in `downloadAndPatchComponents()` was
+`needsRealRamdisk = !stockRamdisk && !stockFirmware`, so a fully-stock run
+skipped `ensureBakedFirmware()` entirely — correctly, since it takes every
+component from Apple's IPSW. But DeviceTree was the one required component with
+*no download path at all*: it was fetched unconditionally via `takeBaked()`,
+which on a route that never baked hits a `dist/` entry that was never produced.
+Fixed by giving DeviceTree the same bake-first/download-fallback shape as
+RestoreLogo (it is sent byte-for-byte unmodified either way — Apple's IPSW copy
+and bake-firmware's published copy are identical, see `setDeviceTreePath()`).
+
+**2. The bake gate was wrong for `--stock-firmware` alone.** `--stock-firmware`
+by itself keeps blackb0x's own *patched* iBSS/iBEC (they exist only in `dist/`)
+and stocks just the kernel/ramdisk — so it genuinely needs a bake. But the old
+gate skipped the bake for it too (`!stockFirmware` was false), so its
+`takeBaked()` iBSS/iBEC/DeviceTree calls could hit an unbaked `dist/` and print
+the spurious "bake it first" message the user reported. Replaced with
+`fullyStock = stockFirmware && stockRecovery`: the bake is skipped *only* when
+every component is coming from the IPSW verbatim, which is the sole
+fully-stock combination.
+
+**3. `--stock-recovery` without `--stock-securerom` can no longer deliver a
+runnable iBSS on AppleTV3,x — now refused outright.** This is the one that
+explains "not booting, and the Boot Failure Count never even increments." On
+A5, a non-`--stock-securerom` iBSS goes through checkm8's `boot_client()`,
+whose `check_img3_file_format()` strips the img3 wrapper and uploads the DATA
+tag's bytes **verbatim, without decrypting** (the exploited SecureROM then
+executes them as code). That is exactly why `patchiBSS()` leaves the *baked*
+ATV3 iBSS decrypted (`outputs_.iBSS = patchedPath`, not the re-encrypted
+`outPath`). A *stock* iBSS is a still-encrypted img3, so `boot_client()` would
+upload ciphertext-as-code: no iBoot ever runs, no `bootx`, and the on-device
+boot-failure counter — which only advances when iBoot itself attempts and
+fails a boot — never moves. The older HISTORY entry above, describing
+`--stock-recovery` (no securerom) reaching `bootx` with the counter
+incrementing, was from the era when `useStockIBSS()` still decrypted the stock
+iBSS host-side; removing that made this sub-path structurally impossible, not
+merely "unsolved." `sendiBSS()` now detects the exact condition
+(`(isATV31 || isATV32) && stockRecovery && !stockSecurerom`) and refuses with a
+real explanation, pointing at the only coherent fully-stock A5 test:
+`--stock-firmware --stock-recovery --stock-securerom` (real SecureROM over
+standard DFU, which decrypts the img3 itself against a live SHSH ticket).
+
+Net effect on the diagnostic matrix, all verified to build (both target
+groups) and prep without the old spurious errors:
+
+- **default** (no stock flags) — full bake; patched everything.
+- **`--stock-firmware`** — bakes (patched iBSS/iBEC + DeviceTree from bake),
+  stock kernel/ramdisk downloaded.
+- **`--stock-firmware --stock-recovery`** — no bake; refused at `sendiBSS()`
+  with the securerom guidance above (encrypted iBSS, no valid A5 delivery).
+- **`--stock-firmware --stock-recovery --stock-securerom`** — no bake; the
+  real-SecureROM fully-stock path, DeviceTree/RestoreLogo downloaded.
+
+The separate, ultimate goal — a real jailbroken boot via the patched `dist/`
+ramdisk — is untouched by this and remains open.

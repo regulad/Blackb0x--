@@ -580,11 +580,21 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // overlapping it with this function's own downloads and patches. That
     // pipeline is gone (blackb0x patches nothing now), so there is nothing left
     // to overlap, and a synchronous call says plainly what is happening.
-    // Make sure a complete baked suite exists before touching any component.
-    // Skipped when a --stock-* route is stocking everything this would supply:
-    // those download Apple's own unmodified files instead and need no bake.
-    bool needsRealRamdisk = !stockRamdisk && !stockFirmware;
-    if (needsRealRamdisk && !ensureBakedFirmware(device.deviceModel, manifest->realBuildID)) {
+    // A bake is needed whenever ANY component below comes from dist/ rather
+    // than a straight IPSW download -- i.e. any component blackb0x keeps in
+    // its patched form. Only a fully-stock suite (--stock-firmware AND
+    // --stock-recovery together, the sole way every one of
+    // iBSS/iBEC/kernel/ramdisk/DeviceTree is taken from Apple's IPSW
+    // verbatim) needs nothing from dist/, so it alone skips the bake. In
+    // every other mode at least the patched bootloader (iBSS/iBEC, when
+    // !stockRecovery) or the patched kernel/ramdisk (when !stockFirmware)
+    // still comes from the bake -- including --stock-firmware ALONE, which
+    // deliberately keeps blackb0x's own patched iBSS/iBEC (they exist only
+    // in dist/). The old gate here (`!stockRamdisk && !stockFirmware`)
+    // wrongly skipped the bake for --stock-firmware too, so its takeBaked()
+    // iBSS/iBEC/DeviceTree calls hit a dist/ that was never produced.
+    bool fullyStock = stockFirmware && stockRecovery;
+    if (!fullyStock && !ensureBakedFirmware(device.deviceModel, manifest->realBuildID)) {
         return std::nullopt;
     }
 
@@ -682,10 +692,23 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
         takeBaked("KernelCache", "KernelCache", [&](const std::string& p) { patcher.setBakedKernelPath(p); });
     }
 
-    // DeviceTree was never patched (see Patcher::setDeviceTreePath()), so the
-    // baked copy is byte-identical to Apple's -- bake-firmware publishes it
-    // verbatim precisely so this does not need a download either.
-    takeBaked("DeviceTree", "DeviceTree", [&](const std::string& p) { patcher.setDeviceTreePath(p); });
+    // DeviceTree is sent unmodified (see Patcher::setDeviceTreePath()), so
+    // Apple's own IPSW copy and bake-firmware's published copy are byte-for-
+    // byte identical. Prefer the baked one when it's there (the jailbreak and
+    // --stock-firmware paths, where dist/ was just resolved above), but fall
+    // back to downloading it straight from the IPSW: a fully-stock run
+    // (--stock-firmware --stock-recovery) skips the bake entirely, so there
+    // is no dist/DeviceTree to take. DeviceTree was previously the ONLY
+    // required component with no download path at all, which is exactly why
+    // that route failed with a hard "missing DeviceTree". Same
+    // bake-first/download-fallback shape as RestoreLogo just below.
+    const std::string bakedDeviceTree = "dist/DeviceTree" + bakedSuffix;
+    if (fs::exists(bakedDeviceTree)) {
+        patcher.setDeviceTreePath(bakedDeviceTree);
+    } else {
+        downloadAndPatch("DeviceTree", manifest->deviceTreePath,
+                          [&](const std::string& path) { patcher.setDeviceTreePath(path); });
+    }
 
     // required=false: confirmed genuinely optional, not just "usually
     // present" -- idevicerestore's own recovery_send_applelogo() checks

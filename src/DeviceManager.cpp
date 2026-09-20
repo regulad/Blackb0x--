@@ -1256,6 +1256,30 @@ int DeviceManager::sendiBSS(const std::string& iBSSpath, uint64_t ecid, bool sto
         return (err == IRECV_E_SUCCESS) ? 0 : -1;
     }
 
+    // A5 (AppleTV3,1/3,2) has no route that can run a *stock, still-encrypted*
+    // iBSS on the checkm8 path: sendiBSS_ATV31()/ATV32() below deliver it via
+    // boot_client(), which uploads the img3 DATA payload directly as code and
+    // so needs plaintext (see useStockIBSS() in Patcher.cpp). checkm8 and
+    // iBoot32Patcher never decrypt the img3 -- only a real SecureROM does,
+    // over the standard DFU protocol, which is exactly the --stock-securerom
+    // route handled above. So --stock-recovery on these models can only
+    // produce a runnable iBSS together with --stock-securerom; without it,
+    // this would jump straight to ciphertext -- no iBoot ever runs, which is
+    // why the on-device boot-failure counter never even increments. Refuse
+    // with a real explanation rather than silently uploading garbage as code.
+    if ((isATV31 || isATV32) && stockRecovery && !stockSecurerom) {
+        fprintf(stderr,
+                "sendiBSS: --stock-recovery sends Apple's stock, still-encrypted iBSS, but on %s the only "
+                "delivery path without --stock-securerom is checkm8's boot_client(), which uploads the img3 "
+                "payload directly as code and cannot execute encrypted bytes. A stock iBSS on this model can "
+                "only be decrypted by a real SecureROM over standard DFU -- add --stock-securerom (needs an "
+                "un-pwned device and a live SHSH ticket) for a fully-stock test, or drop --stock-recovery to "
+                "use blackb0x's own baked (already-decrypted) iBSS.\n",
+                device->product_type);
+        irecv_close(client);
+        return -1;
+    }
+
     bool allowUnpwned = stockRecovery || stockSecurerom;
 
     if (isATV31) {

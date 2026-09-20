@@ -1,0 +1,57 @@
+# Repository metadata, declarative.
+#
+# This file is consumed by the Probot "Settings" GitHub App
+# (https://github.com/apps/settings, source at repository-settings/app). That app
+# watches the default branch and PATCHes the repository's GitHub-side settings —
+# description, topics — to match what is written here. It is the standard meaning
+# of the path `.github/settings.yml`.
+#
+# NOTHING IN THIS FILE IS READ BY CI. `.github/workflows/ci.yml` is the only file
+# here that builds or bakes anything; this one describes the repository to GitHub
+# and nothing else. It runs no code and gates no job.
+#
+# It only takes effect if the Settings app is installed on this repository. That
+# could not be confirmed from here: an app installation is only visible to the app
+# itself (`GET /repos/{owner}/{repo}/installation` needs a JWT signed by the app,
+# and `GET /user/installations` needs an app-authorized token — a normal `gh auth`
+# token gets 401/403 from both), so assume it is NOT installed unless the owner
+# installed it deliberately. Uninstalled, this file is inert and harmless: no app
+# reads it, and the repository's settings stay exactly as they are on GitHub.
+#
+# Two traps worth knowing before editing:
+#   - `topics` is a COMMA-SEPARATED STRING, not a YAML list. The app does
+#     `topics.split(/\s*,\s*/)`, so a `- item` block list is an array, has no
+#     `.split`, and the sync throws.
+#   - An unrecognised key can make the app reject the whole file. Only keys the
+#     app documents belong here; when unsure, leave it out.
+#
+# Anything omitted is left alone. The boolean feature toggles (`has_issues`,
+# `has_wiki`, `has_projects`, `private`, the merge-button and security flags) are
+# deliberately absent: the repository's current live values were set by hand, and
+# restating them here would only create a way to flip one by accident.
+
+repository:
+  name: "Blackb0x--"
+
+  # Verbatim, at the owner's request. Do not rephrase or extend.
+  description: "Apple TV 2/3 Jailbreak based on Blackb0x"
+
+  # `linux` is the real default branch, not `main`/`master`. The name is a
+  # fossil: this started as a Linux port, that support was removed outright
+  # (checkm8 never worked there), and the branch name outlived the reason.
+  # Stated here because it is load-bearing in two places that are easy to get
+  # wrong -- the Settings app itself only watches the DEFAULT branch, so this
+  # file is only read when it is on `linux`; and GitHub Actions caches written
+  # on the default branch are readable from every branch, whereas caches
+  # written elsewhere are visible only to that branch and its children. The CI
+  # toolchain cache depends on that, so anyone renaming this branch needs to
+  # know it moves more than a label.
+  default_branch: "linux"
+
+  # Max 20, lowercase/digits/hyphens, <=35 chars each — GitHub's rules.
+  # Both `apple-tv` and `appletv` are present because GitHub's topic search is
+  # literal and both spellings are in real use (258 and 125 repos respectively).
+  # Scope note: `jailbreak` names the project's domain. No topic here claims a
+  # finished or untethered jailbreak — see the README; no device has yet come up
+  # jailbroken.
+  topics: "apple-tv, appletv, tvos, ios, jailbreak, checkm8, bootrom, exploit, dfu, iboot, ramdisk, cydia, kodi, cpp, cli, macos, reverse-engineering"

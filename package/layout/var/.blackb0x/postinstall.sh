@@ -81,11 +81,16 @@ export DEBIAN_FRONTEND=noninteractive
 #     always present (staged by bakeRamdisk() like everything else under
 #     /blackb0x) — `apt-get update` below is free to actually reach them
 #     over the network if it can.
-#   - If it can't, apt still has something to work with: bakeRamdisk()
-#     also stages its own build-time `apt-get update` cache directly at
-#     /private/var/lib/apt/lists/ (see BakeRamdisk.cpp's
-#     stageAptListsCache()), so apt already knows what every configured
-#     repo offered as of bake time even with zero network reachability.
+#   - If it can't, apt knows NOTHING about those repos. The lists cache at
+#     /private/var/lib/apt/lists/ is staged EMPTY on purpose (see
+#     scripts/build_deb_cache_apt.py's own docstring): the lists generated
+#     at bake time describe the synthetic file:// debcache repo, not the
+#     real ones, so shipping them would actively mislead apt rather than
+#     help it. The consequence is real and has to be designed around --
+#     with no network, an `apt-get install` of anything not already staged
+#     below has no candidate at all, and under this script's bare `set -ex`
+#     that aborts the whole postinstall, so `install-done` is never written
+#     and the device shows "nothing happened" even after a clean boot.
 #   - Whatever .deb bytes bakeRamdisk() DID have room to stage sit directly
 #     in apt's own real cache directory (/private/var/cache/apt/archives/)
 #     — apt finds them itself via its normal cache-before-download check,

@@ -4104,8 +4104,11 @@ and `--stock-firmware-*` without `--stock-recovery`) skipped it entirely. Added
 tail) and a call between iBEC and Ramdisk, sent whenever the manifest actually
 had a RestoreLogo (non-fatal on failure — it is a cosmetic boot image).
 
-**The `--stock-firmware` split.** `--stock-firmware` is gone, replaced by two
-flags that differ only in which build supplies the stock OS suite:
+**The `--stock-firmware` split.** (Superseded — the split was reverted and
+`--stock-firmware-new` deleted; see "Can an old iBoot boot a NEWER build's
+kernelcache/DeviceTree/ramdisk?" below. What follows is the state as of this
+session.) `--stock-firmware` is gone, replaced by two flags that differ only in
+which build supplies the stock OS suite:
 - **`--stock-firmware-old`** — the old build the patched iBSS/iBEC are for
   (`kJailbreakTargetBuild`); a self-consistent old suite end to end. This is
   what `--stock-firmware` alone used to be, and the build `--stock-recovery`/
@@ -4762,3 +4765,708 @@ Commits this session: xpwn `4481d66`; main `9d663c4` (entrypoint ABI),
 `1bb9a3e` (--tether-boot), `38bf62a`/earlier (bake-iboot/-z, now walked back),
 `fb808d3` (IMG3 16-align + -z walkback), `b439e38`/`c1941ff`/`a21a57d`/`059d38e`
 (--tether-boot rd=disk0s1s1, RestoreLogo, advisory version preflight).
+
+## Can an old iBoot boot a NEWER build's kernelcache/DeviceTree/ramdisk? (research, then the `--stock-firmware-new` removal)
+
+`--stock-firmware-new` (added in "Stock diagnostic paths after the decryption
+strip" above) existed to answer exactly one question: *can blackb0x's patched
+10B329a iBSS/iBEC hand off to a stock OS suite from a newer, currently-signed
+build?* It was never run to a conclusion on hardware. Before spending more
+hardware time on it, the question was researched directly, because if the
+answer is "no, structurally," then every run of that flag produces a failure
+indistinguishable from the ones this project is already chasing — and a
+diagnostic whose negative result means nothing is worse than no diagnostic.
+
+### What was established
+
+**1. iBoot does not version-check the images it loads.** IMG3 carries a `VERS`
+tag, documented by The Apple Wiki's IMG3 File Format page as "iBoot version of
+the image," alongside `TYPE`, `BORD`, `CHIP`, `SEPO` and `PROD`. Nothing found
+treats `VERS` as enforced — not the wiki, not iBoot32Patcher, not the vendored
+idevicerestore `img3.c` this repo already compiles. The checks iBoot really
+makes, and the ones iBoot32Patcher defeats, are the RSA signature (`SHSH`/
+`CERT`), the APTicket/personalization digests, and the img3 `TYPE` against the
+tag being requested. So "the older iBEC rejects the newer kernelcache *because
+it is newer*" is **not** the failure mode. That much is settled.
+
+**2. But iBoot is not a passive loader — it is the DeviceTree's co-author, and
+that is where mixing breaks.** The Apple Wiki's DeviceTree page states plainly
+that the bootloader "populates the various entries of the tree and then passes
+it to XNU"; the copy shipped in the IPSW is a template, not a boot-ready tree.
+The decisive source is NyanSatan's *Running unsupported iOS on deprecated
+devices* — notable here because this project already vendors his
+`checkm8_bootkit`, and because it is the only published, detailed account of
+precisely our scenario on 32-bit Apple hardware: booting an **iOS 6.0**
+kernelcache under **iOS 5.1.1's iBoot** on an S5L892x (iPhone 3GS, then iPod
+touch 3). His findings, in his words:
+
+- "The most broken thing was DeviceTree — iOS 6 added a lot of new nodes and
+  properties." He had to write a Python DeviceTree differ to compute the
+  5.1.1→6.0 node/property delta and graft it into the older tree by hand
+  (including stripping iPhone-specific entries before applying it to an iPod).
+- One of the new properties is `nvram-proxy-data` in the `chosen` node, and it
+  must hold a raw NVRAM dump: "leaving it empty will make kernel get stuck
+  somewhere very early."
+- Fixing that required patching **iBoot itself** — "replacing a call to
+  `UpdateDeviceTree()` with my own little function" that calls the real one and
+  then additionally populates `nvram-proxy-data` and `random-seed`. The old
+  iBoot had simply never heard of the property, so nothing filled it.
+
+That is the crux, and it generalizes: **the set of DeviceTree properties an
+iBoot knows how to populate at runtime is frozen at that iBoot's own build.** A
+newer kernel that requires a newer runtime-filled property gets an empty one
+and hangs before it produces console output. There is no signature error, no
+`bootx` rejection, no boot-failure-count increment — it looks exactly like
+"nothing happens," which is the symptom this project has been bisecting for
+several sessions already.
+
+The mechanism is corroborated independently of NyanSatan. A QEMU-iOS-boot
+writeup reports the kernel crashing immediately on an unmodified device tree
+because it expected iBoot to have populated the timer frequency and an early
+random seed, which had to be scripted in by hand. ChefKiss's Inferno discussion
+#117 shows the same class of failure from the other direction — a newer kernel
+against an older DeviceTree panicking on missing `amcc` / `carveout-memory-map`
+nodes, with grafting the newer node in as the only fix.
+
+Note what NyanSatan's success does *not* show: he did not send the newer
+build's DeviceTree verbatim. He built a hybrid tree and patched iBoot's
+tree-population routine. `--stock-firmware-new` did neither — it sent Apple's
+newer DeviceTree unmodified through an iBEC patched only by iBoot32Patcher
+(signature, boot-args, KASLR, ticket check; nothing touching `UpdateDeviceTree`).
+
+**3. `boot_args` is a secondary, unquantified hazard.** XNU's 32-bit ARM
+`boot_args` (`pexpert/pexpert/arm/boot.h`) is explicitly versioned:
+`Revision`/`Version` header fields with `kBootArgsRevision` = 1,
+`kBootArgsRevision2` = 2, `kBootArgsVersion1` = 1, `kBootArgsVersion2` = 2; the
+revision-2 layout is the one carrying `bootFlags` and `memSizeActual` after
+`CommandLine[]`. The kernel side does **not** gate on it — no revision check or
+panic exists in `osfmk/arm/arm_init.c`, which only ever reads `memSize`,
+`physBase` and `virtBase`. So an older iBoot filling a revision-1 struct for a
+kernel compiled against revision 2 yields silently-garbage fields rather than a
+clean refusal. **Honest caveat: which 32-bit build bumped that revision was not
+established.** Apple never published `pexpert/pexpert/arm/` for the xnu-2050 /
+2422 / 2782 drops (iOS 6 / 7 / 8); the header read here is xnu-4570 (2017). So
+this is a plausible mechanism, not a demonstrated one, and specifically *not*
+evidence of a hard 6→7 or 7→8 boundary. No such documented boundary was found.
+
+**4. Nobody does this in practice, and the real tools structurally cannot.**
+idevicerestore resolves every component through a single `build_identity` out
+of one BuildManifest (`build_identity_get_component_path`); there is no code
+path that mixes manifests, and the one published example of a genuinely mixed
+restore had to hand-write a replacement `BuildManifest.plist` to do it. Every
+tethered-boot / SSH-ramdisk toolchain checked — SSHRD_Script, LukeZGD's
+Legacy-iOS-Kit (which covers exactly our 32-bit A5 hardware), mineek's tethered
+downgrade guide, NyanSatan's own dualboot pages — takes iBSS, iBEC, DeviceTree,
+trustcache (where applicable), kernelcache and ramdisk from one IPSW.
+SSHRD_Script's "the iOS version doesn't have to be the version you're currently
+on" is about the *device's installed OS*, not the chain: the booted suite is
+always one self-consistent build. That is the community's whole answer to
+cross-version work — vary the device, never the suite. This is "no one does
+this" rather than "this cannot work," and it is reported as such; on its own it
+proves nothing. It matters only as corroboration that nobody has found the
+shortcut either.
+
+### Verdict and confidence
+
+- **High confidence (~85%)** that `--stock-firmware-new` *as implemented* —
+  Apple's newer kernelcache/DeviceTree/ramdisk sent verbatim under an
+  iBoot32Patcher-patched older iBEC — cannot produce a booting system.
+- **High confidence** that its failure would be an early, silent hang with no
+  console output and no boot-failure-count increment, i.e. **uninterpretable**:
+  indistinguishable from the failures it was meant to help distinguish.
+- **Low confidence that it is fundamentally impossible.** NyanSatan's work is a
+  direct counterexample to the strong claim: an old iBoot *can* boot a newer
+  kernel. It just needs a hand-merged DeviceTree and an iBoot patched at
+  `UpdateDeviceTree`, which is far outside what this project's patcher does and
+  well beyond what a diagnostic flag is worth.
+
+Per the standing instruction — if research is inconclusive, assume it cannot
+work — the flag is treated as unusable.
+
+### Corrected afterwards: the owner had already run it, and it failed
+
+The paragraph that stood here said this conclusion was reasoned from published
+third-party evidence and that nobody had run `--stock-firmware-new` against an
+AppleTV3,2 and watched it fail. That was wrong, and the correction matters
+enough to record rather than quietly edit away. The owner had in fact tried the
+flag on real hardware, and it did not work. So the removal rests on a hardware
+observation after all, not only on the assume-it-cannot-work instruction.
+
+Be precise about what that does and does not establish, because it is easy to
+over-read. It confirms the ~85% claim — the flag *as implemented* does not boot
+this device — and it is consistent with the DeviceTree mechanism above. It does
+**not** upgrade the low-confidence claim to a proof of impossibility: a silent
+early hang is exactly what a missing runtime-filled `/chosen` property would
+produce, but it is also what half a dozen unrelated faults would produce, and
+that indistinguishability was the whole reason the flag was judged useless as a
+diagnostic. NyanSatan's counterexample still stands, and still costs a
+hand-merged DeviceTree plus an `UpdateDeviceTree` patch.
+
+If anyone ever wants the real measurement, the path back is in git history, and
+the thing to add alongside it is a DeviceTree differ, an `UpdateDeviceTree`
+patch, and the reboot beacon — never the flag on its own, which is precisely
+the configuration already known to fail without saying why.
+
+### What changed as a result
+
+The old/new split is collapsed back to a single flag:
+
+- `--stock-firmware-new` is **removed**, along with everything that existed only
+  to support the distinction: `CliOptions::stockFirmwareOld`/`stockFirmwareNew`
+  and the `stockFirmware()` helper collapse to one `bool stockFirmware`; the
+  mutual-exclusion check between the two; the newest-signed-build selection
+  branch in `runCli()`; and `downloadAndPatchComponents()`'s two-build
+  `bootloaderBuild`/`buildToRequest` split with its paired `bootSuffix`/
+  `osSuffix`, which existed for no other reason (in every surviving mode the two
+  builds are equal, so one suffix derived from the manifest's real build ID is
+  both simpler and strictly no less correct).
+- `--stock-firmware-old` is renamed to plain **`--stock-firmware`**, with its
+  behaviour unchanged: patched iBSS/iBEC from `kJailbreakTargetBuild` plus a
+  stock kernelcache/ramdisk/DeviceTree from that *same* build — one
+  self-consistent suite, which is the configuration every real tool uses.
+  `--stock-recovery` and `--stock-securerom` now require `--stock-firmware`
+  (they required `--stock-firmware-old` before; same flag, new name).
+
+### Corollary for retargeting `kJailbreakTargetBuild`
+
+Worth recording separately, because it is the opposite question and the answer
+is the opposite: **moving the entire chain — patched iBSS/iBEC *and*
+kernelcache/DeviceTree/ramdisk — to one matched newer build is not affected by
+any of the above.** Everything that breaks here is version *skew* between iBoot
+and the tree/kernel it hands off to. A matched suite has no skew: the iBoot
+populating the DeviceTree is the one that shipped with it, so every
+runtime-filled property the kernel wants is one that iBoot knows about, and the
+`boot_args` revision matches by construction. That is exactly the configuration
+idevicerestore, SSHRD_Script and Legacy-iOS-Kit all use, on this same 32-bit A5
+hardware. From iBoot's perspective a newer target is fine. The real constraints
+on retargeting live elsewhere entirely — what iBoot32Patcher and CBPatcher can
+actually handle for that build, whether `keys/` has an entry, whether the
+persistence payload branch in `stageVersionBranch()` has an answer for its
+`ProductVersion`, and the 64 MiB ramdisk ceiling.
+
+Sources, in the order they carried weight:
+
+1. NyanSatan, *Running unsupported iOS on deprecated devices* —
+   <https://nyansatan.github.io/run-unsupported-ios/> (and
+   <https://github.com/NyanSatan/SundanceInH2A>). The only detailed published
+   account of an old 32-bit iBoot booting a newer iOS kernel, and the source of
+   the `UpdateDeviceTree`/`nvram-proxy-data` finding.
+2. The Apple Wiki, *DeviceTree* (<https://theapplewiki.com/wiki/DeviceTree>) and
+   *IMG3 File Format* (<https://theapplewiki.com/wiki/IMG3_File_Format>) — that
+   the bootloader populates the tree, and that `VERS` is metadata.
+3. XNU `pexpert/pexpert/arm/boot.h` and `osfmk/arm/arm_init.c` (xnu-4570.1.46,
+   apple-oss-distributions) — the `boot_args` revision constants and the absence
+   of any kernel-side revision gate.
+4. Corroboration on mismatched-DeviceTree panics: xia0's *Boot Newer iOS with
+   QEMU* (<https://xia0.sh/blog/boot-newer-ios-with-qemu-step-by-step>) and
+   ChefKissInc/Inferno discussion #117. Practice-side: `verygenericname/
+   SSHRD_Script`, LukeZGD's Legacy-iOS-Kit wiki, `mineek/iostethereddowngrade`,
+   and idevicerestore's single-`build_identity` component resolution.
+
+## The ramdisk is exonerated: a forensic teardown, an independent rebuild with the ORIGINAL tool, and a reboot beacon to bisect what is left
+
+The previous CHECKPOINT left four ranked hypotheses for why the full jailbreak
+"does nothing" while `--stock-ramdisk` boots. Two independent lines of evidence
+were run against them this session — a byte-level teardown of the exact ramdisk
+CI bakes, and a from-scratch rebuild of the ramdisk using **upstream
+NSSpiral/Blackb0x itself** as the reference implementation. Between them,
+**hypotheses 2 and 3 are dead and 4 is demoted**; what survives is hypothesis 1
+plus one narrow, low-probability variant of 2. A compile-time reboot beacon has
+been added to `entrypoint.c` to bisect exactly that remainder with no hardware
+beyond the device itself.
+
+The short version: **nothing about the container is wrong.** The image, the
+volume, the pristine tree and the PID-1 binary all check out. What is left is
+either the kernel never exec'ing our `launchd`, or `do_install()` dying after it
+does.
+
+### The artifact under test
+
+Everything below is against the RestoreRamDisk published by **CI run
+35533758121** (commit `23218bd`), for `AppleTV3,2` / 10B329a — i.e. the exact
+bytes a user's `blackb0x` run downloads, not a local bake. It is decrypted with
+the **stock** 10B329a RestoreRamdisk key/IV (so the keys are right), and the
+comparison baselines are a freshly-decrypted **pristine** Apple ramdisk for the
+same build and the original tool's own rebuilt output. Evidence files:
+`ci/READY`, `ours-full-listing.txt`, `ours-files.txt`, `stock-files.txt`,
+`ours-blackb0x-tree.txt`, `stock-tree.txt`, `nonroot-owned.txt`.
+
+### 1. The container is sound, measured rather than assumed
+
+- **IMG3 wrapper**: 38,631,812 B with Apple's exact tag sequence
+  (`TYPE`/`DATA`/`SEPO`/`KBAG`×2/`SHSH`/`CERT`), identical in shape to both the
+  pristine ramdisk and the original tool's output. The DATA element decrypts
+  cleanly under the stock key/IV.
+- **Volume**: bare HFS+ (`H+`, v4), 4096-byte allocation blocks, not journaled,
+  volume name `ramdisk` — the pristine volume's own personality, preserved,
+  because the bake grows Apple's volume instead of synthesizing a new one.
+- **`fsck_hfs -n -f` is clean.** The clean-unmount bit is set, and
+  `blockSize × totalBlocks` equals the file size exactly — no truncation, no
+  trailing slack, no UDIF/koly confusion.
+- **Size**: 9,431 blocks (36.8 MiB) with **266 free** (~1.09 MB). Worth stating
+  plainly because it inverts an earlier worry: the known-good **stock** ramdisk
+  that boots today has **zero** free blocks — Apple ships it exactly full. We
+  have strictly more headroom than the configuration already proven on this
+  hardware.
+- **Pristine tree intact**: all **237** stock entries are present and
+  byte-identical to the freshly-decrypted stock ramdisk, with exactly one
+  exception — `/sbin/launchd`'s content. Nothing was deleted, nothing else was
+  modified. (The original tool, by contrast, also clobbers
+  `/private/etc/rc.boot` and adds to `/bin`, `/sbin`, `/usr/bin`, `/usr/lib`,
+  `/private/etc/ssh` and `/private/var/root`.)
+
+### 2. Our `/sbin/launchd` is what we think it is
+
+Read directly out of the mounted CI image:
+
+- 13,200 B, thin Mach-O `arm_v6`, `MH_EXECUTE`, `NOUNDEFS`.
+- `LC_UNIXTHREAD` with `pc = 0x1a84` = `_entry`, **bit 0 clear** — ARM mode, not
+  Thumb, which is what the hand-rolled `svc` wrappers require.
+- `LC_CODE_SIGNATURE` present; **no `LC_LOAD_DYLIB`, no `LC_LOAD_DYLINKER`** —
+  the freestanding invariant holds in the shipped artifact, not just in the
+  build tree.
+- Mode `0555`, owner `root:wheel` — Apple's own metadata, preserved because the
+  splice rewrites content in place rather than `rm` + copy.
+- **Apple's `UF_COMPRESSED` flag is correctly cleared.** This matters more than
+  it looks: the pristine `/sbin/launchd` is decmpfs-compressed, and had the
+  splice left the flag set over plain content, the kernel would have needed a
+  decompressor to exec PID 1 and would have read garbage instead. It did not.
+- Ad-hoc signature, `Identifier=com.apple.launchd`, **no entitlements** — by
+  design; `entrypoint/Makefile` passes only `ldid -S -Icom.apple.launchd`.
+
+And `/blackb0x` is fully populated, not a stub or a half-copy: **1,118 regular
+files** (plus 214 directories and 129 symlinks), of which **1,047 carry decmpfs
+ZLIB compression** from `afsctool` (types 3 and 4 only — no LZVN/LZFSE, which
+would be unreadable on this 2013 kernel). The dpkg status file lists **57
+packages** including `xyz.regulad.blackb0x`; the local-debs repo has a real
+`Packages` index; `postinstall.sh` is present; `bash`, `dpkg` and `apt-get` are
+all non-truncated.
+
+### 3. An independent rebuild using the ORIGINAL upstream tool
+
+The strongest evidence here is not a measurement of our artifact at all — it is
+a **working reference built from the same pristine input**. `NSSpiral/Blackb0x`
+is alive, public and unrenamed; it was cloned at HEAD `226a1e6`, the ramdisk
+recipe was extracted from `Patcher.mm`'s `-patchRamdisk:ssh:` (lines 335-516)
+plus `-moveFileFromBundle:fileType:`, and a standalone driver was shimmed around
+it. **Four stubs, each logged in `build_original_ramdisk.sh` as `STUB n:`**: the
+cached IPSW component instead of a re-download (byte-identical), the 10B329a
+RestoreRamdisk key/IV hardcoded instead of parsed from the bundle's `.keys`
+plist (verified the bundle's plist and our `keys/` copy agree), `decrypt()`
+called through a 12-line `main()` over our own `src/Img3Crypt.cpp` (the same
+reimplementation of xpwn's `xpwntool` `main()`), and
+`-imagekey diskimage-class=CRawDiskImage` added to `hdiutil` because current
+macOS will not autodetect a bare HFS+ payload. Nothing else. **It built a real
+60 MB ramdisk**, now stashed at `blackb0x-scratch/original/out/`.
+
+The original's recipe, faithfully — it is much simpler than ours, and every
+difference from ours is therefore informative:
+
+1. `decrypt()` the IMG3 to a raw payload. On 10B329a that payload is *already* a
+   bare HFS+ volume (9,953,280 B = 2430 × 4096, **0 free blocks**); nothing is
+   converted.
+2. Best-effort detach/eject cleanup; `rm -rf` + `mkdir /tmp/ramdisk_create`.
+3. *(AppleTV2,1 4.x only, not this device)* the one `hdiutil create -srcfolder
+   -format UDRW -layout NONE` rebuild-from-scratch case.
+4. **`hdiutil resize -size 60MB`** — a fixed, hardcoded 60 MB. No content
+   measurement, no shrink pass.
+5. `hdiutil attach -mountpoint /tmp/ramdisk_create` — **no `-owners on`**, no
+   `-nobrowse`, no `-readonly`.
+6. `tar -xvf ssh.tar` — `bin/bash`, `bin/sh`, `bin/ls`, `bin/mount.sh`,
+   `sbin/sshd`, `usr/bin/{device_infos,scp}`, `usr/libexec/sftp-server`, five
+   dylibs, a full `private/etc/ssh/` **with pregenerated host keys**, and it
+   overwrites the stock `private/etc/rc.boot` with a 369-byte shell script.
+7. `tar -xvf RamdiskBins.tar` — `usr/bin/{dirhelper,plutil,untar,uname,gzip,
+   otool,ldid,sleepcmd,tar}` + `libiconv.2.dylib`.
+8. `tar -xpzf ATV-Cydia.tgz` into `/files/cydia/` — 15.6 MB, a full prebuilt
+   Cydia/dpkg/apt/openssh root tree.
+9. `tar -xvf Debs.tar` into `/files/` — 9 compatibility `.deb`s + a repo list +
+   a pubkey.
+10. `tar -xpzf p0sixspwn.tgz` into `/files/p0sixspwn/`.
+11. **The "Anthrax" launchd**: `rm /sbin/launchd`, then `copyItemAtPath:` the
+    bundled prebuilt `Files/launchd` (37,728 B, armv6) over it. Note *remove +
+    copy*, not splice — so it lands with the bundle file's mode `0755` and the
+    **running user's `501:20`**, not Apple's `0555 root:wheel`.
+12. `mkdir /mnt/` — the mountpoint its PID 1 uses (**`/mnt`, not `/mnt1`**).
+13. Plain copies into `/files/`: `.blackb0x`, the two plists, `setup.sh`,
+    `profile`, `fstab.atv`.
+14. `tar -xpvf tihmstar-untether.tar` into `/files/etasonATV/`.
+15. More copies into `/files/`: `rtbuddyd.bin`, icons, repo lists, pubkey.
+16. `ssh.tar` again, **whole, to `/ssh.tar`** at the volume root (3.7 MB) — the
+    on-device installer re-extracts it onto the device.
+17. `hdiutil detach`.
+18. `decrypt()` again to re-encrypt and re-wrap, using the **original IMG3 as
+    the template** (TYPE/SEPO/KBAG×2/SHSH/CERT cloned verbatim; only DATA
+    changes).
+
+No `resize -size min` shrink, no `afsctool`, no chown/chmod pass, no `ldid` at
+bake time (its launchd ships presigned), and **the app runs unprivileged
+throughout — no `sudo` anywhere**. Result: `out/original-ramdisk-decrypted.dmg`,
+60 MB (15360 × 4096, 652 free), 1214 files / 215 dirs, `fsck_hfs` clean; wrapped
+as a 62,916,996 B IMG3.
+
+### 4. Side by side, and the ranked differences the rebuild found
+
+| | **original** | **ours (CI)** | **pristine stock** |
+|---|---|---|---|
+| IMG3 | 62,916,996 B, Apple's tag layout | 38,631,812 B, **same layout** | 9,955,716 B, same |
+| volume | HFS+ `H+` v4, 4096 B, unjournaled, `ramdisk` | identical personality | identical |
+| total / free | 15,360 blk (60.0 MiB) / 652 free | 9,431 blk (36.8 MiB) / 266 free | 2,430 blk (9.5 MiB) / **0 free** |
+| files / dirs | 1,214 / 215 | 1,414 / 286 | 236 entries |
+| `fsck_hfs -n` | clean | clean | clean |
+| PID-1 mountpoint | `/mnt` | `/mnt1` | both exist pristine |
+| PID 1 owner/mode | **501:20, 0755** | 0:0, 0555 | 0:0, 0555 |
+
+Ranked by how plausibly each could explain the failure:
+
+1. **One bake-time-guessed persistence payload, possibly the wrong one.** See
+   "two real functional defects" below; this is the single largest behavioural
+   divergence found and it is a real bug regardless of the boot question.
+2. **No fallback tooling on the ramdisk at all.** The original carries a working
+   userland — `bash`, `sh`, `ls`, `sshd` with pregenerated host keys, `tar`,
+   `gzip`, `ldid`, `otool`, `plutil`, `scp`, `sftp-server`. Ours carries none of
+   it: our `/bin` is the stock seven binaries and `/usr/bin` is `sed` +
+   `TiSerialFlasher`. **This is not why the boot fails — it is why the failure
+   is invisible.** The original's ramdisk could be booted in its SSH variant and
+   inspected live over the network. Ours cannot be inspected at all.
+3. **1,047 decmpfs-compressed files inside `/blackb0x`**, where the original's
+   `/files` has zero. Types 3 and 4 are demonstrably supported by this era's
+   kernel (Apple's own pristine ramdisk uses type 4 for 15 files) and no
+   LZVN/LZFSE was found, so this is *probably* fine — but every one of those
+   files is read by `merge_tree()` as PID 1 on a 2013 kernel, and the original
+   never exercised that path. Cheap check if the overlay ever copies out as
+   zero-length or garbage: re-bake with the `afsctool` step disabled.
+4. **Volume slack**: 266 free blocks vs the original's 652. `md0` is mounted
+   read-write, so near-zero slack on a r/w root is tighter than anything the
+   original shipped. Low risk — nothing in `entrypoint.c` writes to the ramdisk
+   — but stopping the `resize -size min` shrink is free.
+5. **Ownership is inverted** (next section — and demonstrably not load-bearing).
+6. Cosmetic/by-design, recorded so nobody re-investigates: `/files` vs
+   `/blackb0x`; `/mnt` vs `/mnt1` (both pristine dirs); prebuilt Cydia tarball
+   vs real bake-time dpkg; `/ssh.tar` at the volume root; the original's
+   collateral `rc.boot` overwrite (irrelevant — its launchd never runs it);
+   signature identifier `launchd` vs `com.apple.launchd` and CD v0x20200 vs
+   v0x20400; the original's compiled-in boot-args vs our runtime superset.
+
+### 5. armv6 as PID 1: settled, and it is NOT the cause (~97%)
+
+This had been an open worry — that a 2013 armv7 kernel might refuse to exec a
+thin armv6 binary as PID 1, which would look exactly like "nothing happens."
+It is answered, and the decisive evidence is hardware, not source reading.
+
+**The original upstream "Anthrax" `/sbin/launchd`, read out of the original's own
+rebuilt ramdisk, is itself a thin Mach-O `cputype=12 cpusubtype=6` (arm_v6)**,
+`LC_UNIXTHREAD` `pc=0x590c` (bit 0 clear, ARM mode), `LC_CODE_SIGNATURE`, no
+dylibs — the same header shape as ours, down to `ncmds 9` / `sizeofcmds 660`.
+And that ramdisk **worked on this exact device and this exact build.** Whatever
+else is wrong, armv6-as-PID-1 is not it.
+
+The mechanism, for the record, since "armv6 died in iOS 7" gets repeated as
+folklore. Thin binaries **do** go through `grade_binary()` twice — once in
+`bsd/kern/kern_exec.c`'s `exec_mach_imgact()` at the `grade:` label, and again
+in `bsd/kern/mach_loader.c`'s `parse_machfile()`, alongside a
+`cputype != cpu_type()` equality test. Both pass:
+
+- The ARM `grade_binary()` in `bsd/dev/arm/kern_machdep.c` (published from
+  xnu-4570.1.46 onward and **byte-identical through xnu-8792**) is a
+  fall-through ladder, not a table lookup. A host `CPU_SUBTYPE_ARM_V7` with an
+  armv6 exec subtype misses the inner switch, falls into the V6 case, and
+  returns **4** — accepted, just at a lower grade than a native match.
+- `cpu_type()` on ARM returns `CPU_TYPE_ARM` unconditionally, so the equality
+  test in `parse_machfile()` is satisfied by any ARM binary regardless of
+  subtype.
+- `dyld-210.2.3` (the iOS 6 dyld) carries the matching compatibility row
+  `{V7, V6, V5TEJ, V4T, ALL}` — irrelevant to us since we load no dyld, but it
+  confirms the same policy on the userspace side.
+
+Neither tree contains anything that would have dropped armv6 in iOS 7.
+
+The one genuinely surprising survey result, worth writing down because it looks
+like counter-evidence and is not: **the stock ramdisk is 78 Mach-Os, 100%
+arm_v7, zero armv6.** But our own `/blackb0x` overlay ships **14 thin armv6
+executables plus 8 armv6 dylibs** — `uicache`, `sbreload`, `ldid`, `cynject`,
+`ldrestart`, `MSUnrestrictProcess` — which is simply the standard Cydia payload
+that routinely execs on armv7 iOS 6 devices in the field. So "everything in
+Apple's tree is armv7" is a build-target artifact of Apple's own toolchain
+settings, not a kernel constraint.
+
+**Decision: keep `-arch armv6`.** An armv7 `-marm` build was tried and proven to
+work — it satisfies every CI invariant — but it buys nothing, and changing the
+target for no reason would only muddy the comparison against the original, which
+is armv6 too.
+
+One safety note that is not obvious and is worth keeping: **you cannot silently
+end up with Thumb here.** Omitting `-marm` on an armv7 build is a *hard build
+error*, because the `rsbcs` in `__syscallN`'s inline asm (the carry-flag error
+convention, added in the ABI audit above) cannot be assembled outside an IT
+block. The build fails loudly rather than producing a subtly broken PID 1.
+
+### 6. Ruled out decisively: "PID 1 must be root-owned / mode 0555"
+
+The original's `/sbin/launchd` is **mode 0755, owned by uid 501 gid 20**, and
+**1,188 of its 1,422 objects are 501:20** — because the app runs unprivileged
+and attaches without `-owners on`, so everything it writes lands as the building
+user. It worked. Ownership and mode on PID 1 are therefore not load-bearing for
+this boot, full stop.
+
+That makes our own ownership drift a **correctness and security wart, not the
+boot failure**: 214 entries under `/blackb0x` are non-root, including 102 at
+`501:20` (the CI runner's own uid) and, worse, `/blackb0x/untether` at
+`1000:985` — a *Linux build-container* uid/gid that has no meaning on iOS at
+all. Four more objects are `501:501`. These should be fixed; they are not why
+the device does nothing.
+
+### 7. The reboot beacon: a proof-of-life signal, implemented
+
+The "USB re-enumeration as a proof-of-life beacon" idea sketched earlier in this
+log is now wired in. It is a **compile-time, default-OFF** diagnostic in
+`entrypoint/entrypoint.c`'s `entry()`, guarded by `BLACKB0X_REBOOT_BEACON` — an
+integer giving the approximate pre-reboot delay in seconds, `0` meaning compiled
+out entirely. It is the **very first thing `entry()` does**, before the console
+open, before the disk wait, before the mounts, before `do_install()`:
+
+    busy_wait(N); sys_reboot(0); for (;;) { }
+
+**Why it earns its place.** This device has no usable console — its UART is on
+internal hardware test-points, not the micro-USB — so "nothing happens" cannot
+distinguish *the kernel never exec'd us as PID 1* from *it exec'd us and we died
+somewhere in the install path*. Those two have completely different fixes. A
+reproducible power-cycle a few seconds after `bootx` proves our code reached
+PID 1 and convicts the install path; staying dark convicts the md0/HFS mount or
+the exec/AMFI path. One bit, zero hardware, and it splits the remaining tree
+exactly in half.
+
+Details that are deliberate rather than incidental:
+
+- **The trailing infinite loop is load-bearing.** If `reboot()` ever returns,
+  PID 1 must not fall through into the real install path and muddy the signal.
+- **It deliberately skips `set_auto_boot()`**, so the device is expected to come
+  back to **RECOVERY**, not the NAND OS. That is a second free confirmation, not
+  a bug — do not "fix" it.
+- **It goes through the `sys_reboot()` wrapper, never a hand-rolled `svc`**,
+  specifically because that wrapper carries the recent ABI fixes: the two-arg
+  `reboot(int opt, char *msg)`, `RB_AUTOBOOT = 0`, and carry-flag error
+  negation. A beacon built on the old broken wrapper would be its own
+  experiment.
+- **Makefile wiring is `BLACKB0X_REBOOT_BEACON ?= 0` plus a conditional `-D`,
+  and it is meant to be set as an ENVIRONMENT VARIABLE, not a `make` variable.**
+  That is not a style preference: `BakeRamdisk.cpp` re-runs `make clean all`
+  itself via fork+execvp, and that child inherits `environ`, so
+
+      BLACKB0X_REBOOT_BEACON=10 ./build/blackb0x ...
+
+  plumbs the beacon through an entire jailbreak run with no C++ changes at all,
+  whereas a hand-run `make BLACKB0X_REBOOT_BEACON=10` would simply be overwritten
+  by the bake-time rebuild. The recipe also prints a loud warning when the beacon
+  is on, since that binary installs nothing.
+
+Verified: both configurations build; `file` reports `Mach-O executable arm_v6`;
+`LC_UNIXTHREAD` present; zero `LC_LOAD_DYLIB`/`LC_LOAD_DYLINKER`; `ldid` signs
+as `com.apple.launchd`; and **the default build's SHA-256 is byte-identical
+before and after the change** — the shipped artifact is provably unaffected.
+
+### 8. Which CHECKPOINT hypotheses are now dead
+
+- **Hypothesis 2, "the kernel cannot mount `md0` because the rebuilt DMG/HFS is
+  malformed" — DEAD as stated.** The image is not rebuilt (the bake grows
+  Apple's own volume), `fsck_hfs -n -f` is clean, the clean-unmount bit is set,
+  `blockSize × totalBlocks` equals the file size, the IMG3 tag layout is Apple's,
+  and the pristine tree is byte-identical except the one file we meant to
+  change. The narrow surviving variant is *size*, not malformation: see below.
+- **Hypothesis 3, "entrypoint exec/signing — AMFI refuses an ad-hoc-signed
+  PID 1" — DEAD.** The original's PID 1 is ad-hoc signed with identifier
+  `launchd`, CD v0x20200, no entitlements, mode 0755, uid 501, armv6 — strictly
+  *less* conformant than ours on every axis — and it booted on this hardware.
+  With `cs_enforcement_disable=1 amfi=0xff amfi_get_out_of_my_way=1` on top,
+  there is no signing theory left standing.
+- **Hypothesis 4, "the framebuffer renders nothing" — DEMOTED, not disproven.**
+  RestoreLogo is sent on the install path so the framebuffer is initialized, but
+  nobody has yet watched the HDMI output during a full run and reported the last
+  line. That observation remains the cheapest unspent measurement.
+- **Hypothesis 1, "entrypoint reaches PID 1 but hangs or dies before its final
+  reboot" — SURVIVES, and is now the leading candidate.**
+
+### 9. Two real functional defects found along the way
+
+Neither is proven to be the current failure. Both are genuine bugs that would
+independently produce "nothing happened" on a device that boots perfectly.
+
+**(1) We ship ONE persistence payload, chosen at BAKE time.**
+`BakeFirmware.cpp` resolves `productVersion` from
+`newestVersionForDevice("AppleTV3,2")` — an ipsw.me lookup for the newest OS the
+*model* ever shipped — and hands it to `stageVersionBranch()`, which stages
+exactly one of etasonATV / iOS 7 tether / p0sixspwn. In practice that is always
+**etasonATV, i.e. iOS 8.4 only**. The original carries **all three** and selects
+at **runtime**, reading the device's real
+`/mnt/System/Library/CoreServices/SystemVersion.plist` and branching on
+`8.4*` → etasonATV, `7*`/`8*` → iOS 7 tether, `6.1.4` → p0sixspwn, else
+"unsupported version". So if the target device is not on 8.4.x we install a
+payload that cannot work — *and it is worse than inert*:
+`fixup_etasonuntether_rtbuddyd()` replaces `/usr/libexec/rtbuddyd` with a `jsc`
+symlink, which on a non-8.4 system is an active break of a system daemon.
+**Cheap check before the next hardware run**: read the device's real installed
+`ProductVersion` over lockdownd in Normal mode and compare it to what the bake
+logged.
+
+**(2) The staged apt lists cache is EMPTY, by design, and `postinstall.sh` does
+not survive it.** `scripts/build_deb_cache_apt.py` writes `apt-lists/` empty
+deliberately — its own module docstring says so, and the reason is sound: the
+lists this resolver could produce would describe the synthetic `file://` repo
+built out of `debcache/`, not the real repos, and would be *actively misleading*
+on-device. But `stageAptListsCache()` stages that empty directory at
+`/private/var/lib/apt/lists/` anyway, and `postinstall.sh` runs under a bare
+`set -ex` with `apt-get update || true` as its **one and only** permitted
+failure. With no network, apt has no candidate for anything, the first
+`apt-get install` fails, `set -e` aborts the script, `install-done` is never
+written — and the device that just rebooted successfully still shows nothing
+installed. This is a real, independent path to the exact symptom being chased.
+
+### 10. What is actually left, and the recommendation
+
+The container and the PID-1 binary are both exonerated. Two candidates remain:
+
+- **(i) The kernel never execs our `launchd`.** Either the `md0` mount of a
+  36.8 MiB ramdisk fails, or the exec is refused. The signing half is dead (§8).
+  The size half is the honest remaining unknown: **our chain has only ever been
+  PROVEN with the 9.5 MiB stock ramdisk.** A 36.8 MiB ramdisk load has never
+  been confirmed on our iBEC. That said, the original demonstrably loads **60
+  MB** on this same hardware, so this is low risk — it is simply not yet proven
+  *for our chain*.
+- **(ii) entrypoint runs but dies inside `do_install()`.**
+
+The beacon bisects exactly these two, and that is the next hardware run.
+
+**Recommendation beyond the beacon**: the reason the original's failures were
+debuggable and ours are not is its fallback userland — `bash`, `sshd` with
+pregenerated host keys, `tar`, `ldid`, delivered by `ssh.tar` + `RamdiskBins.tar`.
+Porting that into the bake, or adding an explicit `--ssh-ramdisk` mode, buys a
+real console on the device. Given that every remaining hypothesis is about
+*what happens after `bootx` where nothing is observable*, that is likely worth
+more than any number of further blind iterations.
+
+Evidence and write-ups behind this section (outside the repo, scratch only):
+`blackb0x-scratch/ci/` (the decrypted CI and stock ramdisks plus `READY`),
+`blackb0x-scratch/ours-full-listing.txt`, `ours-files.txt`, `stock-files.txt`,
+`ours-blackb0x-tree.txt`, `stock-tree.txt`, `nonroot-owned.txt`, and
+`blackb0x-scratch/original/{RECIPE.md,COMPARISON.md,build_original_ramdisk.sh,out/}`.
+Kernel-side sources for §5: xnu `bsd/kern/kern_exec.c` (`exec_mach_imgact()`),
+`bsd/kern/mach_loader.c` (`parse_machfile()`), `bsd/dev/arm/kern_machdep.c`
+(`grade_binary()`, xnu-4570.1.46 through xnu-8792), and `dyld-210.2.3`.
+
+## The kernelcache decrypt failure was the *read* side of the same 16-align bug
+
+The IMG3 alignment fix above cured the encrypt side and was verified against
+`AppleTV3,2` 10B329a, which is exactly the build that had always worked. A
+systematic sweep of all 101 known (device, build) tuples through `bake-iboot`
+and `bake-kernel` — the first time every tuple had been run rather than the
+handful that were already known-good — showed the other half of the bug was
+still there. 66 of 86 fetchable tuples died in `decrypt()` with `error: cannot
+open infile`, including `AppleTV2,1` and `AppleTV3,1` at 10B329a, the two the
+CI bake matrix excludes.
+
+`readImg3Element()` reads `header->dataSize` bytes of the DATA element.
+`setKeyImg3()` then AES-CBC-decrypts `((header->size -
+sizeof(AppleImg3Header)) / 16) * 16` bytes — the full 16-aligned body, which
+Apple always pads out and which the encrypt-side fix now correctly writes. The
+bytes between the two are never read, so they are the `calloc`'s zeros rather
+than real ciphertext, and the whole final cipher block decrypts to garbage.
+The LZSS stream then ends inside that garbage, `complzss` stops a few dozen
+bytes short of its declared length, and `createAbstractFileFromComp()` refuses
+the image. `writeImg3Default()` was taught to emit the whole encrypted body;
+the reader was never taught to consume it.
+
+The mechanism explains the distribution exactly, which is how it was cornered.
+A build fails when the corrupted block contains real compressed bytes, so
+`dataLength % 16 == 0` always decodes (7 of 7 in the sweep), `% 16 == 1` is a
+coin flip (10B329a on `AppleTV3,2` is the survivor — one real byte in the bad
+block, and the decoder had already emitted its last output), and everything
+from `% 16 == 2` up fails. An off-device reimplementation settled causation
+rather than correlation: the same DATA element, same keys, decrypted xpwn's
+way yields 12,013,523 of 12,013,568 bytes; decrypted over the full aligned
+body it yields exactly 12,013,568. Reading `header->size -
+sizeof(AppleImg3Header)` instead of `dataSize` in that one `default:` case
+flipped **66 tuples from failure to success with zero regressions**, and left
+the re-encrypted 10B329a kernelcache the same length it already was.
+
+So `KernelCache: patch failed` on `AppleTV2,1`/`AppleTV3,1` was never a
+CBPatcher limitation, and the CI matrix comment's diagnosis was right all
+along — it just outlived the fix that was thought to have cured it. Once the
+read side matches the write side, CBPatcher handles **every** build this
+project can fetch and decrypt except three: `AppleTV2,1` 8M89, 8C150 and
+8C154 (4.1/4.2/4.2.1, genuinely no matching signatures), and `AppleTV3,2`
+10B809, whose complzss header declares `0xa00006` against a stream that
+produces exactly `0xa00000` — a one-build Apple oddity, not an alignment
+problem.
+
+The measured evidence lives in `misc/verified_patcher_compatible.txt`, whose
+`kernel-readfix` column records the post-fix result for every tuple, and which
+is regenerated by `scripts/gen_verified_patcher_compatible.py`. The fix is
+`regulad/xpwn@78cc777` on the `legacy` branch, following this repo's rule that
+a vendored change is committed and pushed to its fork rather than left as a
+dangling local patch.
+
+### The build that "always worked" was corrupt too, by exactly one byte
+
+Landing the fix produced a surprise worth recording, because it corrects
+something this log previously asserted. The re-encrypted `AppleTV3,2` 10B329a
+kernelcache keeps its exact length (6,007,124 bytes both before and after),
+which is what the sweep reported — but it is NOT byte-identical. Decrypting
+both outputs and decompressing them shows why: the plaintext differs in four
+bytes, three in the complzss header's adler32 field and one at the very end of
+the compressed stream, and the decompressed 10 MiB kernels differ in **exactly
+one byte, the last one** (offset `0x9fffff`, `0x4c` before the fix where the
+stock kernel has `0x00`).
+
+That single byte is the whole story of why this hid for so long. `dataSize` is
+`0x5b9fd9`, so nine real bytes fell inside the final corrupted cipher block —
+but the LZSS decoder had already emitted all `0xa00000` output bytes by the
+time it reached them, and the one byte of damage that did land in the output
+sat in trailing padding rather than in code or data the kernel ever reads.
+`patchKernel()` then recomputed the adler32 over the corrupted image, so the
+container was perfectly self-consistent: `complzss` verified, iBoot accepted
+it, and the device booted. Every check the pipeline could make passed, because
+the corruption had been laundered into the checksum.
+
+So the encrypt-side fix in 4481d66 was verified against an output that was
+itself still subtly wrong, and `--stock-ramdisk` has been booting a
+one-byte-corrupt kernel this whole time. The lesson to carry forward is that a
+self-consistent artifact proves nothing about a pipeline that regenerates its
+own checksums — the only trustworthy oracle is a byte comparison against
+independently-derived plaintext, which is what finally settled it here.
+
+## The newest Apple TV 3 builds are not key-blocked; they are unencrypted
+
+`keys/` stops at 12H914 for both `AppleTV3,1` and `AppleTV3,2`, and 12H923,
+12H937 and 12H1006 were assumed untargetable for want of published keys. They
+are not. Apple shipped those builds — and 12H903, 12H911 and 12H914 before
+them — with **no KBAG element at all** in iBSS, iBEC, the kernelcache or the
+RestoreRamDisk. The Apple Wiki publishes only a RootFS key for them for
+precisely that reason, not because anyone failed to extract the rest. The
+repository already encodes this for the three it knows about:
+`keys/AppleTV3,2/AppleTV3,2_12H914.keys` is a plist of empty strings, which is
+the correct and complete key material for an unencrypted build.
+
+Verified by construction rather than by inspection: running the real
+`bake-iboot`/`bake-kernel` pipeline against synthetic all-empty `.keys` files
+(via `BLACKB0X_IMAGEKEYS_DIR`, so `keys/` is never shadowed) patches and
+republishes iBSS, iBEC and the kernelcache for all three builds on both
+devices. `misc/verified_patcher_compatible.txt` records these as
+`verified-unencrypted`, and its generator now makes this probe part of the
+sweep — "no `.keys` file" is a question to answer, not an answer, and the
+honest count of genuinely key-blocked Apple TV tuples is zero.
+
+The practical consequence is that `kJailbreakTargetBuild` can move from
+10B329a to **12H1006 (8.4.7)** for `AppleTV3,1`/`AppleTV3,2` — the newest
+build either device ever received — with both patchers verified, no key hunt
+required, and `stageVersionBranch()`'s existing `rfind("8.4", 0)` already
+routing it to the etasonATV untether. `AppleTV2,1` tops out at 11D258 (7.1.2)
+on the tethered `dirhelper` branch. What stands between that and a real
+retarget is the xpwn read-side fix, three empty `.keys` files, the 64 MiB
+ramdisk ceiling, and hardware — a patched bake is still not a boot.
+
+This also retires, on its own terms, the "can an old iBoot boot a NEWER
+build's kernelcache?" question documented above. That section's conclusion was
+that version *skew* between iBoot and the tree it hands off is the hazard, and
+that a matched suite has none by construction. Retargeting to 12H1006 is
+exactly a matched suite: patched iBSS/iBEC, kernelcache, DeviceTree and
+ramdisk all from the one build. It needs no cross-version handoff to work.

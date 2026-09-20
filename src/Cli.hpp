@@ -44,7 +44,7 @@ struct CliOptions {
     // --no-pwn; renamed to avoid colliding with the new, differently-
     // scoped --no-pwn above once that name became available.)
     //
-    // REQUIRES stockFirmwareOld below (runCli() refuses to start otherwise):
+    // REQUIRES stockFirmware below (runCli() refuses to start otherwise):
     // the resulting stock iBEC still enforces real APTicket verification
     // on whatever it loads next, checkm8 or not (patch_ticket_check()
     // only ever runs against blackb0x's own patched iBEC), and a real
@@ -69,36 +69,44 @@ struct CliOptions {
     // -- drop a real .keys file for that build under keys/
     // and rerun to get past it.
     bool stockRecovery = false;
-    // The two stock-kernel/ramdisk diagnostics. Both send a stock kernelcache
-    // (see Patcher::useStockKernel()) and stock ramdisk (same as stockRamdisk
-    // above) while keeping blackb0x's own patched iBSS/iBEC -- so both test
-    // "can blackb0x's patched bootloader boot an otherwise-unmodified OS?".
-    // They differ ONLY in which build the stock OS suite (kernelcache,
-    // ramdisk, DeviceTree, RestoreLogo) is pulled from:
+    // The stock-kernel/ramdisk diagnostic. Sends a stock kernelcache (see
+    // Patcher::useStockKernel()) and stock ramdisk (same as stockRamdisk
+    // above) while KEEPING blackb0x's own patched iBSS/iBEC -- so it asks
+    // exactly one question: "can blackb0x's patched bootloader boot an
+    // otherwise-unmodified OS?". If it boots, the iBSS/iBEC patches are
+    // confirmed OK and any jailbreak failure is in blackb0x's own
+    // kernel/ramdisk patches; if it fails the same way, the bootloader
+    // patches are implicated.
     //
-    //   stockFirmwareOld -- the same build the patched iBSS/iBEC are for
-    //     (kJailbreakTargetBuild). A self-consistent old suite end to end.
-    //     If this boots, the iBSS/iBEC patches are confirmed OK and any
-    //     jailbreak failure is in blackb0x's own kernel/ramdisk patches; if
-    //     it fails the same way, the bootloader patches are implicated.
+    // The whole suite (kernelcache, ramdisk, DeviceTree, RestoreLogo) comes
+    // from the SAME build the patched iBSS/iBEC are for, kJailbreakTargetBuild
+    // -- self-consistent end to end, and the build stockRecovery/
+    // stockSecurerom below also pair with.
     //
-    //   stockFirmwareNew -- the newest currently-signed build instead, still
-    //     loaded by the OLD patched iBSS/iBEC. The patched iBEC has its ticket
-    //     check defeated and the stock kernel/ramdisk go out still-encrypted
-    //     (the iBEC AES-decrypts them via the GID key), so no APTicket and no
-    //     local .keys are needed for the newer suite. Tests whether the old
-    //     patched bootloader can hand off to a newer OS at all.
+    // There used to be a second flag here, --stock-firmware-new, which pulled
+    // that stock OS suite from the newest currently-signed build instead while
+    // still loading it with the OLD patched iBSS/iBEC, to test whether an old
+    // bootloader could hand off to a newer OS at all. It is gone, and
+    // deliberately so: an iBoot is not a passive loader, it is the DeviceTree's
+    // co-author. The IPSW's DeviceTree is a template whose runtime-filled
+    // properties iBoot populates on the way to XNU, and the set of properties
+    // any given iBoot knows how to fill is frozen at its own build. A newer
+    // kernel wanting a newer runtime-filled property (the documented 32-bit
+    // example is /chosen/nvram-proxy-data, added in iOS 6) gets an empty one
+    // from an older iBoot and hangs very early -- no signature error, no bootx
+    // rejection, no boot-failure-count increment, i.e. a result
+    // indistinguishable from every other failure this flag was supposed to help
+    // tell apart. The one published success at booting a newer kernel under an
+    // older 32-bit iBoot needed a hand-merged DeviceTree AND a patch to iBoot's
+    // own UpdateDeviceTree() -- far outside what iBoot32Patcher does. See
+    // docs/HISTORY.md, "Can an old iBoot boot a NEWER build's kernelcache/
+    // DeviceTree/ramdisk?", for the full evidence and confidence level. Note
+    // this says nothing against retargeting the WHOLE chain (bootloader and OS
+    // together) to a newer build: skew between iBoot and the tree it hands off
+    // is the hazard, and a matched suite has none.
     //
-    // Mutually exclusive (runCli()/parseCliOptions() refuse both). stockram-
-    // disk is redundant with either. stockRecovery/stockSecurerom below build
-    // on stockFirmwareOld specifically (a stock bootloader wants one
-    // self-consistent, keyed/signed build, not a mixed old+new suite).
-    bool stockFirmwareOld = false;
-    bool stockFirmwareNew = false;
-    // True when either stock-kernel/ramdisk mode is active. Everything that
-    // only cares "is the kernel/ramdisk being stocked?" (as opposed to WHICH
-    // build supplies it) tests this.
-    bool stockFirmware() const { return stockFirmwareOld || stockFirmwareNew; }
+    // stockRamdisk is redundant with this (warned, not rejected).
+    bool stockFirmware = false;
     // Like noPwn above (never attempt to run a pwntool), but for the
     // opposite scenario: a genuinely un-exploited device, still running
     // real, un-bypassed SecureROM signature enforcement. Errors out if the
@@ -109,7 +117,7 @@ struct CliOptions {
     // the rest of the boot chain, personalizing iBSS with a real,
     // ECID-bound SHSH ticket fetched from Apple's TSS server before
     // sending it (see Personalize.hpp/DeviceManager::sendiBSS()) --
-    // REQUIRES both stockRecovery and stockFirmwareOld (runCli() refuses to
+    // REQUIRES both stockRecovery and stockFirmware (runCli() refuses to
     // start otherwise): that ticket (and the combined APTicket
     // DeviceManager::sendStockRestoreTail() sends afterward) is only ever
     // valid for the exact, unmodified stock components BuildManifest.plist

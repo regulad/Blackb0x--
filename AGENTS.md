@@ -500,11 +500,16 @@ replicated onto the real device by `entrypoint.c`'s `merge_tree()` at boot.
    against real repos. Top-level `etc/`/`var/` are remapped to `private/etc/`,
    `private/var/` — the `.deb` ships them unprefixed (right for on-device dpkg, where
    they are symlinks), but `/blackb0x` is a flat mirror replicated literally.
-7. **Stage the rest, per firmware.** The bake-time `apt-get update` lists cache
-   (so on-device apt knows what every repo offered even with no network at install
-   time), the non-preinstalled `.deb` bytes into apt's real cache directory, and
-   exactly one of three persistence payloads picked by this firmware's real
-   `ProductVersion`.
+7. **Stage the rest, per firmware.** The apt lists cache directory, the
+   non-preinstalled `.deb` bytes into apt's real cache directory, and exactly one
+   of three persistence payloads picked by this firmware's real `ProductVersion`.
+   **The lists cache is staged EMPTY**, and deliberately so —
+   `scripts/build_deb_cache_apt.py` writes `apt-lists/` empty on purpose (its own
+   module docstring says why: the only lists it could generate would describe the
+   synthetic `file://` repo built out of `debcache/`, not the real repos, and would
+   be actively misleading on-device). So `stageAptListsCache()` stages a real path
+   with no package index behind it, and **an offline `apt-get install` has no
+   candidate for anything** — see `postinstall.sh` below for the consequence.
 8. **Build the entrypoint binary once.** `BakeFirmware.cpp`'s `main()` calls
    `buildEntrypointBinary()` before its per-firmware loop, same pattern as the
    debcache cache, and passes the one built path into every `bakeRamdisk()` call.
@@ -591,8 +596,14 @@ too big for this A4-era ramdisk's budget, so they are never staged locally at al
   (`|| true`). Everything else runs under a bare `set -ex`, so a real failure stops
   the script, `install-done` never gets written, and the next boot retries the whole
   install from scratch.
-- With no network, apt still has the bake-time `apt-get update` lists cache staged at
-  `/private/var/lib/apt/lists/`, so it knows what every repo offered as of bake time.
+- **With no network, apt knows nothing.** `/private/var/lib/apt/lists/` is staged,
+  but **empty** (see step 7 above) — there is no bake-time package index on the
+  device at all. So an offline `apt-get install` finds no candidate, it fails under
+  the bare `set -ex`, `install-done` is never written, and the device shows
+  "nothing happened" even on a boot that otherwise worked perfectly. This is a
+  real, known defect, not a design choice; `docs/HISTORY.md`'s ramdisk-teardown
+  section records it as one of two functional defects found independent of the
+  current boot failure.
 - Whatever `.deb` bytes did fit sit in apt's own cache
   (`/private/var/cache/apt/archives/`); apt finds them via its normal
   cache-before-download check, no `file://` source needed for the main debcache.
@@ -625,18 +636,31 @@ Cydia's own LaunchDaemon never got registered.
 
 ### Ramdisk sizing
 
-`/blackb0x` does not fit in the pristine ramdisk's free space, and growing an HFS+
-volume in place proved unreliable (xpwn's `grow_hfs()`, `libhfsp`, and the Linux
-kernel driver's own resize path each have a confirmed bug in exactly that operation).
-So the bake assembles the real final content — original ramdisk + spliced `launchd` +
-`/blackb0x` — onto a generously oversized throwaway scratch volume, measures that
-*mounted* volume's real disk usage (block-rounded; estimating from a plain host
-directory undercounted by several MB in practice), then creates the shipped volume
-sized from that number plus a margin and does one `cp -a`.
+`/blackb0x` does not fit in the pristine ramdisk's free space — Apple ships that
+volume exactly full (0 free blocks). **The bake grows Apple's own volume and injects
+into it; it does not rebuild it.** `afsctool`-compress the staged payload first (so
+the volume is grown to fit the *compressed* tree), measure it, `hdiutil resize` the
+decrypted image up to that plus a margin, `hdiutil attach -owners on`, splice
+`/sbin/launchd` and copy `/blackb0x` straight onto the mounted original, detach, then
+`hdiutil resize -size min` to shrink back. Both `hdiutil` calls need
+`-imagekey diskimage-class=CRawDiskImage`.
 
-Both volumes are case-sensitive, matching the real iOS/tvOS root (HFSX) — a real bake
-failure showed ncurses' terminfo tree needs genuinely distinct case-varying sibling
-directories (`e`/`E`, `a`/`A`).
+The Linux-era objection to growing in place (confirmed bugs in xpwn's `grow_hfs()`,
+`libhfsp` and the Linux kernel driver's own resize path) does not apply to Apple's
+`hdiutil`, and the build-a-new-volume-and-`cp -a` flow that replaced it was a porting
+mistake that cost ownership, decmpfs compression, hard links and volume identity —
+see `BakeRamdisk.cpp`'s own header comment for the measured cost of each.
+
+**The shipped volume is therefore plain, case-INSENSITIVE HFS+ (`H+`, v4)** —
+Apple's original personality, preserved — not the case-sensitive HFSX this section
+used to describe. Nothing creates a volume any more, so there is no `-fs` argument to
+get right. **Known, accepted consequence: case-varying sibling names collapse.**
+ncurses' terminfo tree is the visible case — on the shipped image
+`usr/share/terminfo/E` holds both `Eterm-*` and `eterm`, and `usr/share/terminfo/a`
+holds both `Apple_Terminal` and `ansi*`, where a case-sensitive volume would have
+kept `e`/`E` and `a`/`A` apart. This is cosmetic: the entries are all still present
+and findable, and nothing on the ramdisk runs ncurses. Do not "fix" it by
+reintroducing a volume rebuild.
 
 **A finished ramdisk over 64 MiB is a hard failure**, not a warning: the oversized
 output is deleted and the bake returns false, because a ramdisk that big cannot be

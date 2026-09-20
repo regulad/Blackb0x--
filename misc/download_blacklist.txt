@@ -1,0 +1,52 @@
+# download_blacklist.txt -- (device, buildID) tuples whose IPSW can no
+# longer actually be fetched from Apple's CDN *the way Blackb0x fetches it*.
+#
+# Blackb0x never downloads a whole IPSW: src/IPSWDownloader.cpp drives
+# libfragmentzip, which pulls individual zip members out of the remote
+# archive with HTTP Range requests. So a build is usable only if all three
+# of these hold, and a plain HEAD->200 only proves the first:
+#   1. HEAD (redirects followed) returns 200 with a plausible Content-Length
+#   2. a Range: GET of the archive tail returns 206 Partial Content
+#      (a server that ignores Range and returns 200 is useless to us)
+#   3. the last 22 bytes are a zip End-Of-Central-Directory record --
+#      libfragmentzip reads exactly those bytes and asserts 'PK\x05\x06'
+#      there; it never scans backwards past a zip comment.
+#
+# Everything listed here failed at least one of those, reproducibly. Builds
+# that only failed transiently (timeout, 5xx, connection reset) are NOT
+# listed: a false positive here permanently hides a usable build, which is
+# worse than leaving a dead one in.
+#
+# Scope: the universe probed is whatever ipsw.me's v4 device endpoint
+# enumerates for each model. A handful of keys/<device>/*.keys tuples are
+# internal/beta builds ipsw.me does not list at all (see
+# scripts/generate_firmware_versions.py's AppleDB fallback) -- those have no
+# IPSW URL to probe in the first place and are a separate problem, not
+# blacklist entries.
+#
+# GENERATED FILE -- do not hand-edit. Regenerate with:
+#   scripts/gen_download_blacklist.py
+#
+# Format: one line per tuple, TAB-separated:
+#   <device>	<buildID>	<reason>
+# Sorted by device then buildID (plain `LC_ALL=C sort`, matching this
+# directory's other list files). Blank lines and #-comments are skippable.
+#
+# Reason codes:
+#   head-http-<code>            HEAD did not return 200 (403 = pulled, 404 = gone)
+#   head-no-content-length      200 but no usable Content-Length to range against
+#   head-implausible-length-<n> 200 but far too small to be a real IPSW
+#   range-http-<code>           the Range: GET itself failed
+#   range-ignored-http-200      server ignored Range: -- no partial fetch possible
+#   eocd-behind-zip-comment     real zip, but libfragmentzip cannot open it
+#   no-eocd-signature           archive tail is not a zip at all
+#   no-url-in-ipsw.me           ipsw.me lists the build with no download URL
+#
+# Generated 2026-09-20. Probed 92 tuples across 3 devices: 92 ok, 0 blacklisted, 0 undetermined (left out).
+#
+# Newest build per device at generation time, and whether it passed:
+#   AppleTV2,1: 11D258 (7.1.2) -- ok [ok]
+#   AppleTV3,1: 12H1006 (8.4.7) -- ok [ok]
+#   AppleTV3,2: 12H1006 (8.4.7) -- ok [ok]
+#
+# No entries: every probed tuple downloaded cleanly.

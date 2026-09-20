@@ -1,0 +1,207 @@
+# verified_patcher_compatible.txt -- for each (device, buildID) tuple, whether this
+# project's two GPL patch tools can actually patch that firmware. Established by
+# RUNNING them, not by reasoning about version numbers.
+#
+# The two tools, and what the verdict columns mean:
+#
+#   iBoot32Patcher  third_party/iBoot32Patcher (regulad/iBoot32Patcher@blackb0x).
+#                   Patches the BOOTLOADER -- iBSS with -r, iBEC with -r -k -t
+#                   (signature check, KASLR, ticket check). The `iboot` column is
+#                   one verdict for both components; a failure says which one
+#                   (ibss- or ibec-) broke. Exercised via build/bake-iboot.
+#
+#   CBPatcher       third_party/CBPatcher (zzanehip/CBPatcher, upstream). Patches
+#                   the KERNELCACHE (tfp0, AMFI/memcmp, sandbox policy). Two
+#                   columns, `kernel` and `kernel-readfix` -- see below.
+#                   Exercised via build/bake-kernel.
+#
+# Both tools are pattern matchers against a specific bootloader or kernel build.
+# Whether a given signature survives into a given build is not predictable from the
+# version string, which is why this is measured rather than inferred.
+#
+# WHY THE KERNEL HAS TWO COLUMNS. The kernelcache has to be decrypted before
+# CBPatcher ever sees it, and the vendored xpwn's IMG3 reader has a defect that
+# makes most builds fail at that step -- so with the tree as committed, the `kernel`
+# column mostly measures xpwn, not CBPatcher. readImg3Element() reads only
+# `dataSize` bytes of the DATA element while setKeyImg3() goes on to AES-CBC
+# decrypt the full 16-aligned body, so the bytes between the two are zeros instead
+# of real ciphertext and the whole final cipher block decrypts to garbage. The LZSS
+# stream then stops a few dozen bytes short of its declared length and
+# createAbstractFileFromComp() rejects the kernelcache ("error: cannot open
+# infile"). It is the exact mirror of the encrypt-side 16-align fix already landed
+# in regulad/xpwn@legacy (see docs/HISTORY.md) -- the read path was never brought
+# into line with it. `kernel-readfix` is the same measurement with that one-line
+# read-side fix applied, and it is what CBPatcher can really do.
+#
+# THIS FILE DOES NOT SAY A BUILD IS JAILBREAKABLE. It says the host-side
+# decrypt -> patch -> re-encrypt round trip completed. Nothing here has been booted
+# on hardware, and "both patchers report success" is necessary but nowhere near
+# sufficient -- see docs/HISTORY.md on 10B329a, whose kernelcache patches and
+# re-encrypts perfectly and still did not boot until the img3 alignment fix.
+#
+# Three independent gates stack before a tuple can even be attempted, and only the
+# third is about the patchers:
+#   1. the IPSW must be range-fetchable      -> misc/download_blacklist.txt
+#   2. the IMG3 keys must exist              -> keys/<device>/<device>_<build>.keys
+#   3. the patchers must find their patterns -> this file
+# A tuple failing gate 2 is recorded as `no-keys`, NOT as a patcher failure -- that
+# is "nobody published the keys", a completely different fact from "the patcher
+# cannot handle it". But note gate 2 is weaker than it looks: Apple shipped the late
+# Apple TV 3 builds with an UNENCRYPTED boot chain (no KBAG element at all), so a
+# missing keys/ file there means "no keys are needed", not "no keys exist". This
+# script tells the two apart by running the pipeline against synthetic empty keys,
+# and marks the unencrypted ones `verified-unencrypted:<date>`.
+#
+# GENERATED FILE -- do not hand-edit. Regenerate with:
+#   scripts/gen_verified_patcher_compatible.py
+# and, for the `kernel-readfix` column, the same command with --xpwn-read-fix
+# against a build/bake-kernel built from an xpwn carrying the read-side fix.
+#
+# Format: one line per tuple, TAB-separated:
+#   <device>	<buildID>	<version>	<iboot>	<kernel>	<kernel-readfix>	<evidence>
+# Sorted by device then buildID (plain `LC_ALL=C sort`, matching this directory's
+# other list files). Blank lines and #-comments are skippable.
+#
+# Verdict codes (<iboot>, <kernel>, <kernel-readfix>):
+#   ok                  the tool ran and published a patched, re-encrypted component
+#   fail:patch          THE finding -- the patcher could not find a target pattern
+#                       (spelled fail:ibss-patch / fail:ibec-patch in the iboot
+#                       column, to say which component it choked on)
+#   fail:decrypt        xpwn's decrypt() produced nothing usable; the patcher was
+#                       never reached, so this is NOT a patcher verdict
+#   fail:keys           .keys file exists but has no entry for that component
+#   fail:download       the component could not be fetched -- on the earliest
+#                       AppleTV2,1 builds this is our own BuildManifest identity
+#                       selection picking a *dev* iBSS that the IPSW does not carry,
+#                       also not a patcher verdict
+#   fail:no-url         ipsw.me lists no downloadable IPSW (internal/beta builds)
+#   fail:crash          the tool died on a signal
+#   fail:timeout        the tool did not finish
+#   fail:other          nonzero exit this script could not classify
+#   no-keys             encrypted, and no keys/<device>/<device>_<build>.keys exists
+#   blacklisted         misc/download_blacklist.txt says the IPSW is unfetchable
+#   untested            not attempted in this run and no prior result to carry over
+#
+# Evidence codes:
+#   verified:<date>              the patchers really ran, on that date. The only
+#                                code that means a verdict was measured.
+#   verified-unencrypted:<date>  same, and the tuple needed NO keys at all -- Apple
+#                                shipped its boot chain with no KBAG. keys/ has no
+#                                file for it and does not need one.
+#   no-keys                      gate 2 genuinely blocks it; nothing was run
+#   blacklisted                  gate 1 blocks it; nothing was run
+#   untested                     no measurement exists. NEVER read an untested row
+#                                as a pass or a failure -- it is an absence of
+#                                evidence.
+#
+# Generated 2026-09-20. 101 tuples: 101 verified by running the patchers (6 of them needing no keys at all), 0 genuinely key-blocked, 0 neither. Both patchers OK: 25 with the tree as committed, 84 with the xpwn read fix.
+#
+# Headline, derived from the rows below:
+#   AppleTV2,1: newest verified iBoot32Patcher-OK = 11D258; newest CBPatcher-OK as committed = 11B651; with the xpwn read fix = 11D258; newest with BOTH (read fix) = 11D258
+#     real patcher failures (pattern not found): 8C150 8C154 8M89
+#   AppleTV3,1: newest verified iBoot32Patcher-OK = 12H1006; newest CBPatcher-OK as committed = 12H1006; with the xpwn read fix = 12H1006; newest with BOTH (read fix) = 12H1006
+#     unencrypted boot chain, no keys needed or published: 12H1006 12H923 12H937
+#   AppleTV3,2: newest verified iBoot32Patcher-OK = 12H1006; newest CBPatcher-OK as committed = 12H1006; with the xpwn read fix = 12H1006; newest with BOTH (read fix) = 12H1006
+#     unencrypted boot chain, no keys needed or published: 12H1006 12H923 12H937
+#
+AppleTV2,1	10A406e	6.0	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	10A831	6.0.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	10B144b	6.1	ok	ok	ok	verified:2026-09-20
+AppleTV2,1	10B329a	6.1.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	10B809	6.1.4	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	11A470e	7.0.1	ok	ok	ok	verified:2026-09-20
+AppleTV2,1	11A502	7.0.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	11B511d	7.0.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	11B554a	7.0.4	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	11B651	7.0.6	ok	ok	ok	verified:2026-09-20
+AppleTV2,1	11D169b	7.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	11D201c	7.1.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	11D257c	7.1.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	11D258	7.1.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	8C150	4.2	fail:iboot-download	fail:decrypt	fail:patch	verified:2026-09-20
+AppleTV2,1	8C154	4.2.1	fail:iboot-download	fail:decrypt	fail:patch	verified:2026-09-20
+AppleTV2,1	8F191m	4.3	fail:iboot-download	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	8F202	4.3	fail:iboot-download	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	8F305	4.3	fail:iboot-download	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	8F455	4.3	fail:iboot-download	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	8M89	4.1	fail:ibec-patch	fail:decrypt	fail:patch	verified:2026-09-20
+AppleTV2,1	9A334v	5.0	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	9A335a	5.0	ok	fail:crash	ok	verified:2026-09-20
+AppleTV2,1	9A336a	5.0	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	9A405l	5.0.1	ok	ok	ok	verified:2026-09-20
+AppleTV2,1	9A406a	5.0.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV2,1	9B179b	5.1	ok	ok	ok	verified:2026-09-20
+AppleTV2,1	9B206f	5.1.1	ok	ok	ok	verified:2026-09-20
+AppleTV2,1	9B830	5.1.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	10A406e	6.0	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	10A831	6.0.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	10B144b	6.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	10B329a	6.1.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	10B809	6.1.4	ok	ok	ok	verified:2026-09-20
+AppleTV3,1	11A470e	7.0.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	11A502	7.0.2	ok	ok	ok	verified:2026-09-20
+AppleTV3,1	11B511d	7.0.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	11B553	7.0.4	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,1	11B554a	7.0.4	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	11B651	7.0.6	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	11D169b	7.1	ok	fail:crash	ok	verified:2026-09-20
+AppleTV3,1	11D201c	7.1.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	11D257c	7.1.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12A365b	8.0	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12B410a	8.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12B435	8.1.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12B466	8.1.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12D508	8.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12F69	8.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12H1006	8.4.7	ok	ok	ok	verified-unencrypted:2026-09-20
+AppleTV3,1	12H523	8.4.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12H606	8.4.2	ok	ok	ok	verified:2026-09-20
+AppleTV3,1	12H847	8.4.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12H864	8.4.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12H876	8.4.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	12H885	8.4.3	ok	ok	ok	verified:2026-09-20
+AppleTV3,1	12H903	8.4.3	ok	ok	ok	verified:2026-09-20
+AppleTV3,1	12H911	8.4.3	ok	ok	ok	verified:2026-09-20
+AppleTV3,1	12H914	8.4.6	ok	ok	ok	verified:2026-09-20
+AppleTV3,1	12H923	8.4.6	ok	ok	ok	verified-unencrypted:2026-09-20
+AppleTV3,1	12H937	8.4.6	ok	ok	ok	verified-unencrypted:2026-09-20
+AppleTV3,1	9B179b	5.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	9B206f	5.1.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,1	9B830	5.1.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	10B144b	6.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	10B329a	6.1.3	ok	ok	ok	verified:2026-09-20
+AppleTV3,2	10B806	6.1.4	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,2	10B809	6.1.4	ok	fail:decrypt	fail:decrypt	verified:2026-09-20
+AppleTV3,2	11A469a	7.0.1	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,2	11A470e	7.0.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	11A502	7.0.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	11B511d	7.0.3	ok	ok	ok	verified:2026-09-20
+AppleTV3,2	11B553	7.0.4	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,2	11B554a	7.0.4	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	11B651	7.0.6	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	11D169b	7.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	11D201b	7.1.1	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,2	11D201c	7.1.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	11D257a	7.1.2	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,2	11D257b	7.1.2	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,2	11D257c	7.1.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12A365b	8.0	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12A402	8.0.1	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,2	12B401	8.1	fail:iboot-no-url	fail:no-url	fail:no-url	verified:2026-09-20
+AppleTV3,2	12B410a	8.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12B435	8.1.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12B466	8.1.3	ok	ok	ok	verified:2026-09-20
+AppleTV3,2	12D508	8.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12F69	8.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12H1006	8.4.7	ok	ok	ok	verified-unencrypted:2026-09-20
+AppleTV3,2	12H523	8.4.1	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12H606	8.4.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12H847	8.4.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12H864	8.4.2	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12H876	8.4.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12H885	8.4.3	ok	fail:decrypt	ok	verified:2026-09-20
+AppleTV3,2	12H903	8.4.3	ok	ok	ok	verified:2026-09-20
+AppleTV3,2	12H911	8.4.3	ok	ok	ok	verified:2026-09-20
+AppleTV3,2	12H914	8.4.6	ok	ok	ok	verified:2026-09-20
+AppleTV3,2	12H923	8.4.6	ok	ok	ok	verified-unencrypted:2026-09-20
+AppleTV3,2	12H937	8.4.6	ok	ok	ok	verified-unencrypted:2026-09-20

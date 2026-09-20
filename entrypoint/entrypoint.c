@@ -684,6 +684,42 @@ static void set_auto_boot(void) {
 /* ---------------------------------------------------------------------- */
 
 int entry(void) {
+#if defined(BLACKB0X_REBOOT_BEACON) && BLACKB0X_REBOOT_BEACON > 0
+    /* DIAGNOSTIC BEACON — compile-time opt-in, OFF by default.
+     *
+     * This device has no usable console: its UART is on internal hardware
+     * test-points (not the micro-USB, which is USB/DFU only), and a failed
+     * boot renders nothing to HDMI. So when the jailbreak "does nothing" we
+     * cannot tell the two halves apart: did the kernel never exec us as PID
+     * 1 at all, or did it exec us and we died somewhere in do_install()?
+     *
+     * The beacon answers exactly that, with no hardware. Reboot immediately,
+     * before touching anything -- no console, no disk wait, no mounts, no
+     * install. A device that reproducibly power-cycles a few seconds after
+     * `bootx` proves our code reached PID 1 and executed, which convicts the
+     * install path; a device that stays dark proves the kernel never got
+     * here, which convicts the md0/HFS mount or exec/AMFI path instead.
+     *
+     * Expect the ATV to come back in RECOVERY, not the NAND OS: this path
+     * deliberately skips set_auto_boot(), and SecureROM cleared auto-boot
+     * for the USB boot. That is a second free confirmation, not a bug.
+     *
+     * The delay exists to separate our reboot from a panic or watchdog
+     * reset, which are prompt. busy_wait() is an uncalibrated CPU spin, so
+     * the wall time is approximate.
+     *
+     * sys_reboot() -- never a hand-rolled svc -- because that wrapper
+     * carries the ABI fixes this file needed: reboot(2) is the two-argument
+     * reboot(int opt, char *msg), RB_AUTOBOOT is 0, and Darwin ARM reports
+     * errors via the carry flag. The infinite loop after it is load-bearing:
+     * if reboot() ever returns, PID 1 must not fall through into the real
+     * install path and muddy the signal. */
+    busy_wait(BLACKB0X_REBOOT_BEACON);
+    sys_reboot(0);
+    for (;;) {
+    }
+#endif
+
     int consoleFd = sys_open("/dev/console", O_WRONLY, 0);
     sys_dup2(consoleFd, 1);
     sys_dup2(consoleFd, 2);

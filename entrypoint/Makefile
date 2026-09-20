@@ -29,6 +29,26 @@ LDID ?= ldid
 CFLAGS := -arch armv6 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -Wall -Wextra -O2
 LDFLAGS := -static -Wl,-e,_entry -nostartfiles
 
+# Diagnostic reboot beacon (see entry() in entrypoint.c). Integer = the
+# approximate pre-reboot delay in seconds; 0 (the default) compiles it out
+# entirely, so the shipped binary is unaffected. `?=` is correct here --
+# unlike CC, make does not predefine this name, and make auto-imports the
+# environment, which is what makes the env-var spelling below work.
+#
+# Set it as an ENVIRONMENT VARIABLE, not `make BLACKB0X_REBOOT_BEACON=...`:
+# BakeRamdisk.cpp runs `make clean all` itself via fork+execvp, which
+# inherits environ, so
+#
+#     BLACKB0X_REBOOT_BEACON=10 ./build/blackb0x ...
+#
+# plumbs all the way through a normal jailbreak run with no C++ changes. A
+# hand-run `make BLACKB0X_REBOOT_BEACON=10` would just be overwritten by
+# that bake-time rebuild.
+BLACKB0X_REBOOT_BEACON ?= 0
+ifneq ($(BLACKB0X_REBOOT_BEACON),0)
+CFLAGS += -DBLACKB0X_REBOOT_BEACON=$(BLACKB0X_REBOOT_BEACON)
+endif
+
 # entrypoint replaces /sbin/launchd's content directly (see
 # BakeRamdisk.cpp's spliceFileContentInPlace() call), so it's signed under
 # launchd's own well-known identifier rather than ldid's default (the
@@ -46,6 +66,10 @@ TARGET := entrypoint
 all: $(TARGET)
 
 $(TARGET): entrypoint.c
+ifneq ($(BLACKB0X_REBOOT_BEACON),0)
+	@echo "*** WARNING: reboot beacon ON ($(BLACKB0X_REBOOT_BEACON)s) -- this binary"
+	@echo "*** reboots immediately as PID 1 and installs NOTHING. Diagnostic only."
+endif
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
 	$(LDID) -S -I$(LAUNCHD_IDENTIFIER) $@
 

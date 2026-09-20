@@ -4232,3 +4232,95 @@ flattened single-file `dfu_boot()` we actually use.
 Retest with `--send-only ibss`: if `irecovery -s` now reports **iBoot-1458.2**, our
 iBSS is finally executing and the investigation moves to the iBEC load; if it still
 reports 2261.30.37, `dfu_boot()`'s trampoline/offsets need another look.
+
+## Chasing the kernelcache "Size mismatch from lzss" all the way into iBoot's decompressor — and exonerating the whole compression pipeline
+
+The `--stock-ramdisk` isolation (patched kernel + stock ramdisk) died at the
+kernelcache with iBoot printing:
+
+```
+Attempting to validate kernelcache @ 0x80000000
+Size mismatch from lzss 0x009fffda, should be 0x00a00000
+error loading kernelcache
+```
+
+i.e. iBoot decompressed the kernelcache to `0x9fffda`, 38 bytes short of the
+`0xa00000` its complzss header claims, and refused it. This section records how
+far that was chased before the compression pipeline was cleared entirely.
+
+**Tooling built for this (kept):** `bake-kernel` (BakeKernel.cpp), a standalone,
+rootless kernelcache baker bake-firmware shells out to; `patchKernel()` size
+instrumentation; and `BLACKB0X_KEEP_KERNEL_TEMPS` (keeps the decrypted,
+decompressed, unpatched kernel). Rootless + one-tuple means the whole
+decrypt→CBPatcher→re-encrypt path can be run and inspected in seconds without a
+device.
+
+**Instrumented sizes.** Original kernelcache decompresses to `0xa00000` (exactly
+10 MiB — Apple pads it; the real Mach-O ends in a long zero run with a lone
+`0x4c` at the final byte). CBPatcher patches in place, output size unchanged at
+`0xa00000`. So nothing in the patch stage changes the length.
+
+**CBPatcher is byte-identical to the original.** The original app shipped a
+prebuilt x86_64 `libcbpatcher.a`; ours is rebuilt from the zzanehip/CBPatcher
+fork. Ran the original `.a` under Rosetta on the identical decompressed kernel:
+`cmp` of the two outputs is **0 differing bytes**. Same patch sites, same result.
+
+**xpwn's LZSS compressor is byte-identical to the original AND lossless.** The
+original shipped a prebuilt x86_64 `libxpwntool.a`; ours is built from
+regulad/xpwn. Linked the original's `compress_lzss` (Rosetta) and ours against
+the identical patched kernel: both emit `0x5b9e59` bytes, `cmp`-identical, and
+both round-trip losslessly (`0xa00000 → 0x5b9e59 → 0xa00000`, exact `memcmp`).
+Grepping the entire original source/comments/docs for `lzss`/`compress`/`size
+mismatch` turns up nothing — the original had no awareness of, and no fix for,
+this. The kernel pipeline is byte-for-byte the original's; the original's A5
+jailbreak almost certainly never booted this way either.
+
+**iBoot's decompressor, disassembled.** Decrypted the AppleTV3,2 10B329a iBEC
+(`iBoot-1537.9.55`, the exact build the device runs), extracted the raw ARM
+(img3 DATA at +0x40, base `0x9ff00000` from the vector-table literals), found the
+error string at `0x9ff38a1d`, its caller at `0x9ff1add6`, and the decompressor
+wrapper at `0x9ff22b24` → real decoder at `0x9ff22b58` (ARM, reached via `blx`).
+Disassembled the decoder instruction by instruction (Capstone): it is a
+**faithful, standard reference LZSS** — 4096-byte ring buffer filled with `' '`,
+`THRESHOLD=2`, identical flag/literal/match handling to xpwn's
+`decompress_lzss`, and it *ignores* its `dstlen` argument, stopping only when the
+compressed input is exhausted. No quirk, no early-out, no divergence from the
+reference.
+
+**The header-offset red herring, resolved.** Apple's complzss header is **0x180
+bytes** (compressed data at +0x180; a `version=1` field sits at +0x14). iBoot
+reads `checksum@+8`, `length_uncompressed@+0xc`, `length_compressed@+0x10`, and
+the payload at `+0x180`. xpwn's `CompHeader` has `padding[0x16C]` → sizeof
+`0x180`, and `closeComp()` writes the payload at exactly `+0x180`, version field
+preserved. The offsets match. An earlier extraction that pulled the compressed
+stream from `+0x14` instead of `+0x180` is what produced a bogus decompressed
+size (`0x9ff97c`) and the false "xpwn is lossy" scare — that was a measurement
+bug, not a real one.
+
+**The artifact is complete — verified on both the local bake and the CI
+artifact.** Decrypted the dist `KernelCache-AppleTV3,2_10B329a`, extracted the
+compressed stream at the correct `+0x180`, and decompressed it with the
+reference decoder: exactly `0xa00000`, byte-identical to the patched kernel,
+matching its own header. Then pulled the newest CI `firmware-AppleTV3,2`
+artifact (`gh run download`): its kernelcache is **byte-identical** to the local
+bake and likewise decompresses to a full, correct `0xa00000`.
+
+**Conclusion — the compression pipeline is exonerated.** The compressor, the
+published artifact (local and CI), and iBoot's decoder all independently agree
+on `0xa00000`, and iBoot's decoder is a faithful reference that would accept the
+artifact. Therefore the on-device `Size mismatch 0x9fffda` cannot originate in
+the bake: for iBoot to decode 38 bytes short of a stream that decodes fully
+everywhere else, the compressed data reaching its decoder must be **short at the
+tail**. That leaves two possibilities, both downstream of the bake:
+
+1. **A stale kernelcache on the device** — an older `dist/` artifact than the
+   known-complete one (ruled out for CI: the current CI artifact is verified
+   complete and identical to a good local bake).
+2. **Delivery truncation** — `sendKernelCache()`'s USB upload dropping the tail
+   (a short final DFU packet, or an img3-DATA/AES-block size mismatch), so iBoot
+   reads `length_compressed=0x5b9e59` but the last compressed bytes are missing
+   or zeroed and decompression stops ~38 bytes early.
+
+Next step is to retest against the verified-complete CI kernelcache: if the
+error persists, it is delivery (audit `sendKernelCache`); if it clears, the
+device had been booting a stale artifact.

@@ -190,7 +190,7 @@ public:
     // deviceModel is AppleTVDevice::deviceModel (the signed-build warning
     // before the TSS request).
     int sendStockRestoreTail(uint64_t ecid, const PatchedComponents& components, const std::string& deviceModel,
-                             bool skipBootCheck = false);
+                             bool skipBootCheck = false, bool skipRestoreLogo = false);
 
     // --- Jailbreak status polling (was checkJailbreak/checkJailbreakRunning) ---
     // Blocks for up to a few seconds while it handshakes with the device

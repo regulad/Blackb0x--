@@ -113,7 +113,14 @@ public:
 
     bool patchiBSS(const std::string& path);
     bool patchiBEC(const std::string& path);
-    bool patchKernel(const std::string& path, const std::string& productVersion);
+    // uncompressedSizeOverride: DIAGNOSTIC (bake-kernel --uncompressed-size). If
+    // nonzero and smaller than the decompressed patched kernel, trim the kernel
+    // to that many bytes before re-compressing, so the resulting complzss header
+    // reports that (smaller) length_uncompressed self-consistently. Used to test
+    // whether iBoot accepts a kernelcache whose declared uncompressed size
+    // matches what it actually decodes (dropping trailing padding). 0 = normal.
+    bool patchKernel(const std::string& path, const std::string& productVersion,
+                     size_t uncompressedSizeOverride = 0);
     // No path parameter (unlike patchiBSS()/patchiBEC()/patchKernel() above)
     // -- this never had one that actually did anything: it only ever looks
     // at dist/RestoreRamDisk-<deviceModel_>_<buildID_>.dmg, built from

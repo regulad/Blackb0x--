@@ -125,6 +125,10 @@ void printCliUsage(const char* argv0) {
     printf("                            and release USB immediately so you can inspect it\n");
     printf("                            interactively (e.g. `irecovery -s`). Boot\n");
     printf("                            success/failure is then not judged by this tool.\n");
+    printf("  --no-send-restorelogo     DIAGNOSTIC: never send RestoreLogo or run the\n");
+    printf("                            setpicture/bgcolor commands, on any path -- to\n");
+    printf("                            isolate whether that step disturbs a later\n");
+    printf("                            component load (e.g. the kernelcache).\n");
     printf("  --send-only ibss|ibec     DIAGNOSTIC: run the exploit and send only iBSS\n");
     printf("                            (ibss) or iBSS then iBEC (ibec), then exit\n");
     printf("                            immediately -- leaving the device where that stage\n");
@@ -173,6 +177,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.stockSecurerom = true;
         } else if (arg == "--no-shell-attach") {
             options.noShellAttach = true;
+        } else if (arg == "--no-send-restorelogo") {
+            options.noSendRestoreLogo = true;
         } else if (arg == "--send-only") {
             options.sendOnly = nextArg("--send-only");
             if (options.sendOnly != "ibss" && options.sendOnly != "ibec") {
@@ -853,7 +859,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
 // branch); that whole path is gone -- see docs/HISTORY.md.
 bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device, const PatchedComponents& components,
                              bool dryRun, bool stockRecovery, bool stockSecurerom, const std::string& sendOnly,
-                             bool noShellAttach) {
+                             bool noShellAttach, bool noSendRestoreLogo) {
     if (dryRun) {
         printf("(dry run) Would send:\n");
         printf("  iBSS%s\n", components.iBSS ? "" : " (missing, would fail here)");
@@ -915,7 +921,8 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     auto sendStockTail = [&]() -> bool {
         const char* what = "APTicket + RestoreLogo + Ramdisk + DeviceTree + KernelCache";
         console::out("Sending %s...\n", what);
-        int i = deviceManager.sendStockRestoreTail(device.ecid, components, device.deviceModel, noShellAttach);
+        int i = deviceManager.sendStockRestoreTail(device.ecid, components, device.deviceModel, noShellAttach,
+                                                    noSendRestoreLogo);
         if (i != 0) {
             console::err("Failed to send the post-iBEC stock restore sequence. Re-enter DFU mode and try "
                          "again.\n");
@@ -954,7 +961,7 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     // iBEC and Ramdisk. Non-fatal on failure: RestoreLogo is a cosmetic boot
     // image, not something the boot depends on, so a failed send shouldn't
     // abort a run that would otherwise proceed.
-    if (components.restoreLogo) {
+    if (components.restoreLogo && !noSendRestoreLogo) {
         console::out("Sending RestoreLogo...\n");
         if (deviceManager.sendRestoreLogo(*components.restoreLogo, device.ecid) != 0) {
             console::err("Failed to send RestoreLogo (continuing -- it is a cosmetic boot image).\n");
@@ -1412,7 +1419,7 @@ int runCli(const CliOptions& options) {
 
     if (!sendComponentsToDevice(deviceManager, device, *components, options.dryRun,
                                  options.stockRecovery, options.stockSecurerom, options.sendOnly,
-                                 options.noShellAttach)) {
+                                 options.noShellAttach, options.noSendRestoreLogo)) {
         return 1;
     }
 

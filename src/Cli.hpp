@@ -134,6 +134,13 @@ struct CliOptions {
     // instead (e.g. `irecovery -s`). Boot success/failure is then not judged
     // by this tool -- you inspect it yourself.
     bool noShellAttach = false;
+    // Diagnostic: never send RestoreLogo, and never issue the "setpicture"/
+    // "bgcolor" commands that go with it, on ANY path (the reconnect-per-step
+    // flow and the stockRecovery single-connection tail). The stock recovery
+    // flow this project was modeled against did not always send a logo;
+    // this isolates whether the RestoreLogo upload / setpicture step is what
+    // disturbs a later component (e.g. the kernelcache load).
+    bool noSendRestoreLogo = false;
     bool help = false;
 };
 

@@ -24,6 +24,7 @@
 #include <xpwn/libxpwn.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -35,9 +36,15 @@ static const char* kProg = "bake-kernel";
 static void usage() {
     fprintf(stderr,
             "usage: %s --device <model> --build <buildID> [--out <dir>] [--force]\n"
+            "          [--uncompressed-size <N>]\n"
             "  Decrypts, patches (CBPatcher) and re-encrypts one kernelcache into\n"
             "  <out>/KernelCache-<device>_<buildID> (default <out> = dist). No root needed;\n"
-            "  reuses the same IPSW download cache as bake-firmware.\n",
+            "  reuses the same IPSW download cache as bake-firmware.\n"
+            "  --uncompressed-size <N>  DIAGNOSTIC: trim the decompressed kernel to N bytes\n"
+            "                           (hex 0x.. or decimal) before re-compressing, so the\n"
+            "                           complzss header reports that size. For testing\n"
+            "                           whether iBoot accepts a kernelcache whose declared\n"
+            "                           uncompressed size matches what it decodes.\n",
             kProg);
 }
 
@@ -46,6 +53,7 @@ int main(int argc, char** argv) {
     std::string build;
     std::string outDir = "dist";
     bool force = false;
+    size_t uncompressedSize = 0;  // 0 = normal; else trim the kernel to this before re-compress
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--device") == 0 && i + 1 < argc) {
@@ -56,6 +64,9 @@ int main(int argc, char** argv) {
             outDir = argv[++i];
         } else if (strcmp(argv[i], "--force") == 0) {
             force = true;
+        } else if (strcmp(argv[i], "--uncompressed-size") == 0 && i + 1 < argc) {
+            // accepts hex (0x...) or decimal
+            uncompressedSize = (size_t)strtoull(argv[++i], nullptr, 0);
         } else {
             fprintf(stderr, "%s: unrecognized or incomplete argument: %s\n", kProg, argv[i]);
             usage();
@@ -124,7 +135,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (!patcher.patchKernel(localPath, manifest->productVersion)) {
+    if (uncompressedSize > 0) {
+        fprintf(stderr, "%s: --uncompressed-size 0x%llx: will trim the kernel to that before re-compress\n",
+                kProg, (unsigned long long)uncompressedSize);
+    }
+    if (!patcher.patchKernel(localPath, manifest->productVersion, uncompressedSize)) {
         fprintf(stderr, "%s: patchKernel failed for %s %s\n", kProg, device.c_str(), build.c_str());
         return 1;
     }

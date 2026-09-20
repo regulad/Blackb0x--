@@ -1736,7 +1736,8 @@ int DeviceManager::sendRestoreLogo(const std::string& RestoreLogo_Path, uint64_t
 }
 
 int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& components,
-                                         const std::string& deviceModel, bool skipBootCheck) {
+                                         const std::string& deviceModel, bool skipBootCheck,
+                                         bool skipRestoreLogo) {
     irecv_client_t client = get_tv_patient(ecid);
     if (!client) {
         fprintf(stderr, "sendStockRestoreTail: device did not reconnect\n");
@@ -1818,7 +1819,7 @@ int DeviceManager::sendStockRestoreTail(uint64_t ecid, const PatchedComponents& 
 
     // onlyBootComponents is gone with the tether-boot path -- this was its
     // only guard here, and it is now unconditionally taken.
-    if (components.restoreLogo) {
+    if (components.restoreLogo && !skipRestoreLogo) {
         if (!sendFileThenCommandWithReconnect("sendStockRestoreTail(RestoreLogo)", *components.restoreLogo,
                                                "setpicture 4")) {
             if (client) irecv_close(client);

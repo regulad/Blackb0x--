@@ -323,7 +323,8 @@ bool Patcher::patchiBEC(const std::string& path) {
     checkPatching();
     return true;
 }
-bool Patcher::patchKernel(const std::string& path, const std::string& productVersion) {
+bool Patcher::patchKernel(const std::string& path, const std::string& productVersion,
+                          size_t uncompressedSizeOverride) {
     const FirmwareKeyPair* k = keyFor("Kernelcache");
     if (!k) {
         fprintf(stderr, "patchKernel: no Kernelcache keys loaded\n");
@@ -431,6 +432,29 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
                 patSz, decSz,
                 (patSz == decSz) ? "unchanged (in-place patch, as expected)"
                                  : "*** SIZE CHANGED -- CBPatcher altered the kernel length ***");
+    }
+
+    // DIAGNOSTIC: --uncompressed-size. Trim the decompressed patched kernel to
+    // the requested length BEFORE re-compressing, so the complzss header the
+    // re-encrypt writes reports that (smaller) length_uncompressed and the
+    // stream decodes to exactly it -- a self-consistent kernelcache whose
+    // declared size matches what iBoot actually decoded on hardware (dropping
+    // trailing padding). Only shrinks, never grows.
+    if (uncompressedSizeOverride > 0) {
+        std::error_code trEc;
+        auto cur = fs::file_size(patchedPath, trEc);
+        if (!trEc && uncompressedSizeOverride < cur) {
+            fs::resize_file(patchedPath, uncompressedSizeOverride, trEc);
+            fprintf(stderr,
+                    "patchKernel: [--uncompressed-size] trimmed patched kernel %llu -> %llu bytes before "
+                    "re-compress\n",
+                    (unsigned long long)cur, (unsigned long long)uncompressedSizeOverride);
+        } else {
+            fprintf(stderr,
+                    "patchKernel: [--uncompressed-size] %llu not applied (kernel is %llu bytes; override must "
+                    "be smaller and nonzero)\n",
+                    (unsigned long long)uncompressedSizeOverride, (unsigned long long)cur);
+        }
     }
 
     decrypt(const_cast<char*>(patchedPath.c_str()), const_cast<char*>(outPath.c_str()),

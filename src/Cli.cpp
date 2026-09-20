@@ -139,10 +139,10 @@ void printCliUsage(const char* argv0) {
     printf("                            build-selection and stock flags. NOT a jailbreak.\n");
     printf("  --tether-boot             DIAGNOSTIC: tether-boot the OS on NAND with the\n");
     printf("                            patched kernel instead of installing. Sends iBSS,\n");
-    printf("                            iBEC, DeviceTree, KernelCache -- no RestoreLogo, no\n");
-    printf("                            Ramdisk -- with NAND-root boot-args (no rd=md0). If\n");
-    printf("                            the OS comes up on screen the boot chain/kernel are\n");
-    printf("                            intact; isolates the kernel from the ramdisk path.\n");
+    printf("                            iBEC, RestoreLogo, DeviceTree, KernelCache -- no\n");
+    printf("                            Ramdisk -- with NAND-root boot-args (rd=disk0s1s1).\n");
+    printf("                            If the OS comes up on screen the boot chain/kernel\n");
+    printf("                            are intact; isolates the kernel from the ramdisk path.\n");
     printf("                            NOT a jailbreak; conflicts with --stock-*.\n");
     printf("  --help                    Show this message\n");
     printf("\n");
@@ -874,13 +874,15 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
 //
 // The normal (install) flow: iBSS -> iBEC -> RestoreLogo -> Ramdisk ->
 // DeviceTree -> KernelCache('bootx'). tetherBoot is a diagnostic variant that
-// skips RestoreLogo and Ramdisk and boots the OS already on NAND off the
-// patched kernel (NAND-root args, no rd=md0) -- a fixed revival of the
-// original app's tether-boot (`self.selected_device.jailbroken == 1`) that
-// this port had removed; see CliOptions::tetherBoot and docs/HISTORY.md. It
-// keeps DeviceTree (the kernel needs one; the original tether path wrongly
-// sent none). stockRecovery and tetherBoot are mutually exclusive
-// (parseCliOptions() enforces it), so their branches below never overlap.
+// skips ONLY the Ramdisk and boots the OS already on NAND off the patched
+// kernel (NAND-root args, rd=disk0s1s1 instead of rd=md0) -- a fixed revival
+// of the original app's tether-boot (`self.selected_device.jailbroken == 1`)
+// that this port had removed; see CliOptions::tetherBoot and docs/HISTORY.md.
+// It keeps DeviceTree (the kernel needs one; the original tether path wrongly
+// sent none) AND RestoreLogo (its setpicture is what initializes the display,
+// without which the boot is invisible -- see the RestoreLogo send below).
+// stockRecovery and tetherBoot are mutually exclusive (parseCliOptions()
+// enforces it), so their branches below never overlap.
 bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device, const PatchedComponents& components,
                              bool dryRun, bool stockRecovery, bool stockSecurerom, const std::string& sendOnly,
                              bool noShellAttach, bool noSendRestoreLogo, bool tetherBoot) {
@@ -888,7 +890,7 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
         printf("(dry run) Would send:\n");
         printf("  iBSS%s\n", components.iBSS ? "" : " (missing, would fail here)");
         printf("  iBEC%s\n", components.iBEC ? "" : " (missing)");
-        if (!tetherBoot && components.restoreLogo) printf("  RestoreLogo\n");
+        if (components.restoreLogo) printf("  RestoreLogo\n");
         if (!tetherBoot) printf("  Ramdisk%s\n", components.ramdisk ? "" : " (missing)");
         printf("  DeviceTree%s\n", components.deviceTree ? "" : " (missing)");
         printf("  KernelCache%s%s\n", components.kernel ? "" : " (missing, would fail here)",
@@ -986,12 +988,17 @@ bool sendComponentsToDevice(DeviceManager& deviceManager, AppleTVDevice& device,
     // iBEC and Ramdisk. Non-fatal on failure: RestoreLogo is a cosmetic boot
     // image, not something the boot depends on, so a failed send shouldn't
     // abort a run that would otherwise proceed.
-    // tetherBoot skips RestoreLogo and Ramdisk entirely (see this function's
-    // header): it boots the OS on NAND, so there is no install ramdisk to root
-    // off, and the cosmetic recovery logo is not wanted. DeviceTree and
-    // KernelCache below are still sent -- the kernel needs a DeviceTree
-    // regardless of where it roots.
-    if (!tetherBoot && components.restoreLogo && !noSendRestoreLogo) {
+    // RestoreLogo is sent on BOTH the install and tether-boot paths (only the
+    // Ramdisk below is tether-specific). It is not merely cosmetic here: on
+    // these devices iBoot only brings the display/framebuffer up when it has a
+    // picture to draw, and its `setpicture` is what initializes that panel.
+    // The kernel then renders verbose (`-v`) boot text into the same
+    // framebuffer, and a NAND boot with no framebuffer is invisible whether it
+    // succeeds, hangs, or panics -- which is exactly the "nothing happens on
+    // --tether-boot" symptom. redsn0w injects its own boot logo for the same
+    // reason. It must go BEFORE the DeviceTree, which loads over the logo's
+    // memory once drawn -- this ordering already holds. See docs/HISTORY.md.
+    if (components.restoreLogo && !noSendRestoreLogo) {
         console::out("Sending RestoreLogo...\n");
         if (deviceManager.sendRestoreLogo(*components.restoreLogo, device.ecid) != 0) {
             console::err("Failed to send RestoreLogo (continuing -- it is a cosmetic boot image).\n");

@@ -142,10 +142,12 @@ struct CliOptions {
     // disturbs a later component (e.g. the kernelcache load).
     bool noSendRestoreLogo = false;
     // DIAGNOSTIC: tether-boot instead of the ramdisk install. Sends
-    // iBSS -> iBEC -> DeviceTree -> KernelCache('bootx') -- NO RestoreLogo and
-    // NO Ramdisk -- with NAND-root boot-args (the ramdisk set minus rd=md0),
-    // so the patched kernel boots the OS already on the device's NAND rather
-    // than the install ramdisk. The point is to test the boot chain in
+    // iBSS -> iBEC -> RestoreLogo -> DeviceTree -> KernelCache('bootx') -- NO
+    // Ramdisk -- with NAND-root boot-args (rd=disk0s1s1 instead of rd=md0), so
+    // the patched kernel boots the OS already on the device's NAND rather than
+    // the install ramdisk. RestoreLogo is kept because its setpicture is what
+    // initializes the display -- without it a NAND boot is invisible whether
+    // it succeeds or hangs. The point is to test the boot chain in
     // isolation: if the device leaves Recovery and the real OS comes up on the
     // TV screen, checkm8 -> iBEC -> the -z/patched KernelCache is proven intact
     // end to end and any jailbreak failure is downstream in the ramdisk/

@@ -4614,3 +4614,33 @@ same one `entrypoint.c` mounts as `/`, with `disk0s1s2` as `/var`, matching the
 standard iOS fstab `/dev/disk0s1s1 / hfs ro`). This only affects `--tether-boot`
 (the install path keeps `rd=md0`); it is a runtime `setenv boot-args`, so it
 changes only the `blackb0x` tool, not the baked firmware.
+
+## `--tether-boot` visibility: send the RestoreLogo so the display comes up
+
+`--tether-boot` still showed "nothing" even with `rd=disk0s1s1`. A survey of
+reference tethered-boot implementations (redsn0w, kloader, nyansatan's dualboot,
+synackuk's fast-tethered-boot, the SSH-ramdisk toolchains) confirmed our recipe
+is otherwise canonical: `iBSS -> iBEC -> DeviceTree -> KernelCache('bootx')`,
+`bootx` is the correct final command (not `fsboot`/`go`), `rd=disk0s1s1` is the
+right root partition, and the restore DeviceTree is fine for a NAND boot. The
+one behavioral difference from our working ramdisk boot was that tether-boot
+dropped the RestoreLogo -- and on these devices iBoot only initializes the
+display/framebuffer when it has a picture to draw (`setpicture`). The kernel's
+verbose (`-v`) output renders into that same framebuffer, so with no logo a NAND
+boot is invisible whether it succeeds, hangs, or panics. redsn0w injects its own
+boot logo for exactly this reason. So the earlier "nothing happens" may well have
+been a *working or panicking* boot we simply couldn't see.
+
+Fix: send the RestoreLogo on the tether-boot path too (only the Ramdisk stays
+tether-specific), before the DeviceTree (which loads over the logo's memory once
+drawn -- the existing order already satisfies this). Tool-only change; the baked
+firmware is unaffected.
+
+Remaining possibilities if it's still dark with the logo, per the same survey:
+(1) the true serial console needs `debug=0x14e serial=3` on a hardware UART tap
+to distinguish invisible-but-booting from a real hang -- not available without
+soldering (the ATV3 UART is on test-points); (2) the kernel reaches userspace
+but hangs mounting the NAND root because the installed OS on disk0s1s1 is not a
+clean, fully-restored 10B329a (tether-boot loads OUR 10B329a kernel against
+whatever is on NAND -- a version mismatch will hang). `--stock-ramdisk` avoids
+both by carrying its own self-contained root, which is why it boots regardless.

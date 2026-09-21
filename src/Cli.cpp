@@ -744,6 +744,52 @@ static bool commandExistsOnPath(const char* name) {
     return false;
 }
 
+// Run a command and return its stdout, trimmed. Empty on any failure.
+//
+// popen() runs its argument through /bin/sh, which everything else in this
+// file deliberately avoids -- but the one caller builds no argument from user
+// input (it is a fixed `gh run list` with a literal repo slug), so there is
+// nothing to quote and nothing to inject. Keeping it to one tightly-scoped
+// helper is cheaper than hand-rolling a pipe/fork/dup2 for a single string.
+static std::string captureCommand(const std::string& command) {
+    FILE* pipe = popen(command.c_str(), "r");
+    if (pipe == nullptr) return "";
+    std::string out;
+    char buf[256];
+    while (fgets(buf, sizeof(buf), pipe) != nullptr) out += buf;
+    if (pclose(pipe) != 0) return "";
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) out.pop_back();
+    return out;
+}
+
+// The run id of the newest SUCCESSFUL CI run, or "" if it cannot be
+// determined.
+//
+// WHY THIS EXISTS, because the obvious thing is broken. `gh run download` with
+// no run id is documented as taking the most recent run carrying an artifact
+// of that name, and it does NOT do that in practice: the artifacts endpoint is
+// not ordered by creation time, and gh takes the first match it sees.
+// Measured against this repository -- the list came back
+//
+//   artifact 10624290099  run=35564293107  created 05:28   <- what gh picked
+//   artifact 10624059003  run=35566229208  created 06:00   <- actually newest
+//
+// so a fetch silently served an artifact two runs stale, missing a component
+// that the newest run had built. That is the worst possible failure for this
+// tool: the download SUCCEEDS, the files look right, and the missing piece
+// only surfaces later as a component that will not load -- or, far worse, as a
+// hardware test run against firmware that is not the firmware you just built.
+//
+// Resolving the run explicitly costs one extra `gh` invocation and removes the
+// ambiguity entirely. `--status success` matters as much as the ordering: the
+// newest run may be in progress or may have failed, and half a bake is not
+// something to hand a device.
+static std::string newestSuccessfulRunId(const std::string& repo) {
+    return captureCommand("gh run list --repo " + repo +
+                          " --status success --limit 1 --json databaseId "
+                          "--jq '.[0].databaseId' 2>/dev/null");
+}
+
 // fork/exec, wait, report. No shell, same as everywhere else here.
 static bool runForeground(const std::vector<std::string>& argv) {
     std::vector<char*> cargv;
@@ -862,12 +908,24 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
         fs::remove_all(scratch, mkEc);
         fs::create_directories(scratch, mkEc);
 
-        // `gh run download` with no run id takes the most recent run that has
-        // an artifact by this name, which is what the monthly refresh
-        // produces. It unpacks the artifact's contents directly into -D, and
-        // the artifact is the flat dist/ layout already, so no rearranging.
-        bool fetched = runForeground(
-            {"gh", "run", "download", "--repo", artifactRepo(), "-n", artifact, "-D", scratch.string()});
+        // Pin the run explicitly -- see newestSuccessfulRunId() for why the
+        // no-run-id form cannot be trusted. Falling back to it when the lookup
+        // fails is still better than not fetching at all; the presence check
+        // below is what actually decides whether what arrived is usable.
+        const std::string runId = newestSuccessfulRunId(artifactRepo());
+        std::vector<std::string> argv = {"gh", "run", "download"};
+        if (!runId.empty()) {
+            printf("Using CI run %s (newest successful).\n", runId.c_str());
+            argv.push_back(runId);
+        } else {
+            printf("Could not resolve the newest successful CI run; letting gh choose.\n");
+        }
+        argv.insert(argv.end(), {"--repo", artifactRepo(), "-n", artifact, "-D", scratch.string()});
+        fflush(stdout);
+
+        // It unpacks the artifact's contents directly into -D, and the
+        // artifact is the flat dist/ layout already, so no rearranging.
+        bool fetched = runForeground(argv);
 
         if (fetched) {
             std::error_code moveEc;

@@ -472,9 +472,17 @@ jobs:
             exit 1
           fi
 
-          # Signed under launchd's own identifier, because this binary
-          # replaces /sbin/launchd's content.
-          codesign -dv entrypoint/entrypoint 2>&1 | grep -q 'Identifier=com.apple.launchd'
+          # Signed under its OWN identifier. It used to be
+          # `com.apple.launchd`, because the binary was spliced over
+          # /sbin/launchd's content and ran as PID 1. It no longer is: Apple's
+          # launchd is left byte-for-byte untouched on every path, and we
+          # attach at whichever hook the ramdisk generation actually reaches
+          # (a LaunchDaemon plist on 12H1006, /etc/rc.boot on the older
+          # generation). Deliberately NOT `com.apple.rc` on that older branch
+          # either -- nothing establishes that the identifier matters to AMFI
+          # here, and a second identity would fork the artifact for no
+          # measured benefit. See entrypoint/README.md.
+          codesign -dv entrypoint/entrypoint 2>&1 | grep -q 'Identifier=xyz.regulad.blackb0x.entrypoint'
           # The vendored apt has to actually run, not just link.
           # stderr is discarded on purpose: with no APT_CONFIG pointing at a
           # synthetic root, apt correctly complains it cannot find a packaging

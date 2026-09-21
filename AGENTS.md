@@ -177,8 +177,8 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   `blackb0x` picks one by mode and never needs both. Do not collapse them back
   into one — see `src/Patcher.hpp`'s `bootargs` namespace for the disassembly
   and `docs/HISTORY.md`'s "`setenv boot-args` is INERT on this bootloader".
-  `RestoreRamDiskDiagRepack-` and `RestoreRamDiskDiagBinary-` are the two
-  **diagnostic ramdisks**, written only when `bake-firmware
+  `RestoreRamDiskDiagRepack-`, `RestoreRamDiskDiagBinary-` and
+  `RestoreRamDiskDiagOverlay-` are the three **diagnostic ramdisks**, written only when `bake-firmware
   --diagnostic-ramdisks` is passed (CI always passes it). They are ordinary
   baked output of the same `bakeRamdisk()` call with a different
   `RamdiskVariant`, held to the same 64 MiB ceiling and the same
@@ -860,8 +860,8 @@ distinguished them:
 - **Our rebuild machinery.** decrypt → resize up → attach → write → detach →
   resize to minimum → re-seal.
 
-The two diagnostic images separate them, and both go through the *same*
-`bakeRamdisk()` call as a real bake — a `RamdiskVariant` switch over three
+The three diagnostic images separate them, and all go through the *same*
+`bakeRamdisk()` call as a real bake — a `RamdiskVariant` switch over a few
 small blocks, not a parallel implementation. Keep it that way: the identity of
 the code path is the entire value of the result.
 
@@ -873,6 +873,16 @@ the code path is the entire value of the result.
   binary, its LaunchDaemon plist and `/mnt`, and **no `/blackb0x` overlay** —
   a few hundred KB over stock instead of ~28 MB over. Separates the overlay's
   SIZE from the install mechanism.
+- **`--diag-ramdisk-overlay`** (`RestoreRamDiskDiagOverlay-`): the inverse of
+  the one above and the newest of the three — the **full `/blackb0x` overlay**
+  and `/mnt`, with **no binary and no plist**, so nothing ever tries to launch
+  our code. Within ~53 KB of the real bake's size. This exists because the
+  hardware results split into two DIFFERENT failures rather than one: the full
+  image shows no logo at all (it dies before launchd), while the binary image
+  reaches the logo and only then reboots. If this one boots and stays, the
+  overlay and its bulk are fine and everything points at our job; if it fails,
+  the overlay genuinely prevents the kernel rooting off the image and the two
+  failures have independent causes.
 
 The flags are mutually exclusive with each other, with `--stock-ramdisk`/
 `--stock-firmware` and with `--tether-boot`; `parseCliOptions()` refuses the

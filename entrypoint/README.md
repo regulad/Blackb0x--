@@ -246,9 +246,20 @@ prelinked into both kernelcaches and does TCP-over-USB in-kernel.
 
 ### Where output goes, and why the install log is not it
 
-`entrypoint.c` now has **one output stream and does not configure it**.
-Everything it says is a plain `printf` (progress) or `fprintf(stderr, …)`
-(errors), and launchd attaches both to `/dev/console` from the two
+> **Amended.** This section describes the console side, which is still
+> exactly as written below — but `/dev/console` turned out not to reach the
+> **display**, so `entrypoint.c` now emits everything to a second
+> destination as well: an on-screen console it draws itself. See
+> "Seeing anything at all: the framebuffer console" for that half. The two
+> destinations are fed by **one** call (`emit()` / `emit_err()`) that formats
+> once into one buffer and hands that same buffer to both, so they cannot
+> diverge and a call site cannot forget one of them. Everything below about
+> *where the console stream goes* is unchanged; only the spelling of the call
+> is (`printf` → `emit`, `fprintf(stderr, …)` → `emit_err`).
+
+`entrypoint.c` has **one console stream and does not configure it**.
+Everything it says reaches stdout (progress) or stderr (errors), and launchd
+attaches both to `/dev/console` from the two
 `Standard*Path` keys. The two functions that used to do this by hand are
 gone: `console_print()`, which opened `/dev/console` itself and `dup2`'d it
 onto fds 1 and 2 from `main()`, and `log_to_file()`, a second and entirely
@@ -634,6 +645,244 @@ including when it is installed as `/etc/rc.boot`. Apple's `rc.boot` is signed
 
 If evidence ever turns up that the identifier *is* load-bearing, this is a
 one-line change in `entrypoint/Makefile` — but it should be made on evidence.
+
+## Seeing anything at all: the framebuffer console
+
+`entrypoint/fbtext.h` (font + blitter, device-agnostic) and
+`entrypoint/screen.h` (finding a surface to draw on) put this binary's output
+**on the TV**. They are the reason the dylib closure is three names instead
+of one.
+
+### Why: `/dev/console` is wired up and does not reach the display
+
+This was measured, not assumed. A diagnostic ramdisk (`DiagBinary`) carrying
+this binary and its plist and nothing else was built to answer exactly one
+question, and it answered it:
+
+| image | result on AppleTV3,2 at 12H1006 |
+|---|---|
+| stock | Apple logo, stays |
+| `DiagRepack` (re-sealed, nothing added) | logo + progress bar, stays |
+| `DiagOverlay` (full ~26 MB overlay, no binary, no plist) | logo + empty progress bar, **stays** |
+| `DiagBinary` (binary + plist, no overlay), stay-resident build | **system stays up** |
+
+Three findings, and the third is this section's:
+
+- **Size is exonerated.** The full overlay boots.
+- **Our binary runs**, and the reboots previously chased were caused by our
+  job *exiting* — this launchd evidently treats that as a reason to reboot.
+  Hence the stay-resident no-overlay path in `main()`.
+- **Nothing ever appeared on screen.** The stay-resident build prints a
+  heartbeat to stdout every ten seconds, which launchd routes to
+  `/dev/console` exactly as it does for Apple's own daemon, and the TV showed
+  the Apple logo and nothing else for as long as anyone cared to watch. So
+  `/dev/console` on this ramdisk is a live *stream* but not a live *display*:
+  once `restored_external` points the display pipe at its own surfaces, the
+  boot framebuffer the kernel console draws into is off-screen. **Drawing
+  pixels ourselves is the only remaining way to get output off this device.**
+
+### How: look the surface up by ID; never open IOMobileFramebuffer
+
+`/usr/local/bin/restored_external` creates exactly **three** IOSurfaces at
+display-init time, each with `kIOSurfaceIsGlobal = kCFBooleanTrue`, BGRA,
+write-combined, stride `(width * 4 + 63) & ~63`, and programs them as
+compositor layers with src and dst rects both `{0,0,width,height}`:
+
+```
+layer 0 <- surface[2]              opaque background, one solid colour
+layer 1 <- surface[0] / surface[1] alternating, bzero'd => ALPHA 0
+layer 2 <- NULL
+```
+
+Because they are **global**, they can be re-opened by ID from any process
+with `IOSurfaceLookup()`, and the display pipe scans out of them
+continuously — so storing into their pixels changes the screen with no swap,
+no compositor call, and no cooperation from the process that owns them. The
+ramdisk's own `IOSurface` binary exports every entry point needed
+(`IOSurfaceLookup`, `IOSurfaceGetID`, `IOSurfaceGetWidth`/`Height`/
+`BytesPerRow`/`PixelFormat`/`BaseAddress`, `IOSurfaceLock`,
+`IOSurfaceUnlock`), verified with `nm -gU` against the decrypted ramdisks
+rather than an SDK stub.
+
+**IOMobileFramebuffer is never opened.** Not once. Its exclusive-access
+behaviour could not be settled by reading it, and "probably it lets a second
+client in" is not a thing to find out on a device whose only failure signal
+is a black screen. Lookup-by-ID needs none of it.
+
+**Which surface: the opaque background** (`surface[2]`, layer 0), identified
+by reading pixel `(0,0)` — the background reads alpha `0xFF`, the two
+progress-layer buffers read `0x00000000`. The layer above it is transparent,
+so our text shows through; and the progress buffers are the ones
+`restored_external` rewrites on every update, whereas the background is
+redrawn only on display init and HDMI hot-plug. Its swap routine has exactly
+two callers in `restored_external` — a progress update and an image blit —
+and no timer, animation or polling. While it sits in `accept()` with no host
+attached, which is the field state, it performs zero swaps and zero pixel
+writes, so what we store stays up.
+
+**Ordering is polled, not assumed.** This ramdisk's launchd unit graph has
+no `Requires`/`After`/`Before`, so `restored_external` may not have run when
+we start — and on the `rc.boot` generation *we* are the one who forks it, so
+it definitely has not. `screen_init()` therefore does not assume; it opens a
+bounded 30-second window and retries.
+
+### The rules that keep it from becoming a new way to fail
+
+It is a diagnostic aid on a device we are already struggling to see. An
+install that died because the debug channel could not attach would be
+strictly worse than no debug channel. So:
+
+- **Every failure is a `printf` and a `return`.** There is no path from
+  `screen.h` to `exit()`, `reboot()` or `panic()`.
+- **The poll never blocks.** `screen_init()` tries once and returns; later
+  attempts are piggy-backed on output calls, at most one per second, until
+  the window closes — then it says so on stdout once and goes quiet. Nothing
+  waits on the display, so the install is never delayed by a diagnostic.
+- **Nothing is lost by not blocking.** Lines emitted before a surface is
+  found are held in a backlog (48 × 112 bytes of BSS) and replayed the moment
+  one is. A blocking wait would buy latency and nothing else.
+- **Writes happen inside an `IOSurfaceLock` window, and the base address is
+  re-fetched inside it every time**, so a mapping is never dereferenced on
+  the assumption that it is still there. The lock is deliberately **not**
+  held across the run: holding another process's surface lock for the length
+  of an install is the sort of thing that wedges that process.
+- **Geometry from another process is bounds-checked** before a single store
+  (pixel format, min/max width and height, stride within one cache line of
+  `width * 4`), and `fbtext.h` clips every pixel to the reported extents.
+
+### The console itself
+
+Top-left, newest work appended downward, wrapping back to the top. No word
+wrap: a long line is cut off at the right edge, which is the right trade for
+progress lines and `errno` strings, where the informative part is at the
+front.
+
+- **Scale 3, i.e. 24-pixel glyphs.** Two constraints pull against each other:
+  ten-foot legibility guidance puts the comfortable minimum at roughly 1/30
+  of screen height, and our messages want columns. `scale = width / 416`
+  solves for ~52 columns, which on the 1280×720 output this device drives is
+  3 — a 24-pixel glyph is exactly 1/30 of the frame, and ~50 columns survive
+  after the inset. It is the smallest scale that clears the legibility floor,
+  so it is the one that keeps the most text. 1920 lands on 4, 720 clamps
+  to 2.
+- **A ~3% overscan inset.** The top-left corner is precisely what a TV that
+  overscans eats first. Apple TV over HDMI normally maps 1:1 and would not
+  need this; "normally" is not a property we can check from here, and the
+  cost is a few dozen pixels.
+- **A non-scrolling status row** below the scroll region. The stay-resident
+  heartbeat fires six times a minute against a ~28-row screen; an ordinary
+  line per tick would wrap the console and erase every boot line within five
+  minutes — destroying the only thing that run exists to show a human. So the
+  full line goes to the console, where scrollback is free, and the screen
+  gets the same text rewritten in place.
+- **`panic()` turns the console red** (`screen_alert()`) so a panic is
+  distinguishable at TV distance from the progress lines above it.
+- **Opaque, no blending, no read-modify-write.** The mapping is
+  write-combined: stores are fast, reads are very slow. Every glyph cell is
+  written in full, foreground where the bit is set and background where it is
+  not — which also means the output is legible whichever layer the surface
+  turns out to be on. The single exception is the one 32-bit `(0,0)` read per
+  candidate surface that identifies the background layer.
+- **Non-ASCII collapses to `-`.** This file's prose uses real em-dashes and
+  the 8×8 font is printable ASCII only; a UTF-8 em-dash would otherwise
+  render as three `?` glyphs and eat three of about fifty columns.
+- The font is `font8x8_basic`, public domain (Marcel Sondaar / Daniel
+  Hepper).
+
+### `fbtext.h` knows nothing about the device, on purpose
+
+It is handed a base pointer, a width, a height and a stride, and it stores
+32-bit words. That separation is load-bearing: it lets the drawing logic be
+compiled and **checked on the host**, where the output can actually be looked
+at, before it is ever run on a device we cannot see. The check renders to a
+PPM, dumps an ASCII-art view of the top-left, and asserts the things that are
+easy to break — the scale rule, the text-area geometry, that nothing is
+written outside the surface or outside the column span (a poison-filled
+stride pad catches a `width * 4` mistake, which would otherwise show up as a
+diagonal smear rather than a crash), that the wrap returns to row 0, and that
+the status row is not part of the scroll. It lives in the scratch repo
+(`blackb0x-scratch/fbtext/repocheck/`), not here, because it is a
+verification harness for a 2012 device and not a unit test of this project's
+CLI.
+
+### What this cost in linkage
+
+`entrypoint` loaded exactly **one** dylib and now loads **three**:
+
+| dylib | why |
+|---|---|
+| `/usr/lib/libSystem.B.dylib` | as before |
+| `/System/Library/PrivateFrameworks/IOSurface.framework/IOSurface` | the nine lookup/geometry/lock entry points |
+| `/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation` | `CFRelease` alone — `IOSurfaceLookup()` returns a CF object, and the ID sweep would otherwise leak (and keep mapped) every surface it probes. It is a runtime dependency of IOSurface regardless, so this declares something that was going to be loaded anyway. |
+
+Verified against the **real firmware roots**, not SDK stubs, on all three
+ramdisk generations this project can bake:
+
+| ramdisk | IOSurface entry points | transitive closure | unresolved |
+|---|---|---|---|
+| 12H1006 (AppleTV3,x) | 9/9 | 42 entries | 0 |
+| 11D258 (AppleTV2,1) | 9/9 | 38 entries | 0 |
+| 10B329a (fallback) | 9/9 | 33 entries | 0 |
+
+Both device branches build an **identical undefined-symbol set of 58**
+(44 before; +9 IOSurface, +`CFRelease`, +`___vsnprintf_chk`, +`_fputs`,
++`_fputc`, +`_time`), and all 58 resolve on all three ramdisks. Both SDKs
+ship a linkable `IOSurface.framework` stub with the needed exports —
+iPhoneOS 8.4 (Xcode 6.4) and iPhoneOS 7.1 (Xcode 5.1.1) — so the feature does
+not have to degrade on the older branch, and `entrypoint/Makefile` fails with
+a named error rather than a link error if an SDK ever lacks one of the three.
+
+CI asserts the **whole set by name** rather than a count plus a grep, which
+is strictly stronger than the old "exactly one `LC_LOAD_DYLIB`" check: an
+unexpected fourth dependency fails, and so does a substitution that keeps the
+count the same.
+
+### Neither weak linking nor a compile-time gate is needed, and that was measured
+
+The obvious worry is that linking is a **build-time** decision while the
+generation is a property of the **ramdisk**, so a library present on one
+generation and absent on another would mean a binary that fails to load
+entirely on the other — a failure no runtime probe can rescue. Two escapes
+were considered, and neither is necessary, because the premise is false:
+
+```
+12H1006: IOSurface 9/9  CFRelease present  install-name /System/Library/PrivateFrameworks/IOSurface.framework/IOSurface  armv7
+11D258:  IOSurface 9/9  CFRelease present  install-name  (identical)                                                     armv7
+10B329a: IOSurface 9/9  CFRelease present  install-name  (identical)                                                     armv7
+```
+
+All three generations ship the framework, at the **same install name**, as
+**armv7 thin**, exporting all nine entry points as real text symbols. So:
+
+- **Weak linking (`-weak_framework` / `LC_LOAD_WEAK_DYLIB`) was not adopted.**
+  It buys tolerance of an absent library, and no ramdisk this project can bake
+  lacks it. Adding it would trade a link-time guarantee for a runtime NULL
+  check with nothing bought — and a weak reference that silently resolves to
+  NULL is a worse failure mode here than a bake that refuses to proceed.
+- **A compile-time gate (`-DIS_LAUNCHD_UNIT` or similar) was not adopted**,
+  and would have been wrong even if the library had been missing. The
+  generation is a function of *(device, build)*, not device: under the
+  10B329a fallback **all three devices become the `rc.boot` generation**, so
+  a `DEVICE`-keyed flag would be silently wrong the day that fallback is
+  taken. It would also fork the artifact, giving up the "one binary, one
+  signature, one undefined-symbol closure" property that lets the bake-time
+  check cover both paths at once.
+
+The same reasoning applies to the console descriptors, and the existing
+runtime probe there stays: `fcntl(fd, F_GETFD) == -1` asks the real question
+("did I get usable descriptors?") rather than a proxy for it. See "Runtime
+probes, not a build flag".
+
+> **Known gap, in `src/` and therefore not fixed here.**
+> `verifyEntrypointRuntimeClosure()` in `src/BakeRamdisk.cpp` builds its
+> "defined" set by scanning `*.dylib` under `/usr/lib` and `/usr/lib/system`
+> only. Framework binaries live at
+> `/System/Library/…Frameworks/X.framework/X` — no `.dylib` extension, other
+> directories — so the ten new IOSurface/CoreFoundation symbols will read as
+> unbound and **the bake will fail** until that scan also covers the binary's
+> own `LC_LOAD_DYLIB` paths. The structural half of that function is already
+> fine: it `fs::exists()`-checks each load command's path verbatim, and all
+> three resolve on all three ramdisks.
 
 ## Freestanding, and why it isn't any more
 

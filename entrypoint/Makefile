@@ -195,6 +195,36 @@ CFLAGS := -arch armv7 -marm -fno-stack-protector -Wall -Wextra -O2 \
 # (-miphoneos-version-min already stamps LC_VERSION_MIN_IPHONEOS).
 LDFLAGS := -nostdlib
 
+# ---- The three dylibs this binary loads ----------------------------------
+# It used to be one. The two new ones are the on-screen debug console
+# (entrypoint/screen.h): /dev/console is wired up on this ramdisk but does
+# NOT reach the display once restored_external points the display pipe at its
+# own IOSurfaces — measured on hardware, a ten-second heartbeat to stdout for
+# as long as anyone cared to watch, nothing on the TV — so drawing pixels
+# ourselves is the only remaining way to get output off the device.
+#
+# Named POSITIONALLY, exactly as libSystem already is, rather than through
+# -framework/-F. Three reasons: it keeps every input on one visible list, it
+# avoids any question of framework search-path order picking up something
+# from the host, and IOSurface is a PRIVATE framework, so -framework would
+# need a -F at $(SDK)/System/Library/PrivateFrameworks anyway.
+#
+# CoreFoundation is here for exactly one symbol, CFRelease — IOSurfaceLookup()
+# returns a CF object and the ID sweep would otherwise leak (and keep mapped)
+# every surface it probes. It is also a runtime dependency of IOSurface
+# regardless, so this declares something that was going to be loaded anyway.
+#
+# VERIFIED AGAINST THE REAL FIRMWARE, NOT SDK STUBS. All nine IOSurface entry
+# points screen.h declares are real exported text symbols (`nm -gU`) on all
+# THREE ramdisk generations this project can bake, and the full transitive
+# dylib closure of {IOSurface, CoreFoundation, libSystem} resolves on each
+# with nothing missing: 42 entries on 12H1006, 38 on 11D258, 33 on 10B329a.
+# bakeRamdisk()'s verifyEntrypointRuntimeClosure() re-proves it per bake.
+ENTRYPOINT_DYLIBS := \
+	usr/lib/libSystem.B.dylib \
+	System/Library/PrivateFrameworks/IOSurface.framework/IOSurface \
+	System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+
 # There is deliberately NO diagnostic switch here, and none should be added.
 # This used to carry a -D that compiled a diagnostic in or out, and it was the
 # wrong shape for this project: the ramdisk this binary lives inside is baked
@@ -388,18 +418,32 @@ if [ -z "$$sdk" ]; then \
 	echo "" >&2; \
 	exit 1; \
 fi; \
+libs=''; \
+for l in $(ENTRYPOINT_DYLIBS); do \
+	[ -f "$$sdk/$$l" ] || { \
+		echo "" >&2; \
+		echo "entrypoint: FATAL — $$sdk has no $$l." >&2; \
+		echo "  This SDK cannot link the on-screen debug console (entrypoint/screen.h)." >&2; \
+		echo "  Both pinned SDKs ship it: iPhoneOS8.4.sdk (Xcode 6.4) and" >&2; \
+		echo "  iPhoneOS7.1.sdk (Xcode 5.1.1). A current, arm64e-only iPhoneOS.sdk" >&2; \
+		echo "  does not — see the IPHONEOS_SDK note at the top of this file." >&2; \
+		echo "" >&2; \
+		exit 1; \
+	}; \
+	libs="$$libs $$sdk/$$l"; \
+done; \
 if [ -n "$$tcbin" ]; then \
 	echo "entrypoint: pinned toolchain $$tcbin"; \
 	echo "entrypoint: SDK $$sdk (-miphoneos-version-min=$$iv)"; \
 	"$$tcbin/ld" -v 2>&1 | head -1; \
 	set -x; \
 	"$$tcbin/clang" -B"$$tcbin" $(CFLAGS) -isysroot "$$sdk" $(LDFLAGS) \
-		-o '$@' '$<' "$$sdk/usr/lib/libSystem.B.dylib"; \
+		-o '$@' '$<' $$libs; \
 else \
 	echo "entrypoint: SDK $$sdk (-miphoneos-version-min=$$iv)"; \
 	set -x; \
 	$(CC) $(CFLAGS) -isysroot "$$sdk" $(LDFLAGS) \
-		-o '$@' '$<' "$$sdk/usr/lib/libSystem.B.dylib"; \
+		-o '$@' '$<' $$libs; \
 fi
 endef
 
@@ -407,7 +451,7 @@ endef
 
 all: $(TARGET)
 
-$(TARGET): entrypoint.c
+$(TARGET): entrypoint.c fbtext.h screen.h
 	@$(entrypoint_compile)
 	$(LDID) -S -I$(ENTRYPOINT_IDENTIFIER) $@
 

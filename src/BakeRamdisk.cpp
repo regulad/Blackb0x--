@@ -3082,6 +3082,44 @@ static bool verifyEntrypointRuntimeClosure(const std::string& mountpoint,
 
     std::set<std::string> defined;
     size_t scanned = 0;
+
+    // SCAN THE BINARY'S OWN DEPENDENCIES FIRST, then the two library
+    // directories.
+    //
+    // The directory sweep below globs `*.dylib` under /usr/lib and
+    // /usr/lib/system, which was complete while entrypoint linked nothing but
+    // libSystem. It is not complete any more: a FRAMEWORK's binary lives at
+    // /System/Library/Frameworks/X.framework/X -- a different directory, and
+    // with no `.dylib` extension -- so a sweep keyed on that extension cannot
+    // see it. entrypoint now links IOSurface and CoreFoundation for the
+    // on-screen console, and without this every one of their symbols would
+    // read as unbound and FAIL EVERY BAKE.
+    //
+    // Scanning the load commands is also just better than globbing: it asks
+    // about exactly the libraries this binary says it needs, on this ramdisk,
+    // instead of hoping the right directories were enumerated. The glob stays
+    // because a re-exporting umbrella (libSystem.B.dylib is one) names its
+    // members only indirectly, and those members do live under /usr/lib/system.
+    //
+    // `dylibs` is already the LC_LOAD_DYLIB / LC_LOAD_WEAK_DYLIB /
+    // LC_REEXPORT_DYLIB list read out of the binary above, and each entry was
+    // already existence-checked against this ramdisk, so these paths resolve.
+    for (const auto& dep : dylibs) {
+        std::error_code depEc;
+        fs::path p = fs::path(mountpoint + dep);
+        if (!fs::is_regular_file(p, depEc)) continue;  // follows symlinks
+        bool ok = false;
+        std::string out = runCommandCapture({"nm", "-j", "-g", "-U", p.string()}, &ok);
+        if (!ok) continue;
+        ++scanned;
+        std::istringstream depIn(out);
+        std::string depLine;
+        while (std::getline(depIn, depLine)) {
+            std::string t = trim(depLine);
+            if (!t.empty()) defined.insert(t);
+        }
+    }
+
     for (const char* sub : {"/usr/lib", "/usr/lib/system"}) {
         std::error_code ec;
         fs::path dir = fs::path(mountpoint + sub);
@@ -3111,7 +3149,8 @@ static bool verifyEntrypointRuntimeClosure(const std::string& mountpoint,
     if (!unbound.empty()) {
         fprintf(stderr,
                 "bakeRamdisk: %s: %zu of entrypoint's %zu undefined symbol(s) are not exported by\n"
-                "  anything on this ramdisk (scanned %zu dylib(s) under /usr/lib and\n"
+                "  anything on this ramdisk (scanned %zu library binary/binaries -- the\n"
+                "  binary's own load-command dependencies plus /usr/lib and\n"
                 "  /usr/lib/system, %zu exported symbols):\n",
                 label.c_str(), unbound.size(), undefined.size(), scanned, defined.size());
         size_t shown = 0;

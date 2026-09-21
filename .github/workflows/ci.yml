@@ -511,18 +511,44 @@ jobs:
             exit 1
           fi
 
-          # EXACTLY ONE dylib, and it is libSystem. The whole runtime closure
-          # on both ramdisks is that one name (its LC_REEXPORT_DYLIB targets
-          # were verified 22/22 and 32/32 present, zero missing). A second
-          # entry here means a new per-firmware compatibility risk that
-          # nothing in this repo has measured.
-          deps=$(otool -L entrypoint/entrypoint | tail -n +2 | wc -l | tr -d ' ')
-          if [ "$deps" != 1 ]; then
-            echo "entrypoint links $deps dylibs, expected exactly 1" >&2
-            otool -L entrypoint/entrypoint >&2
+          # EXACTLY THESE THREE dylibs, by name, no more and no fewer.
+          #
+          # This used to demand exactly one (libSystem). It is three now: the
+          # on-screen debug console (entrypoint/screen.h) links IOSurface and
+          # CoreFoundation, because /dev/console on this ramdisk is wired up
+          # but does NOT reach the display once restored_external points the
+          # display pipe at its own IOSurfaces -- measured on hardware -- so
+          # drawing pixels ourselves is the only way to get output off the
+          # device.
+          #
+          # The check is a whole-SET comparison rather than a count plus a
+          # grep, so it is strictly STRONGER than the old one: an unexpected
+          # fourth dependency fails, and so does a substitution that keeps the
+          # count the same. Every allowed library is named here; adding one
+          # means editing this list and re-verifying the closure against the
+          # real firmware, not against an SDK stub.
+          #
+          # Verified present, with every symbol entrypoint needs, on all
+          # THREE ramdisk generations this project can bake (12H1006, 11D258,
+          # 10B329a): transitive closures of 42 / 38 / 33 entries, zero
+          # missing, and the binary's 58 undefined symbols resolve 58/58 on
+          # each, identically on both the AppleTV3,x (iPhoneOS 8.4) and
+          # AppleTV2,1 (iPhoneOS 7.1) builds. bakeRamdisk()'s
+          # verifyEntrypointRuntimeClosure() re-proves it against the real
+          # mounted image on every bake.
+          printf '%s\n' \
+            '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation' \
+            '/System/Library/PrivateFrameworks/IOSurface.framework/IOSurface' \
+            '/usr/lib/libSystem.B.dylib' \
+            | sort > /tmp/entrypoint-dylibs-expected
+          otool -L entrypoint/entrypoint | tail -n +2 \
+            | sed -e 's/ (compatibility.*//' -e 's/^[[:space:]]*//' \
+            | sort > /tmp/entrypoint-dylibs-actual
+          if ! diff -u /tmp/entrypoint-dylibs-expected /tmp/entrypoint-dylibs-actual; then
+            echo "entrypoint's LC_LOAD_DYLIB set is not the allowed set" >&2
+            echo "  (expected above with -, got with +)" >&2
             exit 1
           fi
-          otool -L entrypoint/entrypoint | grep -q '/usr/lib/libSystem\.B\.dylib'
 
           # dyld has to be where the binary says it is. /usr/lib/dyld is
           # present on both ramdisks.

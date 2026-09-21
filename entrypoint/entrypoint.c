@@ -130,6 +130,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/param.h>
@@ -137,6 +138,92 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+/* The on-screen debug channel. screen.h owns the IOSurface lookup and the
+ * "never make this a new way to fail" rules; fbtext.h owns the font and the
+ * blitter and knows nothing about the device. Included here, before emit()
+ * below, and deliberately NOT included anywhere else. */
+#include "fbtext.h"
+#include "screen.h"
+
+/* ---------------------------------------------------------------------------
+ * emit() / emit_err() — ONE call, TWO destinations.
+ * ---------------------------------------------------------------------------
+ *
+ * Every status line, every error, every heartbeat in this file goes through
+ * one of these two. They format ONCE into one buffer and then hand that same
+ * buffer to stdout (or stderr) and to the screen console.
+ *
+ * WHY ONE WRAPPER RATHER THAN A SCREEN CALL PLACED BESIDE EACH printf:
+ *
+ *   1. One format, one buffer, so the two destinations cannot diverge. Two
+ *      independently formatted strings are equal only by convention, and the
+ *      first time someone edits one and not the other, what a human is
+ *      reading on the TV stops matching what is in the log.
+ *   2. A call site cannot forget one of them. The screen exists precisely
+ *      because we could not see anything; a message that silently goes only
+ *      to the dead channel is the exact failure being ended here.
+ *   3. Ordering between the two is guaranteed by construction, not by
+ *      discipline.
+ *
+ * ERRORS GO TO THE SCREEN TOO. emit_err() writes to stderr and to the same
+ * console. Error output is the output that matters most on a device whose
+ * only other failure signal is a black screen; leaving it invisible would
+ * invert the priority.
+ *
+ * THE BUFFER AND TRUNCATION. EMIT_MAX is 512, comfortably more than twice
+ * the longest message this file produces (the /mnt mount-failure explanation,
+ * ~230 bytes with an errno string). vsnprintf always NUL-terminates and
+ * returns the length it WOULD have written, so truncation is detectable — and
+ * it is made VISIBLE rather than silently dropping a tail, because a
+ * truncated diagnostic that looks complete is its own trap. The marker is
+ * ASCII, since the 8x8 font has nothing else.
+ *
+ * NOT unbuffered-stdio-plus-fflush by accident: main() still sets both
+ * streams to _IONBF, and these flush as well, because this process has paths
+ * that never return (panic()'s sleep loop, reboot(2)) where a buffered tail
+ * is a lost tail.
+ *
+ * screen.h's own diagnostics deliberately use plain printf, not emit(): they
+ * are about the screen and belong on the console even when — especially
+ * when — there is no screen. */
+#define EMIT_MAX 512
+#define EMIT_TRUNC_MARK "...[cut]\n"
+
+static void emit_to(FILE *stream, const char *fmt, va_list ap)
+{
+    char buf[EMIT_MAX];
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+
+    if (n >= (int)sizeof(buf)) {
+        /* Overwrite the tail rather than append: the buffer is already full.
+         * sizeof(buf) - 1 - strlen(mark) is where the marker starts. */
+        memcpy(buf + sizeof(buf) - sizeof(EMIT_TRUNC_MARK), EMIT_TRUNC_MARK,
+               sizeof(EMIT_TRUNC_MARK));
+    }
+
+    fputs(buf, stream);
+    fflush(stream);
+    screen_puts(buf);
+}
+
+static void emit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void emit(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    emit_to(stdout, fmt, ap);
+    va_end(ap);
+}
+
+static void emit_err(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void emit_err(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    emit_to(stderr, fmt, ap);
+    va_end(ap);
+}
 
 /* WHERE WE MOUNT THE NAND: /mnt, OUR OWN DIRECTORY, created at BAKE time by
  * BakeRamdisk.cpp (createBlackb0xMountpoint()) with the same owner and mode
@@ -302,9 +389,9 @@ static void write_install_record(const char *outcome) {
     const char *dirs[2] = {INSTALL_LOG_PARENT, INSTALL_LOG_DIR};
     for (int i = 0; i < 2; i++) {
         if (stat(dirs[i], &st) == 0) continue;
-        fprintf(stderr, "entrypoint: %s is missing on the target volume — creating it\n", dirs[i]);
+        emit_err("entrypoint: %s is missing on the target volume — creating it\n", dirs[i]);
         if (mkdir(dirs[i], 0755) != 0) {
-            fprintf(stderr, "entrypoint: cannot create %s (%s) — install record NOT written\n", dirs[i],
+            emit_err("entrypoint: cannot create %s (%s) — install record NOT written\n", dirs[i],
                     strerror(errno));
             return;
         }
@@ -313,14 +400,14 @@ static void write_install_record(const char *outcome) {
 
     int fd = open(INSTALL_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) {
-        fprintf(stderr, "entrypoint: cannot open %s (%s) — install record NOT written\n", INSTALL_LOG,
+        emit_err("entrypoint: cannot open %s (%s) — install record NOT written\n", INSTALL_LOG,
                 strerror(errno));
         return;
     }
     (void)write(fd, outcome, strlen(outcome));
     close(fd);
     if (chown(INSTALL_LOG, UID_MOBILE, GID_STAFF) != 0 || chmod(INSTALL_LOG, 0644) != 0) {
-        fprintf(stderr, "entrypoint: cannot set 501:20 0644 on %s (%s)\n", INSTALL_LOG, strerror(errno));
+        emit_err("entrypoint: cannot set 501:20 0644 on %s (%s)\n", INSTALL_LOG, strerror(errno));
     }
 }
 
@@ -341,7 +428,7 @@ static void write_install_record(const char *outcome) {
 static int install_file(const char *src, const char *dst, int uid, int gid, int mode) {
     struct stat st;
     if (stat(src, &st) != 0) {
-        fprintf(stderr, "Unable to find source file: %s\n", src);
+        emit_err("Unable to find source file: %s\n", src);
         return -1;
     }
 
@@ -411,7 +498,7 @@ static int install_file(const char *src, const char *dst, int uid, int gid, int 
 static int merge_tree(const char *src, const char *dst) {
     DIR *dir = opendir(src);
     if (dir == NULL) {
-        fprintf(stderr, "cannot open blackb0x source dir %s (%s)\n", src, strerror(errno));
+        emit_err("cannot open blackb0x source dir %s (%s)\n", src, strerror(errno));
         return -1;
     }
 
@@ -422,7 +509,7 @@ static int merge_tree(const char *src, const char *dst) {
         if (de == NULL) {
             if (errno != 0) {
                 closedir(dir);
-                fprintf(stderr, "failed to get directories under %s (%s)\n", src, strerror(errno));
+                emit_err("failed to get directories under %s (%s)\n", src, strerror(errno));
                 return -1;
             }
             break; /* genuine end of directory */
@@ -501,7 +588,12 @@ static int merge_tree(const char *src, const char *dst) {
  * see BakeRamdisk.cpp's installEntrypointUnit(). */
 static void panic(const char *msg) {
     char record[512];
-    fprintf(stderr, "PANIC: %s", msg);
+    /* Red from here on, and a blank-line-free banner, so a panic is
+     * distinguishable at TV distance from the ordinary progress lines above
+     * it. screen_alert() is a no-op when no surface was ever found, which is
+     * the only way it can fail. */
+    screen_alert();
+    emit_err("PANIC: %s", msg);
     snprintf(record, sizeof(record), "PANIC: %s", msg);
     write_install_record(record);
     sync();
@@ -542,7 +634,7 @@ static int dpkg_status_has_installed_package(const char *statusPath, const char 
     }
     close(fd);
     if (total >= DPKG_STATUS_SCAN_BUF_SIZE) {
-        fprintf(stderr, "dpkg status file larger than expected — package-state check skipped\n");
+        emit_err("dpkg status file larger than expected — package-state check skipped\n");
         return 0;
     }
 
@@ -601,7 +693,7 @@ static void fixup_etasonuntether_rtbuddyd(void) {
     }
     if (access(MNT "/usr/libexec/rtbuddyd", F_OK) == 0) {
         if (copy_preserving(MNT "/usr/libexec/rtbuddyd", MNT "/usr/libexec/rtbuddyd.orig") != 0) {
-            fprintf(stderr, "failed to back up rtbuddyd before etasonuntether symlink\n");
+            emit_err("failed to back up rtbuddyd before etasonuntether symlink\n");
             return;
         }
         unlink(MNT "/usr/libexec/rtbuddyd");
@@ -612,7 +704,7 @@ static void fixup_etasonuntether_rtbuddyd(void) {
      * branch). */
     if (symlink("/System/Library/Frameworks/JavaScriptCore.framework/Resources/jsc",
                 MNT "/usr/libexec/rtbuddyd") != 0) {
-        fprintf(stderr, "failed to symlink rtbuddyd -> jsc for etasonuntether\n");
+        emit_err("failed to symlink rtbuddyd -> jsc for etasonuntether\n");
     }
 }
 
@@ -643,7 +735,7 @@ static void fixup_etasonuntether_rtbuddyd(void) {
  * response is to refuse outright, not press on. */
 static int do_install(void) {
     if (access(MNT "/Applications/AppleTV.app/AppleTV", F_OK) != 0) {
-        fprintf(stderr, "Not an AppleTV — refusing to touch this volume\n");
+        emit_err("Not an AppleTV — refusing to touch this volume\n");
         return 0;
     }
 
@@ -651,10 +743,10 @@ static int do_install(void) {
         panic("/var/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
     }
 
-    printf("Merging blackb0x payload\n");
+    emit("Merging blackb0x payload\n");
     int merged = merge_tree("/blackb0x", MNT);
     fixup_etasonuntether_rtbuddyd();
-    printf("Finished install\n");
+    emit("Finished install\n");
 
     /* The one on-NAND write of a successful run. Deliberately AFTER the
      * merge, so a record on the NAND means the merge was actually attempted
@@ -826,7 +918,7 @@ static void ensure_console_fds(void) {
 static void ensure_root_writable(void) {
     struct statfs fs;
     if (statfs("/", &fs) != 0) {
-        fprintf(stderr, "entrypoint: statfs(\"/\") failed (%s) — cannot tell if the ramdisk root is writable\n",
+        emit_err("entrypoint: statfs(\"/\") failed (%s) — cannot tell if the ramdisk root is writable\n",
                 strerror(errno));
         return;
     }
@@ -838,11 +930,11 @@ static void ensure_root_writable(void) {
     memset(args, 0, sizeof(args));
     args[0] = (long)fs.f_mntfromname;
     if (mount(fs.f_fstypename, "/", MNT_UPDATE, args) != 0) {
-        fprintf(stderr, "entrypoint: could not remount / read-write from %s (%s)\n", fs.f_mntfromname,
+        emit_err("entrypoint: could not remount / read-write from %s (%s)\n", fs.f_mntfromname,
                 strerror(errno));
         return;
     }
-    printf("Remounted the ramdisk root read-write\n");
+    emit("Remounted the ramdisk root read-write\n");
 }
 
 /* Apple's rc.boot order, preserved: restored_external first, and the three
@@ -929,7 +1021,7 @@ static const char *const kRestoredCandidates[] = {
 static void start_restored_external(void) {
     struct stat st;
     if (stat("/System/Library/LaunchDaemons/com.apple.restored_external.plist", &st) == 0) {
-        printf("restored_external has its own LaunchDaemon here — leaving it to launchd\n");
+        emit("restored_external has its own LaunchDaemon here — leaving it to launchd\n");
         return;
     }
 
@@ -941,9 +1033,8 @@ static void start_restored_external(void) {
         }
     }
     if (prog == NULL) {
-        fprintf(stderr,
-                "entrypoint: no restored binary on this ramdisk — the display and USB will stay down, "
-                "and this install will be unobservable\n");
+        emit_err("entrypoint: no restored binary on this ramdisk — the display and USB will stay down, "
+                 "and this install will be unobservable\n");
         return;
     }
 
@@ -955,15 +1046,15 @@ static void start_restored_external(void) {
         /* Only reached if the exec itself failed. Say so on the console we
          * just inherited from the parent, then leave — the parent is the
          * one doing the install and must not be disturbed. */
-        fprintf(stderr, "entrypoint: cannot exec %s (%s)\n", prog, strerror(errno));
+        emit_err("entrypoint: cannot exec %s (%s)\n", prog, strerror(errno));
         _exit(127);
     }
     if (pid < 0) {
-        fprintf(stderr, "entrypoint: fork() for %s failed (%s) — continuing without display or USB\n", prog,
+        emit_err("entrypoint: fork() for %s failed (%s) — continuing without display or USB\n", prog,
                 strerror(errno));
         return;
     }
-    printf("Started %s (pid %d) for display and USB bring-up\n", prog, (int)pid);
+    emit("Started %s (pid %d) for display and USB bring-up\n", prog, (int)pid);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1019,6 +1110,20 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
+    /* Open the bounded window in which the on-screen console may attach.
+     * This does NOT wait for the display: it tries once, returns, and every
+     * emit() below retries at most once a second until the window closes.
+     * Everything said in the meantime is held and replayed the moment a
+     * surface appears, so nothing is lost by refusing to block — and the
+     * install is not delayed by a diagnostic. See screen.h.
+     *
+     * Deliberately BEFORE start_restored_external(): on the rc.boot
+     * generation we are the one who forks restored_external, so its
+     * surfaces cannot exist yet and the first attempt is expected to fail.
+     * That is the normal case, not an error, and it is exactly what the
+     * backlog is for. */
+    screen_init();
+
     /* Apple's /etc/rc.boot duties, in Apple's order (root, umask, then hand
      * off to restored), minus the parts that only make sense for a stub
      * that is about to exec itself out of existence. Each is a no-op when
@@ -1037,19 +1142,19 @@ int main(void) {
     umask(0);
     start_restored_external();
 
-    printf("Searching for disk...\n");
+    emit("Searching for disk...\n");
     /* Original waits on a stat() of /dev/disk0s1s1 succeeding — matches
      * FUN_00006434 (stat) usage at the call site exactly. The buffer's
      * contents are never read; only the success of the call matters. */
     struct stat st;
     while (stat("/dev/disk0s1s1", &st) != 0) {
-        printf("Waiting for disk...\n");
+        emit("Waiting for disk...\n");
         sleep(1);
     }
 
-    printf("\n\n\n\n\n");
-    printf("blackb0x Jailbreak - by @NSSpiral\n");
-    printf("Mounting filesystem...\n");
+    emit("\n\n\n\n\n");
+    emit("blackb0x Jailbreak - by @NSSpiral\n");
+    emit("Mounting filesystem...\n");
 
     /* CRITICAL: matches FUN_00006028 exactly. Darwin's HFS mount doesn't
      * take the device path as a normal mount(2) argument — it goes in word
@@ -1064,26 +1169,26 @@ int main(void) {
     long hfsArgs1[11];
     hfsArgs1[0] = (long)"/dev/disk0s1s1";
     if (mount("hfs", MNT, 0, hfsArgs1) != 0) {
-        fprintf(stderr, "Failed to mount / r/w at " MNT " (%s)\n", strerror(errno));
-        fprintf(stderr, "  (" MNT " is created at bake time by BakeRamdisk.cpp; ENOENT here means\n"
-                        "   this ramdisk was not baked by blackb0x)\n");
+        emit_err("Failed to mount / r/w at " MNT " (%s)\n", strerror(errno));
+        emit_err("  (" MNT " is created at bake time by BakeRamdisk.cpp; ENOENT here means\n"
+                 "   this ramdisk was not baked by blackb0x)\n");
         return -1;
     }
-    printf("Main filesystem mounted\n");
+    emit("Main filesystem mounted\n");
 
-    printf("Mounting user filesystem...\n");
+    emit("Mounting user filesystem...\n");
     mkdir(MNT "/private/var2", 0x1ed);
     long hfsArgs2[11];
     hfsArgs2[0] = (long)"/dev/disk0s1s2";
     if (mount("hfs", MNT "/private/var", 0, hfsArgs2) != 0) {
-        fprintf(stderr, "Failed to mount /var r/w (%s)\n", strerror(errno));
+        emit_err("Failed to mount /var r/w (%s)\n", strerror(errno));
         return -1;
     }
-    printf("User Filesystem mounted\n");
+    emit("User Filesystem mounted\n");
 
-    printf("Mounting devices...\n");
+    emit("Mounting devices...\n");
     if (mount("devfs", MNT "/dev", 0, NULL) != 0) {
-        fprintf(stderr, "Unable to mount devices! (%s)\n", strerror(errno));
+        emit_err("Unable to mount devices! (%s)\n", strerror(errno));
         /* Innermost first, and var2 removed while the volume carrying it is
          * still mounted — the same ordering fix as the teardown below. The
          * old code unmounted MNT only, leaving the data partition mounted
@@ -1102,7 +1207,7 @@ int main(void) {
         reboot(0);
         return -1;
     }
-    printf("Devices mounted\n");
+    emit("Devices mounted\n");
 
     /* NO OVERLAY => SAY SO AND EXIT CLEANLY, WITHOUT REBOOTING.
      *
@@ -1134,7 +1239,7 @@ int main(void) {
      * the ramdisk touches block devices, and the NAND is already unmounted
      * below before we return. */
     if (access("/blackb0x", F_OK) != 0) {
-        printf("no overlay to copy, dying peacefully\n");
+        emit("no overlay to copy, dying peacefully\n");
         fflush(stdout);
         sync();
         rmdir(MNT "/private/var2");
@@ -1167,14 +1272,36 @@ int main(void) {
          * process DOES rather than the fact of its exiting, and the next
          * suspect is our mount/unmount of the NAND.
          *
-         * The heartbeat doubles as the console test that motivated this whole
-         * image: a line every ten seconds means /dev/console is a live
-         * diagnostic channel, not just a wired-up one. sleep(3) is real libc
-         * here -- the freestanding busy_wait() spin is gone -- so this costs
-         * no CPU and cannot be mistaken for a hang. */
+         * The heartbeat was originally the console test that motivated this
+         * whole image: a line every ten seconds would have meant /dev/console
+         * is a live diagnostic channel, not just a wired-up one. IT DID NOT
+         * APPEAR. The device sat at the Apple logo for as long as anyone
+         * watched, with nothing on screen -- which is the measurement that
+         * produced screen.h. The heartbeat stays because it is still the
+         * liveness signal on the console side, and it now has a second
+         * destination that is known to work.
+         *
+         * sleep(3) is real libc here -- the freestanding busy_wait() spin is
+         * gone -- so this costs no CPU and cannot be mistaken for a hang.
+         *
+         * WHY THE TICK USES THE STATUS ROW AND NOT emit(). This is the one
+         * place in the file that deliberately does NOT send the same text to
+         * both destinations the same way, and the reason is arithmetic: the
+         * screen console is about thirty rows, the tick fires six times a
+         * minute, and an emit() per tick would wrap the console and erase
+         * every boot line within five minutes -- destroying the only thing
+         * this run exists to show a human. So the full line goes to the
+         * console, where scrollback is free, and the screen gets the same
+         * text on its non-scrolling status row, rewritten in place. The
+         * message is still formatted once, into one buffer, and both
+         * destinations get that one buffer. */
         for (unsigned long tick = 0;; tick++) {
-            printf("still alive, not exiting (tick %lu)\n", tick);
+            char beat[SCREEN_LINE_MAX];
+            snprintf(beat, sizeof(beat), "still alive, not exiting (tick %lu)", tick);
+            fputs(beat, stdout);
+            fputc('\n', stdout);
             fflush(stdout);
+            screen_status(beat);
             sleep(10);
         }
     }
@@ -1210,7 +1337,7 @@ int main(void) {
     unmount(MNT, 0);
     sync();
 
-    printf("Installation complete — rebooting device...\n");
+    emit("Installation complete — rebooting device...\n");
     set_auto_boot();
     /* RB_AUTOBOOT (0), a normal reboot — see the bare-0 note above for why
      * the constant is not spelled out. The original binary passed 1

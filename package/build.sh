@@ -100,6 +100,13 @@ fi
 # then deleted from the stage -- work this repo would be paying for no reason.
 # So it is not staged and migrated like the rest; it simply lives here, and
 # sources.list.d/local.list points straight at it.
+#
+# The Packages index is generated below by the real dpkg-scanpackages -- apt
+# needs a real index, not just loose .deb bytes, to resolve these by name. The
+# index is unsigned, which is why postinstall.sh installs with
+# --allow-unauthenticated.
+: "${LOCAL_ONLY_LIST:=$(dirname "$0")/local_only_debs.txt}"
+: "${BLACKB0X_DEBCACHE_DIR:=$(dirname "$0")/../debcache}"
 LOCAL_DEBS_DEST="$STAGING/usr/share/blackb0x/local-debs"
 
 if [ -f "$LOCAL_ONLY_LIST" ]; then

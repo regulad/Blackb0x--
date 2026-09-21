@@ -2008,6 +2008,40 @@ static ExtractedDeb extractDebAndBuildStanza(const std::string& debPath, const s
                                               const std::string& labelForLogging, bool hold,
                                               bool dropRelationshipFields);
 
+// Every loose member a hand-rolled `ar x` + control.tar/data.tar extraction
+// leaves in its temp dir alongside the real payload tree.
+//
+// NONE of these is ever a legitimate device path: a real payload path always
+// carries a directory prefix, so anything sitting flat at the top level came
+// out of the control archive or is the .deb's own archive bytes. Staging one
+// puts a maintainer script on the device root.
+//
+// THIS LIST WAS DUPLICATED, AND BOTH COPIES WERE WRONG IN DIFFERENT WAYS,
+// which is the reason it now lives at file scope with one reader.
+// computePreinstalledPackages() had the long list but omitted `extrainst_`,
+// Cydia's own maintainer-script name, so /blackb0x/extrainst_ — a 51 KB
+// Mach-O — shipped in every ramdisk this project has ever baked.
+// stageBlackb0xPackage() had a four-name inline list covering only `control`
+// and the archive members, so our own package's `postinst` shipped as
+// /blackb0x/postinst. Both were found by listing the built overlay rather
+// than by reading either list, which is the only way a gap like this
+// surfaces: each copy looked complete on its own.
+//
+// `extrainst_` is not Debian; it is Cydia's, and it is exactly the kind of
+// name a list transcribed from the Debian spec will miss.
+static bool isDebControlArtifact(const std::string& name) {
+    static const std::vector<std::string> kNames = {
+        "control", "preinst", "postinst", "prerm", "postrm",
+        "conffiles", "md5sums", "triggers", "shlibs", "templates", "config",
+        "extrainst_",
+    };
+    for (const auto& n : kNames) {
+        if (name == n) return true;
+    }
+    return name == "debian-binary" || name.rfind("control.tar", 0) == 0 ||
+           name.rfind("data.tar", 0) == 0;
+}
+
 // macOS has no container runtime at all (confirmed directly — not just
 // podman, no viable alternative either), so the real, containerized dpkg
 // bootstrap this used to do on Linux is off the table. That real dpkg run
@@ -2087,11 +2121,6 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
     // they're removed before merging — otherwise this hand-rolled unpack
     // would stage a maintainer script (or the .deb's own archive bytes) as
     // if it were real content belonging on the device.
-    static const std::vector<std::string> kDebControlArtifactNames = {
-        "control", "preinst", "postinst", "prerm", "postrm",
-        "conffiles", "md5sums", "triggers", "shlibs", "templates", "config",
-    };
-
     std::string debsRoot = resolveDebcachePath();
     std::string statusOut;
     for (const auto& filename : eligibleFilenames) {
@@ -2136,15 +2165,10 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
             return false;
         }
 
-        for (const auto& name : kDebControlArtifactNames) {
-            std::error_code rmEc;
-            fs::remove(fs::path(extracted.tempDir) / name, rmEc);
-        }
         {
             std::error_code dirEc;
             for (const auto& e : fs::directory_iterator(extracted.tempDir, dirEc)) {
-                std::string fn = e.path().filename().string();
-                if (fn == "debian-binary" || fn.rfind("control.tar", 0) == 0 || fn.rfind("data.tar", 0) == 0) {
+                if (isDebControlArtifact(e.path().filename().string())) {
                     std::error_code rmEc2;
                     fs::remove(e.path(), rmEc2);
                 }
@@ -3047,10 +3071,7 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
     std::vector<std::string> ownedPaths;
     for (const auto& entry : fs::directory_iterator(extracted.tempDir, ec)) {
         std::string name = entry.path().filename().string();
-        if (name == "control" || name == "debian-binary" || name.rfind("control.tar", 0) == 0 ||
-            name.rfind("data.tar", 0) == 0) {
-            continue;
-        }
+        if (isDebControlArtifact(name)) continue;
         ok &= stagePayloadTopLevel(blackb0xRoot, name, entry.path(), /*remapEtc=*/true);
     }
 

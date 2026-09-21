@@ -648,16 +648,43 @@ Picked by `stageVersionBranch()` off the firmware's real `ProductVersion`:
 - Anything else warns and stages common content only. No hard failure — a firmware
   with no persistence answer yet still gets everything else correctly.
 
-### `entrypoint.c` replaces `/sbin/launchd`, not `/etc/rc.boot`
+### Where `entrypoint` attaches: per generation, and NEVER `/sbin/launchd`
 
-The one place this project's exploration went somewhere and came back. Real
-disassembly of an AppleTV2,1 10B809 `RestoreRamdisk` found `/etc/rc.boot` to be an
-`LC_MAIN` Mach-O, which was read as the kernel entering it directly, so the splice
-target moved there for a while on the theory that injecting at the true first entry
-point is strictly better. It didn't generalize: a real bake against AppleTV3,1/3,2
-12H606 failed because that firmware's ramdisk has no `/etc/rc.boot` at all (`/etc/`
-is nearly empty there, confirmed by mounting it). Reverted to always targeting
-`/sbin/launchd`. The ad-hoc signing identity matches: `com.apple.launchd`.
+Superseded twice; this is the current state. **Apple's `/sbin/launchd` is left
+byte-for-byte untouched on every path now.** The baker probes the mounted image
+and picks the hook that generation actually reaches:
+
+- **LaunchDaemons generation** (AppleTV3,1/AppleTV3,2 at 12H1006). Installs
+  `/usr/sbin/blackb0x_entrypoint` plus
+  `/System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist`, and
+  modifies nothing Apple shipped.
+- **`rc.boot` generation** (AppleTV2,1 at 11D258, and all three at 10B329a).
+  There is no LaunchDaemons directory at all, and `/sbin/launchd` never scans
+  one — it spawns `/bin/launchctl`, whose `system_specific_bootstrap()` execs
+  `/etc/rc.boot` and blocks in `waitpid()` before any daemon scan. So a plist
+  there would reach nothing, and we replace `/etc/rc.boot` instead. This is the
+  one path that replaces an Apple file.
+
+The history, because the old entry here warned people off `rc.boot` for a
+reason that does not apply: the splice target moved to `/etc/rc.boot` once
+before and was reverted, because AppleTV3,1/3,2 **12H606** has no `/etc/rc.boot`
+at all. True, and irrelevant now — the branch only runs where the file exists,
+which the baker checks rather than assumes.
+
+Selection is by probing the image, never by a device list, so the 10B329a
+fallback is covered automatically. The binary itself is ONE artifact for both
+generations: it probes at runtime (`fcntl` for usable stdio, `statfs` for a
+read-only root, and the presence of Apple's `restored_external` plist to decide
+whether anything else will start that daemon) rather than carrying a
+compile-time role. A build flag would have to be plumbed backwards from a
+bake-time decision, which is the shape that fails silently on hardware.
+
+Signing identity is `xyz.regulad.blackb0x.entrypoint` on both paths. It is no
+longer `com.apple.launchd`, and deliberately not `com.apple.rc` on the legacy
+branch: nothing establishes that the identifier matters to AMFI here (Apple's
+own ramdisk binaries are all ad-hoc signed, there is no `amfid`, and the
+trust-cache hypothesis was tested and failed), and a second identity would fork
+the artifact for no measured benefit.
 
 **The theory behind the detour was also just wrong, established later.** The kernel
 never execs `/etc/rc.boot` on any firmware — neither the 10B809 nor the 12H606
@@ -669,8 +696,8 @@ kernel has ever known. See "What the firmware itself says about PID 1" below and
 `entrypoint/README.md`.
 
 `do_install()` is unconditional apart from two guards — bail if
-`/mnt1/Applications/AppleTV.app/AppleTV` is missing (not an Apple TV), and `panic()`
-if `/mnt1/var/.blackb0x/install-done` already exists rather than clobber live dpkg
+`/mnt/Applications/AppleTV.app/AppleTV` is missing (not an Apple TV), and `panic()`
+if `/mnt/var/.blackb0x/install-done` already exists rather than clobber live dpkg
 state. No version branching happens on-device at all; that decision was made at bake
 time, so `entrypoint.c` never needs to know what firmware it is on.
 
@@ -682,8 +709,16 @@ time, so `entrypoint.c` never needs to know what firmware it is on.
 - `panic()` deliberately never returns and never reboots. An automatic reboot on a
   genuine failure would re-run the same ramdisk into the same panic every cycle, with
   nothing to show a human debugging over console/serial.
-- The mount target is `/mnt1`, not `/mnt` — `/mnt1` and `/mnt2` are real pre-existing
-  empty mountpoints on a pristine ramdisk; `/mnt` never was.
+- The mount target is **`/mnt`, which the baker now CREATES** (0755 root:wheel,
+  mirroring the pristine `/mnt1`). It used to borrow Apple's `/mnt1`, then
+  `/mnt2`, and neither was safe: `/usr/local/bin/restored_external` is the only
+  process on either ramdisk with mount code and it references every mountpoint
+  its own image has, with `/mnt1` being specifically its system-partition
+  target. `/mnt4` was considered and rejected — 12H1006 ships `/mnt1`-`/mnt4`
+  but 10B329a ships only `/mnt1` and `/mnt2`. Creating our own at BAKE time
+  costs one empty directory, exists on every generation by construction, and
+  avoids a runtime `mkdir()` that would depend on the ramdisk root being
+  writable at that moment (it may not be).
 - `set_auto_boot()` runs the pristine ramdisk's own `/usr/sbin/nvram auto-boot=1`
   before every `reboot(2)`. SecureROM/iBoot clears that variable once a real DFU
   payload has run; without it a plain reboot risks leaving the device at the iBoot/DFU

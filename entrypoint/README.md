@@ -1,29 +1,34 @@
 # entrypoint/
 
-Source for Blackb0x's first-boot installer binary. On the current target
-firmware it is installed on the patched restore ramdisk as
-**`/usr/sbin/blackb0x_entrypoint`** and started by Apple's own real
-`launchd` from
-`/System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist` — see
-"Run as a launchd unit, not as launchd" below, which is the design change
-and its evidence. It used to be spliced over `/sbin/launchd`'s content and
-run as PID 1 (a brief mid-project detour spliced into `/etc/rc.boot`
-instead — see this file's own "Status" section below for why that was
-tried, and why it got reverted), and it still is on the older `rc.boot`
-generation of ramdisk, which cannot load a LaunchDaemon plist at all.
+Source for Blackb0x's first-boot installer binary. **Apple's `/sbin/launchd`
+is left byte for byte alone on every firmware this project bakes** — that is
+now true of both ramdisk generations, and it used to be true of neither.
+Where the binary lands depends on which generation the ramdisk is, and
+`BakeRamdisk.cpp`'s `installEntrypoint()` picks by probing the mounted image:
+
+| generation | installed as | started by |
+|---|---|---|
+| LaunchDaemons — AppleTV3,x **12H1006** | **`/usr/sbin/blackb0x_entrypoint`** (new file) + `/System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist` (new file) | Apple's real `launchd`, as a one-shot LaunchDaemon |
+| `rc.boot` — AppleTV2,1 **11D258**; all three devices at **10B329a** if that fallback is taken | **`/etc/rc.boot`**, replacing Apple's own stub of that name | `launchd` → `/bin/launchctl` → `fwexec("/etc/rc.boot")` |
+
+See "Run as a launchd unit, not as launchd" for the first, and "The `rc.boot`
+generation gets `/etc/rc.boot`" for the second. **The legacy path is the only
+one that replaces something Apple shipped**, and that difference is called
+out rather than smoothed over.
+
+**One binary, no compile-time role.** Every generation-specific decision is a
+*runtime probe* — see "Runtime probes, not a build flag" below. The artifact
+is identical on both generations: one build, one signature, one undefined-
+symbol closure, and the bake-time closure check covers both at once.
 
 It is **not** real launchd and does not masquerade as it — it's a standalone
 one-shot installer that runs just long enough to recursively merge
 `/blackb0x` (a new top-level directory `bakeRamdisk()` stages at bake
 time — see `BakeRamdisk.cpp`'s `stageBlackb0xTree()` — as a flat mirror of
 the real device's final layout, every entry already carrying its correct
-final owner/mode) onto the real device filesystem (mounted at `/mnt1`, one
-of the pristine ramdisk's own pre-existing empty mountpoints — confirmed
-directly against real, decrypted AppleTV2,1 10B809, AppleTV2,1 11D258 and
-AppleTV3,x 12H1006 RestoreRamdisks: `/mnt1` and `/mnt2` both exist at the
-ramdisk root and are empty; reusing one of these two is required rather
-than mkdir'ing a fresh `/mnt`, since `bakeRamdisk()` adds as little as it
-possibly can to the pristine ramdisk), then reboots
+final owner/mode) onto the real device filesystem (mounted at **`/mnt`**, a
+directory the baker creates for us — see "Why our own `/mnt`" below; it used
+to be `/mnt1`), then reboots
 into the real OS. `entrypoint.c`
 itself has no idea what firmware it's running on or what any of these
 files are for anymore — which per-firmware persistence payload to stage,
@@ -40,6 +45,100 @@ first pass matches the original's logic exactly (same syscalls, same file
 lists, same quirks) so it's a verified-correct baseline before any actual
 behavior changes (current pinned deb filenames, hardcoded firmware-version
 branches, etc.) get made on top of it.
+
+## Runtime probes, not a build flag
+
+Three things differ between the two ramdisk generations, and `entrypoint.c`
+settles all three by **asking the running system**, never by a `-D`, an
+`argv` role switch, or anything else decided at compile time:
+
+| question | probe | acts when |
+|---|---|---|
+| do I have stdout/stderr? | `fcntl(1, F_GETFD) == -1`, and the same for fd 2, tested **independently** | launchd gave us nothing — i.e. the `rc.boot` path |
+| is the ramdisk root writable? | `statfs("/")`, test `MNT_RDONLY` | it came back read-only, whichever path we are on |
+| will anything start `restored_external`? | `stat("/System/Library/LaunchDaemons/com.apple.restored_external.plist")` | that unit does not exist — i.e. the `rc.boot` path |
+
+**Why not a build flag.** The generation is a property of the *ramdisk
+image*, not of the device, and the baker only learns which one it has after
+it mounts the image — long after this binary was compiled. Plumbing that
+decision backwards into the build would encode, at link time, an assumption
+about where the artifact will land; when the assumption is wrong the result
+is a device that boots and silently does the wrong thing, which is the exact
+failure class this project has spent weeks deleting. A probe asks the real
+question instead of a proxy for it, costs a few lines, and is self-correcting
+if we ever retarget.
+
+It also keeps the artifact **identical on both generations**: one build, one
+`ldid` identity, one undefined-symbol closure, and one `verifyEntrypointRuntimeClosure()`
+run at bake time that covers both paths.
+
+**On the `restored_external` probe specifically**, since it is the one where
+a more direct signal would have been nicer. What we want to know is "is it
+already running?", and the honest answer is that this userland cannot cheaply
+tell us: there is no `ps`, no `/proc`, and no shell. Asking IOKit whether the
+USB device controller has already been configured *would* be direct, and was
+rejected on cost — it means linking `IOKit`, i.e. a second `LC_LOAD_DYLIB`
+dragging in CoreFoundation, libobjc and libicucore, against a binary whose
+one-name dylib closure is precisely what makes the bake-time closure check
+tractable. The plist probe is the next best thing and is not merely a proxy
+for the generation: it asks whether *the mechanism that would start it*
+exists, so it stays correct on a ramdisk that has the directory but not that
+unit.
+
+## Why our own `/mnt`
+
+The NAND is mounted at **`/mnt`** — a directory *we* create, at **bake**
+time, in `BakeRamdisk.cpp`'s `createBlackb0xMountpoint()`, with the owner and
+mode read off Apple's own `/mnt1` rather than assumed (0755 root:wheel on
+both generations). `entrypoint.c` does no `mkdir` and has no fallback: a
+missing `/mnt` makes the `mount(2)` fail loudly, which is the correct answer
+for a ramdisk we did not bake.
+
+Every earlier version of this project borrowed one of Apple's mountpoints.
+The history is worth keeping, because each step was a real finding:
+
+- **`/mnt1`, for the project's whole life.** Then:
+  `/usr/local/bin/restored_external` is the only process on either ramdisk
+  that contains mount code at all, and **`/mnt1` is its own system-partition
+  mountpoint** — it carries `/sbin/mount`, `/sbin/mount_hfs`,
+  `create_partition_mountpoints`, `libpartition, mounting '%s' at '%s'`, and
+  hardcoded `/mnt1/private/var` and `/mnt1/usr/sbin/lsof`. It only mounts on a
+  host `StartRestore`, already forbidden while we run, so the collision was
+  conditional — but sharing that name bought nothing.
+- **`/mnt2` next, and `/mnt4` rejected**, because the mountpoint set is not
+  the same on both generations. Checked directly on both mounted volumes, all
+  empty:
+
+  | ramdisk | mountpoints present | `restored_external` references |
+  |---|---|---|
+  | 12H1006 | `/mnt1` `/mnt2` `/mnt3` `/mnt4` | `/mnt1`…`/mnt4` |
+  | 10B329a | `/mnt1` `/mnt2` only | `/mnt1`, `/mnt2` |
+
+  `/mnt4` does not exist on the legacy generation at all — and note the right
+  column: **no borrowed mountpoint is un-referenced by `restored_external` on
+  either generation.** There was no clean answer among Apple's.
+- **Our own `/mnt`, which is where this landed.** It cannot be the one
+  `restored_external` reaches for; it exists on both generations by
+  construction, so there is no per-firmware branch and no "which mountpoints
+  does this image happen to have" question to get wrong later.
+
+**And created at bake time, not at runtime**, which is the subtle part: a
+runtime `mkdir` would depend on the ramdisk root being writable at that
+moment, which is exactly the thing `ensure_root_writable()` exists because we
+cannot assume. The baker has no such problem — it already has the image
+attached read-write to stage `/blackb0x` and the binary.
+
+The minimal-footprint principle that used to justify borrowing is not
+abandoned, just paid for explicitly. What the pristine ramdisk gains:
+
+| | LaunchDaemons generation | `rc.boot` generation |
+|---|---|---|
+| adds | `/usr/sbin/blackb0x_entrypoint`, `/System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist`, `/blackb0x/`, `/mnt/` | `/blackb0x/`, `/mnt/` |
+| replaces | *nothing Apple shipped* | **`/etc/rc.boot`** (content only; mode, owner and mtime preserved) |
+| leaves alone | everything else, `/sbin/launchd` included | everything else, `/sbin/launchd` included |
+
+One empty directory is a trivial addition beside the overlay; saying so
+plainly beats leaving a reader to wonder.
 
 ## Run as a launchd unit, not as launchd
 
@@ -93,13 +192,17 @@ it was costing two things:
 
   So by replacing `/sbin/launchd` and exec'ing nothing else, the old design
   **guaranteed the device would never enumerate**, no matter how perfectly
-  `entrypoint` ran. That is a complete, sufficient explanation for "nothing
+  `entrypoint` ran — on *both* generations, since that splice was universal
+  until the `rc.boot` work. That is a complete, sufficient explanation for "nothing
   happens" that is independent of code signing, and it explains the
   stock-vs-ours asymmetry directly.
 
 `com.apple.restored_external.plist` and the binary it runs are therefore
 **load-bearing for observability**. Nothing in the bake touches either, and
-nothing should. Its startup is also safe, checked rather than assumed: it
+nothing should. On the `rc.boot` generation there *is* no such plist, which
+is why `entrypoint` forks `restored_external` itself there — same daemon,
+same reasoning, started by us instead of by launchd; see "`fork`, not
+`exec`, for `restored_external`". Its startup is also safe, checked rather than assumed: it
 sets an `IOPMUBootStage` property, starts a gas-gauge thread, creates a
 listen socket, disables the watchdog, calls `enable_usb_connections()`, then
 blocks in an accept loop — it mounts nothing and erases nothing. Every
@@ -159,14 +262,14 @@ anything meaningful.
 **The plist cannot point `StandardOutPath` at the on-NAND log**, and this is
 the one real constraint in the design. launchd opens that path when it
 *spawns* the job, long before `entrypoint` has mounted anything;
-`/var/mobile/Media/blackb0x_install.log` lives under `/mnt1`, i.e. on the
+`/var/mobile/Media/blackb0x_install.log` lives under `/mnt`, i.e. on the
 NAND. Worse, the failure would be silent rather than loud: launchd would
-create the file on the **ramdisk**, under the still-empty `/mnt1`
+create the file on the **ramdisk**, under the still-empty `/mnt`
 mountpoint, we would then mount the real volume over the top, and every byte
 would land in a shadowed file that dies with the RAM disk.
 
 The obvious alternative — point `StandardOutPath` at a path on the ramdisk
-and copy the finished file onto the NAND once `/mnt1` is mounted — was
+and copy the finished file onto the NAND once `/mnt` is mounted — was
 **considered and rejected**, for two reasons:
 
 1. It assumes the ramdisk root is mounted **read-write** at the moment
@@ -203,20 +306,43 @@ Two fixes went in with it:
   real device keeps its own ownership — and every failure along the way is
   reported on stderr.
 
-**Known consequence on the legacy `rc.boot` generation**, recorded rather
-than silently accepted. Those ramdisks cannot load a plist, so
-`installEntrypoint()` still splices this binary over `/sbin/launchd` there
-and it runs as PID 1 — with nothing to set up its fds, because the kernel
-does not open `/dev/console` for init. (That is exactly why the original
-binary opened it by hand; the disassembly shows the `open`/`dup2` as its
-first act.) So on that generation stdout and stderr are closed and every
-`printf` fails with `EBADF`. That path is already the one documented as
-producing a dark, un-enumerated device with no `restored_external` and no
-display, and it is explicitly not endorsed — so what is lost is a
-diagnostic channel that was already of little use there. If it is ever
-wanted back, the honest shape is a guard that fires **only** when launchd
-did not provide a stream (`if (fcntl(1, F_GETFD) == -1) { … }`), never an
-unconditional re-open that would fight the plist on the primary path.
+**On the `rc.boot` generation nobody sets those descriptors up**, and that is
+now handled rather than merely recorded. The kernel does not open
+`/dev/console` for init there, `launchd` inherits nothing, `launchctl`
+inherits nothing, and the `/etc/rc.boot` it `fwexec`s inherits nothing — which
+is exactly why the original binary opened `/dev/console` by hand as its first
+act (the disassembly shows the `open`/`dup2`). Without a guard every `printf`
+would fail with `EBADF` on precisely the generation with the least other
+observability.
+
+`ensure_console_fds()` restores it in the shape this file previously
+prescribed: a guard that fires **only** when nothing was provided.
+
+```c
+int needOut = (fcntl(1, F_GETFD) == -1);
+int needErr = (fcntl(2, F_GETFD) == -1);
+if (!needOut && !needErr) return;          /* launchd already attached both */
+int fd = open("/dev/console", O_WRONLY);
+```
+
+Three details are deliberate. `fcntl(F_GETFD)` is the cheapest possible "is
+this descriptor open?" — it touches no file and returns `-1`/`EBADF` exactly
+when the fd is closed. The two descriptors are tested **independently**:
+nothing guarantees that a process handed a stdout was handed a stderr, and
+clobbering a live fd 2 to fix a dead fd 1 would be its own bug. And it is
+`O_WRONLY`, not `O_RDWR` — this process never reads the console, and asking
+for read access on a tty we do not own a session on is a needless way to
+fail. It is called first thing in `main()`, before `setvbuf()`, since
+`setvbuf()` on a closed fd 1 is a silent no-op followed by a run with no
+output.
+
+An unconditional re-open is still wrong and is still not done: it would fight
+whatever launchd attached on the primary path.
+
+Bonus, once `restored_external` is up: its own log primitive ends at
+`fputs(msg, __stdoutp)`, and on the way it drains `syslogd`'s ASL store and
+re-prints every record as `SYSLOG: %s`. So anything logged through ASL
+reaches `/dev/console` too, courtesy of that daemon.
 
 `main()` sets both streams **unbuffered** (`setvbuf(_IONBF)`). That is what
 replaces `console_print()`'s original reason for existing: stdio
@@ -253,9 +379,45 @@ tail.
 - **`set_auto_boot()` is unchanged, and that was checked rather than
   assumed.** It waits with `wait4(pid, …)`, naming its one child. As PID 1
   this process was also the reaper of every orphan on the system, so a bare
-  `wait()` would have been ambiguous; as an ordinary daemon there is exactly
-  one child and orphan reaping is Apple's launchd's problem again. The
-  explicitly empty `envp` is likewise still right.
+  `wait()` would have been ambiguous; on both current paths orphan reaping is
+  Apple's launchd's problem again — and naming the pid matters more now than
+  it did, because on the `rc.boot` path we have a *second* child, the
+  `restored_external` we forked, which never exits. A bare `wait()` would
+  block on the wrong one forever. The explicitly empty `envp` is likewise
+  still right.
+- **The teardown got tighter, and one real ordering bug went with it.**
+  Nothing now sits between `do_install()` returning and the NAND being
+  `sync()`ed and unmounted — not a status line, not a second thought. The
+  reason is `restored_external`'s reboot-on-child-exit behaviour (below): the
+  cheap, correct mitigation is to be unmounted before it can fire, not to add
+  a lock or wait for anything. The old sequence also unmounted `/mnt1` *before*
+  `/mnt1/private/var`, which is a submount of it, and then `rmdir`ed
+  `/mnt1/private/var2` after `/mnt1` was already gone — i.e. against the
+  pristine ramdisk's own empty mountpoint rather than the volume the directory
+  was created on. It is innermost-first now, with `var2` removed while its
+  volume is still mounted, and the `devfs`-failure path got the same fix
+  (it used to leave the data partition mounted across a reboot).
+- **`restored_external` reboots the device when its `-server` child exits, on
+  BOTH generations.** An earlier revision of this file called that
+  10B329a-specific; it is not. On 12H1006 too, its no-argument `main()` does a
+  `sysctlbyname`, `fork()`s, the child `execl`s itself with `-server`, the
+  parent `waitpid()`s, and on any exit the parent logs `restored exited
+  normally with status %d - rebooting` (or the `0x%x` / `due to signal %d`
+  variants) and reboots via `/sbin/reboot`. With no host attached that child
+  blocks in `accept()` forever, so it is a tail risk rather than a likely one
+  — which is why the mitigation is the short dirty window above and nothing
+  heavier.
+- **Nothing else on the ramdisk touches block devices**, so there is nothing
+  to lock against: `launchd`, `launchctl`, `xpcproxy`, `syslogd` and
+  `ReportCrash` contain zero references to `/mnt`, `disk0`, `rdisk` or any
+  mount call. Two specifics worth recording so nobody re-investigates them:
+  `syslogd`'s paths are all absolute ramdisk paths (`/var/log`, `/var/log/asl`,
+  `/etc/asl.conf`, `/dev/klog`, `/var/run/syslog`) and `/var/log` and
+  `/etc/asl.conf` do not even exist there — note also that `ASL_DISABLE=1` in
+  its plist is read by `libsystem_asl` in *clients*, not by syslogd, so it
+  makes syslogd skip logging to itself and does not disable the store. And
+  `ReportCrash` is on-demand only (MachServices, no `RunAtLoad`), with
+  `-r /private/var/logs/restored` keeping reports on the ramdisk, in RAM.
 
 ### The unit, key by key
 
@@ -311,15 +473,15 @@ happen after the display is up has to poll or sleep. Nothing artificial is
 added — `entrypoint`'s first action is already a wait loop on
 `/dev/disk0s1s1` appearing, which staggers it naturally.
 
-### It is per-firmware, and the older generation cannot use it
+### It is per-firmware, and the older generation gets `/etc/rc.boot`
 
 Measured on three real decrypted ramdisks. The boundary is the iOS 7 → 8
 launchd rewrite:
 
-| generation | firmwares | init |
-|---|---|---|
-| LaunchDaemons | AppleTV3,x **12H1006** | `launchd` scans `/System/Library/LaunchDaemons` (three plists: ReportCrash.restored, restored_external, syslogd); no `/etc/rc.boot` |
-| `rc.boot` | AppleTV3,2 **10B329a**, AppleTV2,1 **11D258** | no `LaunchDaemons` anywhere, no `/Library`, no `launchd.conf`; `/etc/rc.boot` instead |
+| generation | firmwares | `/sbin/launchd` | init |
+|---|---|---|---|
+| LaunchDaemons | AppleTV3,x **12H1006** | 239,536 B, `com.apple.xpc.launchd` | scans `/System/Library/LaunchDaemons` (three plists: ReportCrash.restored, restored_external, syslogd); no `/etc/rc.boot` |
+| `rc.boot` | AppleTV2,1 **11D258**, and all three devices at **10B329a** (the fallback target) | 149,296 B, `com.apple.launchd` | no `LaunchDaemons` anywhere, no `/Library`, no `launchd.conf`; spawns `/bin/launchctl`, which execs `/etc/rc.boot` |
 
 **A plist dropped on an `rc.boot`-generation ramdisk reaches nothing**, for
 two independent reasons read out of the real binaries:
@@ -332,30 +494,146 @@ two independent reasons read out of the real binaries:
    lookup, not a job loader.
 2. Even if it were a job loader, `launchctl`'s `system_specific_bootstrap()`
    `fwexec()`s `/etc/rc.boot` first (`vfork` + `waitpid`) and blocks there for
-   the whole life of the restore. `/etc/rc.boot` (8832 bytes on 11D258, 8880
-   on 10B329a; armv7 Mach-O, ad-hoc, `com.apple.rc`) `getfsfile()`s the root
-   entry, `mount()`s it, `umask(0)`, then `execl`s each of
-   `/usr/local/bin/restored_external`, `restored_update`, `restored` and
-   `/usr/libexec/ramrod/ramrod` in turn — replacing its own process image on
-   the first that exists, which is always `restored_external`. It never
-   returns.
+   the whole life of the restore.
 
-So those firmwares keep the old splice over `/sbin/launchd`, unchanged, with
-a loud bake-time warning. That is explicitly **not** an endorsement — it is
-the configuration known to produce a dark, un-enumerated device — but it is
-what they have always had, and regressing them to "bake fails" would be
-worse. `bakeRamdisk()` chooses per firmware (`installEntrypoint()`), and
-fails outright on a ramdisk that has neither hook.
+So `/etc/rc.boot` is the only hook that generation reaches — and **that is
+what we install there now.** `bakeRamdisk()` probes the mounted image
+(`installEntrypoint()`): `/System/Library/LaunchDaemons` present → the unit;
+otherwise `/etc/rc.boot` present → replace it; neither → the bake fails
+outright rather than guessing at an init hook.
 
-**The right fix for that generation**, when someone takes it on, is to
-replace `/etc/rc.boot` with a binary that does our work and then `execl`s
-`/usr/local/bin/restored_external` itself, preserving the display and USB
-bring-up. Two things to know first: the "Status" section below records an
-`rc.boot` attempt being tried and reverted, and that warning **does not
-apply** — it was reverted because 12H606's `/etc` has no `rc.boot`, which is
-precisely the firmware that has `LaunchDaemons` instead. The two generations
-want opposite mechanisms and each is wrong on the other. And on 10B329a the
-parent `restored_external` reboots the device when its `-server` child exits.
+This **replaced the splice over `/sbin/launchd`**, which every bake did on
+this generation until now and which no bake does anywhere any more. That
+splice meant Apple's launchd never ran, so `launchctl` never ran, so
+`restored_external` never ran — no display, no USB enumeration, a working
+boot indistinguishable from a dead device. It was already documented as not
+an endorsement; this is the fix.
+
+### Standing in for Apple's `rc.boot`
+
+Replacing a file means inheriting its duties. Apple's stub is 8,832 bytes on
+11D258 and 8,880 on 10B329a (armv7 Mach-O, ad-hoc, `com.apple.rc`), and it is
+small enough to state completely — five imports (`_getfsfile`, `_mount`,
+`_umask`, `_execl`, `_reboot`) and four strings:
+
+```c
+f = getfsfile("/");
+if (!f) reboot(0);
+if (mount(f->fs_vfstype, "/", 0x10001, &args{f->fs_spec})) reboot(0);
+umask(0);
+for (p in {restored_external, restored_update, restored, ramrod})
+    execl(p, p, NULL);
+reboot(0);
+```
+
+Three corrections to how that has been described here before, all read off
+the real binary:
+
+1. **`0x10001` is `MNT_UPDATE|MNT_RDONLY`, not "read-write".** Apple's
+   `rc.boot` *demotes* the ramdisk root to read-only; it does not promote it.
+   The root arrives from the kernel writable and Apple gives that up before
+   handing off.
+2. **`getfsfile()` never reads `/etc/fstab` here.** There is no `/etc/fstab`
+   on either ramdisk, and the legacy ramdisk's own `libsystem_c` contains the
+   string `fstab` *nowhere at all* — it imports `_getfsstat`/`_statfs`/
+   `_fstatfs` and synthesises the entry from the live mount table. (Confirmed
+   independently on a modern host, which also has no `/etc/fstab`:
+   `getfsfile("/")` returns a real synthesised entry.) So Apple's stub is
+   asking the kernel what `/` actually is, with `getfsfile()` as a middleman.
+3. **The `execl` list always lands on the first entry.** `/usr/local/bin` is
+   exactly `restored_external` and `ioflashstoragetool` on *both* generations;
+   `restored_update`, `restored` and `ramrod` do not exist on either.
+
+What `entrypoint.c` does instead, and why each differs:
+
+- **`ensure_root_writable()` — `statfs("/")`, and promote only if
+  `MNT_RDONLY` is set.** `statfs` asks the same question `getfsfile` asks,
+  directly, and hands back the device (`f_mntfromname`), the type
+  (`f_fstypename`) and the flags in one call — no dependence on a libc
+  fallback that is invisible in the headers. We promote rather than demote
+  because we are not the last thing to run the way Apple's stub is: it execs
+  and is gone, we keep running with `restored_external` forked alongside us,
+  and a read-only root would turn any future need to write there into a
+  silent failure on the generation with the least observability. Nothing
+  writes to the ramdisk root today, so this is a safety net, and it announces
+  itself either way.
+- **`umask(0)` — Apple's, verbatim.** It is also what our LaunchDaemon plist
+  declares (`Umask` 0, copied from `com.apple.restored_external.plist`), so
+  setting it here makes the two paths behave identically instead of leaving
+  the `rc.boot` path with whatever `launchctl` handed down. `merge_tree()`
+  `chmod`s everything it creates, so a nonzero umask would not survive
+  anyway; what this removes is the window between create and chmod. It is
+  inherited by the `restored_external` we fork, exactly as under Apple's stub.
+- **`start_restored_external()` — `fork`, not `execl`.** This is the
+  load-bearing decision and it gets its own section below.
+
+### `fork`, not `exec`, for `restored_external`
+
+`restored_external` is why the `rc.boot` branch was worth doing at all. It is
+the only binary on either ramdisk that calls `IOUSBDeviceControllerCreate` /
+`IOUSBDeviceDescriptionCreateFromDefaults` /
+`IOUSBDeviceControllerSetDescription`, and on this hardware the USB device
+stack stays **off the bus until a userspace process does exactly that** — the
+DeviceTree's `usb0-device` says `configuration-string = "standardMuxOnly"`
+while the in-kernel auto-configurator personality matches only
+`ConfigurationType = "standardBringup"`, so it never fires. It is also what
+draws the display (`IOMobileFramebuffer`, `IOSurface`, `/usr/share/progressui`).
+
+Apple's stub `execl`s it, which **replaces the calling process image**. For us
+that would mean the install never happens. Exec'ing at the *end* instead is
+worse than it sounds: the display and USB would come up only after the merge,
+seconds before `reboot(2)` tears them down, so the entire window we are trying
+to make observable would already be over.
+
+So: `fork()`, the child `execve`s it, the parent carries on installing. The
+device enumerates as `05ac:12a7` **while the merge is in flight**, and
+`AppleUSBDeviceMux` (prelinked into both kernelcaches) makes anything
+listening reachable from the host.
+
+- **Exec failure is handled, not assumed away.** The child reports the failure
+  on the console it inherited and `_exit(127)`s; the parent is untouched and
+  finishes the install. A failed `fork()` is likewise reported and
+  non-fatal — no display is bad, no install is worse.
+- **We do not wait for it.** It never exits (it blocks in `accept()`), so a
+  `wait4()` would hang the install forever. It is reparented to launchd when
+  we exit, which is launchd's ordinary business.
+- **Known tail risk**, recorded rather than defended against: on **both**
+  generations its no-argument `main()` forks a `-server` child and
+  `waitpid()`s, and reboots the device via `/sbin/reboot` when that child
+  exits for any reason. Mid-merge that means a reboot with our mount dirty.
+  With no host attached the child blocks in `accept()` forever, so it is a
+  tail risk — and the mitigation is the short dirty window (`sync()` +
+  unmount the instant the merge returns), not a lock. There is nothing to
+  lock against: `launchd`, `launchctl`, `xpcproxy`, `syslogd` and
+  `ReportCrash` contain zero references to `/mnt`, `disk0`, `rdisk` or any
+  mount call.
+
+### The signing identifier does not change for this path
+
+`entrypoint` is signed `xyz.regulad.blackb0x.entrypoint` on both generations,
+including when it is installed as `/etc/rc.boot`. Apple's `rc.boot` is signed
+`com.apple.rc`, and matching it was considered and rejected:
+
+- **Nothing establishes that the identifier matters to AMFI here.** Apple's
+  own ramdisk binaries are *all* ad-hoc signed — `launchd`, `launchctl`,
+  `restored_external` and `rc.boot` all carry flags `0x2` and no entitlements
+  — there is no `amfid` on either ramdisk, and the obvious static-trust-cache
+  hypothesis was tested and failed (none of their CDHashes appear in the
+  kernelcache, not even as an 8-byte prefix). Whatever admits them is
+  in-kernel and unknown. Picking an identifier to please it would be
+  cargo-culting a mechanism nobody has identified.
+- **It would be a lie about what the binary is**, the same reason
+  `com.apple.launchd` was dropped when the splice went away. This is not
+  Apple's `rc.boot`; it is our installer standing in the same slot.
+- **It would fork the artifact.** The identifier is applied by `ldid` at build
+  time, and which generation a ramdisk is is not known until the baker mounts
+  the image. Making the identity depend on it would mean either two builds or
+  a re-sign inside the bake — real machinery, bought with no established
+  benefit, against the "one binary, one signature" property that keeps the
+  bake-time closure check covering both paths at once.
+
+If evidence ever turns up that the identifier *is* load-bearing, this is a
+one-line change in `entrypoint/Makefile` — but it should be made on evidence.
 
 ## Freestanding, and why it isn't any more
 
@@ -798,7 +1076,11 @@ means Apple's launchd never runs, so nothing else on the ramdisk does either
 "Run as a launchd unit, not as launchd" at the top. What this section still
 settles, and what the new design depends on, is that **Apple's own launchd
 really is what the kernel starts**, so leaving it in place is enough to get
-the rest of the ramdisk running.
+the rest of the ramdisk running. It is also what makes `/etc/rc.boot` a
+legitimate install target on the older generation rather than a repeat of
+the reverted detour: the chain there is kernel → launchd → launchctl →
+`rc.boot`, so installing at `rc.boot` leaves every link above it intact,
+which is exactly what the splice destroyed.
 
 **One alternative, still not implemented, and now much less attractive.**
 That `/sbin/launchd` string is ordinary C string data at a known file offset,
@@ -865,10 +1147,12 @@ check in, since the build is cached in-process (see `buildEntrypointBinary()`
 `bake-firmware` invocation, not once per firmware) and written straight onto
 the mounted volume as `/usr/sbin/blackb0x_entrypoint` alongside its
 LaunchDaemon plist (`installEntrypointUnit()`). On the older `rc.boot`
-generation of ramdisk it is still spliced over `/sbin/launchd`'s content
-instead (`spliceFileContentInPlace()`, preserving that file's existing
-permissions from the pristine Apple ramdisk) — `installEntrypoint()` picks,
-see "It is per-firmware" above.
+generation it is written over `/etc/rc.boot` instead
+(`spliceFileContentInPlace()`, preserving that file's existing permissions
+from the pristine Apple ramdisk) — `installEntrypoint()` picks by probing the
+mounted image; see "It is per-firmware" above. **`/sbin/launchd` is not a
+target on either path.** The artifact is the same either way: the generation
+is settled by runtime probe, not at build time.
 
 **How the toolchain choice reaches the `Makefile`: the environment, and
 nothing else.** `runCommand()` is `fork()`/`execvp()`, which inherits
@@ -935,32 +1219,36 @@ worth, is every Apple binary on these ramdisks.
 ### The bake-time symbol-closure check
 
 Every bake, with the real ramdisk mounted, `verifyEntrypointRuntimeClosure()`
-(`src/BakeRamdisk.cpp`) proves the binary just spliced over PID 1 can actually
-load on *that* volume: every `LC_LOAD_DYLIB` and the `LC_LOAD_DYLINKER` target
-must exist on the ramdisk, and every undefined symbol must be exported by
+(`src/BakeRamdisk.cpp`) proves the binary just installed can actually load on
+*that* volume: every `LC_LOAD_DYLIB` and the `LC_LOAD_DYLINKER` target must
+exist on the ramdisk, and every undefined symbol must be exported by
 something under `/usr/lib` or `/usr/lib/system`. A miss fails the bake with
-the symbol names listed.
+the symbol names listed. Because the binary is identical on both generations,
+this one check covers both install paths.
 
 **It does real work now.** It was deliberately landed while `entrypoint` was
 still freestanding — zero undefined symbols, zero `LC_LOAD_DYLIB`, no
 `LC_LOAD_DYLINKER`, so it could not fail — specifically so that it would be
 exercised by real three-device bakes before the conversion could need it.
-Since the conversion it checks **38** undefined symbols against one
-`LC_LOAD_DYLIB` and `/usr/lib/dyld`. It was 31 until the console/log rework
-above replaced the hand-rolled writers with stdio: `_dup2` left with the
-console fd, and eight names arrived — `___stdoutp`, `___stderrp`,
-`_fprintf`, `_fwrite`, `_puts`, `_setvbuf`, `_strerror` and
-`___snprintf_chk` (clang lowers the constant-string `printf`s to
-`puts`/`fwrite`). All are ordinary `libsystem_c` exports, and
-`___strcat_chk` — already in the verified 31 — establishes that the
-`_FORTIFY_SOURCE` `_chk` family is present on both firmwares. The earlier
-by-hand verification against the extracted roots for both firmwares
-(**zero unresolved**, matched SDK to matched device) covered the 31; the
-eight additions have been confirmed to link against each matched SDK, and
-the SDK↔device correspondence for those pairings is measured at 0 phantom
-symbols, but they have not themselves been re-checked against a mounted
-ramdisk. This check is what will say so at bake time if that is
-ever wrong.
+It checks **43** undefined symbols against one `LC_LOAD_DYLIB` and
+`/usr/lib/dyld`. The history of that count: 31 freestanding-era → 38 when the
+console/log rework replaced the hand-rolled writers with stdio (`_dup2` left,
+and `___stdoutp`, `___stderrp`, `_fprintf`, `_fwrite`, `_puts`, `_setvbuf`,
+`_strerror` and `___snprintf_chk` arrived — clang lowers constant-string
+`printf`s to `puts`/`fwrite`) → **43** with the `rc.boot` work, which added
+five: `_fcntl` and `_dup2` (the console guard), `_statfs` (the root-writability
+probe), `_umask` (Apple's `rc.boot` duty), and `_printf` (the first format
+string with a conversion in it, so clang can no longer lower it). No `_memset`
+appeared — clang inlines the 44-byte mount-args zero.
+
+All five are ordinary `libsystem_kernel`/`libsystem_c` exports, and all 43
+were re-checked against **real firmware, not SDK stubs**: zero unresolved on
+the 12H1006 extracted root (7,477 exports), the mounted 12H1006 ramdisk
+(24,396), the 10B329a extracted root (6,136) and the mounted 10B329a ramdisk
+(15,743) — i.e. both SDK branches and both generations. The 11D258 ramdisk was
+not mounted for that pass; its generation is covered by 10B329a and its SDK
+branch by the 7.1-matched build, and this check is what will say so at bake
+time if that ever turns out not to be enough.
 
 It is not in CI because the bake has something CI does not: the exact
 libraries that device will boot, per device and per build, with no stored
@@ -975,8 +1263,8 @@ bugs found and fixed along the way — see `docs/HISTORY.md`). Wired into
 `bakeRamdisk()`: every bake builds this (cached in-process — see "Building
 entrypoint itself" above) and installs it per firmware — as
 `/usr/sbin/blackb0x_entrypoint` plus its LaunchDaemon plist on the
-LaunchDaemons generation, spliced over `/sbin/launchd` on the older
-`rc.boot` one (`installEntrypoint()`).
+LaunchDaemons generation, and over `/etc/rc.boot` on the older `rc.boot`
+one (`installEntrypoint()`). **`/sbin/launchd` is not touched on either.**
 
 Building goes through the **pinned toolchain** by default, and now links that
 toolchain's matched iPhoneOS SDK. Verified on this host against the real
@@ -989,14 +1277,16 @@ Thumb) encodings at `_main`, `ldid`-signed `xyz.regulad.blackb0x.entrypoint`:
 
 | Device | Xcode / `ld` | SDK | size | undefined symbols resolved |
 |---|---|---|---|---|
-| AppleTV3,1 / AppleTV3,2 | 6.4, `ld64-242.2` native armv7 | iPhoneOS 8.4 | 52,288 | 38 undefined, 31 of them checked 31/31 against the 12H1006 ramdisk |
-| AppleTV2,1 | 5.1.1, `ld64-236.4` native armv7 | iPhoneOS 7.1 | 52,336 | 38 undefined, 31 of them checked 31/31 against the 11D258 ramdisk |
+| AppleTV3,1 / AppleTV3,2 | 6.4, `ld64-242.2` native armv7 | iPhoneOS 8.4 | 52,544 | 43 undefined (42 + `dyld_stub_binder`), **0 unresolved** against both the 12H1006 extracted root and the mounted 12H1006 ramdisk |
+| AppleTV2,1 | 5.1.1, `ld64-236.4` native armv7 | iPhoneOS 7.1 | 52,576 | 43 undefined (42 + `dyld_stub_binder`), **0 unresolved** against both the 10B329a extracted root and the mounted 10B329a ramdisk |
 
-(It was 13,184 / 13,152 bytes freestanding, and 51,920 / 51,968 before the
-console/log rework — the +368 is stdio. The growth over freestanding is
-expected and is almost entirely the dynamic-linking metadata plus the SDK's
-own hardened string helpers. See "The bake-time symbol-closure check" for
-which eight symbols are new and what is and is not verified about them.)
+(It was 13,184 / 13,152 bytes freestanding, 51,920 / 51,968 before the
+console/log rework, and 52,288 / 52,336 before the `rc.boot` work. The growth
+over freestanding is expected and is almost entirely the dynamic-linking
+metadata plus the SDK's own hardened string helpers. See "The bake-time
+symbol-closure check" for which symbols are new and what is and is not
+verified about them — including that the 11D258 ramdisk itself was not
+available to mount for the latest pass.)
 
 **Nothing here has been booted on a device** — not the pin, and not the
 dynamic conversion. The pin is a supply-chain hedge against Apple removing
@@ -1011,12 +1301,18 @@ The cross-toolchain this section used to list as a prerequisite is still not
 needed; see "What was here before, and why it is gone". An SDK is needed
 again, but it comes out of the pinned Xcode — see "Pinned toolchain".
 
-This went through a detour and back. For a while it spliced into
-`/etc/rc.boot` instead of `/sbin/launchd`, on the theory that `rc.boot` was
-the true first entry point. That reverted for a good reason — a real bake
-against AppleTV3,1/AppleTV3,2 12H606 failed because that firmware's ramdisk
-has no `/etc/rc.boot` at all — but the theory behind the detour was also
-simply false, which was only established later. **The kernel never execs
+This went through a detour, a revert, and then back to `/etc/rc.boot` for
+different and better reasons. For a while it spliced into `/etc/rc.boot`
+instead of `/sbin/launchd`, on the theory that `rc.boot` was the true first
+entry point. That reverted for a good reason — a real bake against
+AppleTV3,1/AppleTV3,2 12H606 failed because that firmware's ramdisk has no
+`/etc/rc.boot` at all — and the theory behind it was also simply false, which
+was only established later. **Neither objection applies to the current
+design**: the baker now *probes* for the hook rather than assuming a
+universal one, so a ramdisk with no `rc.boot` takes the LaunchDaemons path
+and one with neither fails loudly; and the current justification is not "it
+is the first entry point" (it is not) but "it is the only hook that
+generation's `launchctl` ever execs". **The kernel never execs
 `/etc/rc.boot` on any firmware**; `rc.boot` is `LC_MAIN`, which is what the
 original disassembly correctly observed, but it is launched by `launchctl`,
 several steps downstream of PID 1. See "What actually runs as PID 1" above

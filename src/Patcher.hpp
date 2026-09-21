@@ -253,7 +253,7 @@ namespace bootargs {
 //                             tool's ramdisk args omitted it. It stays
 //                             anyway, as an owner decision, not an
 //                             oversight: we are not length-limited (see the
-//                             budget at the bottom -- 93/99 bytes against a
+//                             budget at the bottom -- 91/97 bytes against a
 //                             179-byte ceiling), and this project has just
 //                             spent weeks on a bug whose entire content was
 //                             that the bypass arguments never reached the
@@ -296,20 +296,53 @@ namespace bootargs {
 // only) -- so with no soldered tap there is nowhere to read that log. See
 // docs/HISTORY.md's "Why serial console debugging is not available" note.
 //
-// DELIBERATELY DEFERRED, not rejected: `debug=0x14e` plus iBoot32Patcher's
-// -d. `debug` is present in both kernelcaches, and DB_LOG_PI_SCRN (0x100)
-// makes the kernel render PANIC info onto the framebuffer -- a channel -v
-// alone does not cover, and the only one this device has. It is gated by
-// PE_i_can_has_debugger / the device-tree `debug-enabled` property, which is
-// 0 on a production-fused retail unit; iBoot32Patcher's patch_debug_enabled()
-// (-d, which patchiBEC() does NOT currently pass) forces it true. It is
-// deliberately NOT part of the -b change: the bit meanings are
-// community-documented rather than decoded here, the debug-enabled gate is
-// inferred rather than observed, and landing a second behavioural change
-// alongside the boot-args-channel fix would make a hardware failure
-// uninterpretable. Land it on its own, AFTER -b is confirmed on hardware:
-// "rd=md0 -v debug=0x14e amfi=0xff ..." plus -d in PatcherPatch.cpp's
-// iBECArgs. Recorded here so it is not lost.
+// `debug=0x2` plus iBoot32Patcher's -d. LANDED -- and the value is 0x2, NOT
+// the 0x14e this comment used to recommend. That recommendation was wrong and
+// the correction is worth keeping rather than quietly editing away, because
+// the reasoning behind it is the reasoning behind three other bugs this
+// project has found.
+//
+// What was claimed: DB_LOG_PI_SCRN (0x100) "makes the kernel render PANIC
+// info onto the framebuffer -- a channel -v alone does not cover". Those are
+// the standard XNU bit names, and the claim is community folklore. It is
+// FALSE on both target kernels, established by decoding them:
+//
+//   * `logPanicDataToScreen` (10B329a 0x8031E90C, 12H1006 0x803BD154) has
+//     EXACTLY ONE reader in each image, inside _panic(). All it does is write
+//     the SAME global that DB_PRT (0x2) writes in pe_init_debug, to the SAME
+//     value. So 0x100 is a DEFERRED 0x2 -- it flips console output on at
+//     panic time instead of at boot. It is not a second channel, and it
+//     touches no framebuffer. There is no draw_panic_dialog, no panic_ui and
+//     no vc_progress symbol or literal anywhere in either kernel.
+//   * 0x2 strictly subsumes it: every other writer of that global on both
+//     builds writes the ENABLED value and nothing ever re-closes it.
+//   * 0x8 (DB_KPRT) is tested NOWHERE on either kernel. 0x4 (DB_NMI) is
+//     tested nowhere on 12H1006, our actual target. 0x40 (DB_ARP) is real but
+//     only feeds kdp_init's KDP-over-Ethernet setup, which is unreachable
+//     here. Exhaustive, not sampled: on 12H1006 `debug_boot_arg` is read in
+//     exactly two places in the whole image, so there is nowhere else for
+//     those bits to be consumed.
+//
+// So four of the five bits in 0x14e were dead and the fifth was redundant.
+//
+// -d remains genuinely load-bearing, and that half IS confirmed: both
+// pe_init_debug implementations zero `debug_boot_arg` outright unless
+// `debug_enabled` is set, and `debug_enabled` is filled from the device-tree
+// `debug-enabled` property, which is 0 on a production-fused retail unit.
+// patch_debug_enabled() forces it true. Verified by byte-diffing the produced
+// iBEC against stock on BOTH builds -- the patch lands on iBoot's /chosen
+// population loop at the `"debug-enabled"` lookup, turning its result into an
+// unconditional 1. Proven by decoding the artifact, never by the patcher's
+// exit code.
+//
+// Who owns the display, since this was also assumed and is now checked: the
+// kernel console draws into `boot_args->Video`, which IBOOT populates --
+// PE_init_iokit reads /chosen/memory-map, and the stock iBEC carries
+// `setpicture`, `display`, `chosen/memory-map` and the -s/-v/debug= scan
+// table. restored_external's IOMobileFramebuffer/IOSurface work is the
+// USERLAND progress UI, downstream of and irrelevant to the kernel console.
+// So -v depends on iBoot having brought the display up (RestoreLogo's
+// setpicture), not on any daemon.
 //
 // Also rejected on evidence, so nobody re-adds them: `-progress` (parsed by
 // pexpert on both builds, but it draws a graphics progress bar that -v's text
@@ -371,7 +404,7 @@ namespace bootargs {
 // only a vehicle for the file writes, so there is nothing further to ask the
 // kernel for.
 inline constexpr const char* kRamdiskBootArgs =
-    "rd=md0 -v debug=0x14e amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
+    "rd=md0 -v debug=0x2 amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
 
 // --tether-boot: root off the OS already on NAND (disk0s1s1 is the system
 // partition; disk0s1s2 is /var), no ramdisk uploaded. rd= is NOT optional --
@@ -380,7 +413,7 @@ inline constexpr const char* kRamdiskBootArgs =
 // original app had no rd= at all on this path AND had its two arg sets wired
 // to the wrong images; both are corrected here (see docs/HISTORY.md).
 inline constexpr const char* kTetherBootArgs =
-    "rd=disk0s1s1 -v debug=0x14e amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
+    "rd=disk0s1s1 -v debug=0x2 amfi=0xff cs_enforcement_disable=1 amfi_get_out_of_my_way=1 pio-error=0";
 
 // The real ceiling on a BAKED boot-args string. This is NOT
 // DeviceManager::kMaxRecoveryCommandLength (127) -- that budget belongs to
@@ -430,13 +463,18 @@ inline constexpr const char* kTetherBootArgs =
 //
 // 179 is the binding one, and it is regime B's. Both truncate silently, so
 // bake-iboot refuses an over-long string rather than shortening it. BOTH
-// SHIPPED STRINGS ARE IN REGIME B -- 93 (ramdisk) and 99 (tether) bytes,
+// SHIPPED STRINGS ARE IN REGIME B -- 91 (ramdisk) and 97 (tether) bytes,
 // each well past 39 -- which is not a problem and not avoidable: no useful
-// argument set fits under 39. It leaves 85 bytes for a ramdisk-mode
-// `--extra-boot-args` and 79 for tether mode (the limit minus the string
-// minus the separating space bake-iboot inserts). They were 81 and 87 before
-// `debug=0x14e` was added, which is where the older figures in this repo's
-// history come from.
+// argument set fits under 39. It leaves 87 bytes for a ramdisk-mode
+// `--extra-boot-args` and 81 for tether mode (the limit minus the string
+// minus the separating space bake-iboot inserts).
+//
+// These numbers have moved twice and older figures survive elsewhere in the
+// repo, so do not trust a remembered one -- measure. They were 81/87 before
+// any `debug=` was added, then 93/99 while the string briefly carried the
+// mistaken `debug=0x14e`, and are 91/97 now that it is the correct
+// `debug=0x2` (see the debug boot-arg comment above for why four of those
+// five bits were dead and the fifth redundant).
 inline constexpr size_t kMaxBakedBootArgsLength = 179;
 
 // dist/ component names for the two baked iBECs. blackb0x picks by mode

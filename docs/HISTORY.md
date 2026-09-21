@@ -5853,3 +5853,292 @@ self-consistent output are all statements about the pipeline, not about the
 thing the pipeline made. This fix was verified by decrypting the two iBECs and
 reading the bytes at `0x3ebf4`, `0x1b194`, `0x1af42` and `0x1af46` — the same
 method that finally settled the IMG3 alignment bug, and for the same reason.
+
+## `debug=0x14e` was wrong: four dead bits and a redundant fifth. The folklore was false
+
+The boot-args work above ended with a directive budget and an obvious thing to
+spend it on: turn the kernel's debug output all the way up. `debug=0x14e` was
+chosen on the strength of the standard XNU bit names
+(`DB_HALT|DB_PRT|DB_NMI|DB_KPRT|DB_LOG_PI_SCRN`) and one widely-repeated claim
+about the top bit — that `DB_LOG_PI_SCRN` (0x100) makes the kernel render panic
+information onto the framebuffer, a channel `-v` alone does not cover. On a
+device with no serial tap and no console reader, a panic-time framebuffer dump
+is worth a lot, so the bit was bought.
+
+**Both target kernelcaches were decoded to check, and the claim is false on
+both.** The value is now `debug=0x2`.
+
+### What the kernels actually do
+
+- `logPanicDataToScreen` (10B329a `0x8031E90C`, 12H1006 `0x803BD154`) has
+  **exactly one reader** in each image, inside `_panic()` — 10B329a's `_panic`
+  at `0x80017c10`, calling at `0x80017dbe`; 12H1006's at `0x8001e954`, calling
+  at `0x8001ec2a`. What the routine does is write **the same global that
+  `DB_PRT` (0x2) writes in `pe_init_debug`, to the same value**. `0x100` is
+  therefore a *deferred* `0x2`: it turns console output on at panic time instead
+  of at boot. It is not a second channel and it touches no framebuffer. There is
+  no `draw_panic_dialog`, no `panic_ui` and no `vc_progress` symbol or literal
+  anywhere in either kernel.
+- `0x2` **strictly subsumes** it. Every other writer of that global on both
+  builds writes the ENABLED value, and nothing ever re-closes it, so a boot that
+  set `0x2` is already in the state `0x100` would have produced at panic.
+- `0x8` (`DB_KPRT`) is tested **nowhere** on either kernel. `0x4` (`DB_NMI`) is
+  tested nowhere on 12H1006, which is the actual target. `0x40` (`DB_ARP`) is
+  real but only feeds `kdp_init`'s KDP-over-Ethernet setup, which is unreachable
+  on a box with no debugger attached.
+
+That last set of negatives is **exhaustive rather than sampled**, which is the
+only reason it is worth stating: on 12H1006 `debug_boot_arg` is read in exactly
+two places in the whole image, so there is nowhere else for any of those bits to
+be consumed. Four of the five bits in `0x14e` were dead and the fifth was
+redundant.
+
+The shipped strings are now 91 bytes (ramdisk) and 97 (tether) against the
+179-byte ceiling derived in the previous section, leaving 87 and 81 for an
+`--extra-boot-args` directive. (`src/Patcher.hpp`'s comment still quotes 93/99
+and 85/79 in its arithmetic — those are the `0x14e`-era lengths, measured before
+the correction landed.)
+
+### The half that is real: `-d` is load-bearing, and that IS confirmed
+
+Nothing above weakens iBoot32Patcher's `-d`. Both `pe_init_debug`
+implementations **zero `debug_boot_arg` outright** unless `debug_enabled` is
+set, and `debug_enabled` is filled from the device-tree `debug-enabled`
+property, which is 0 on a production-fused retail unit. Without
+`patch_debug_enabled()` forcing it true, `debug=` of any value is discarded
+before it is ever tested.
+
+Verified the way this log now requires: by **byte-diffing the iBEC we actually
+produce against stock, on both builds**. The patch lands in iBoot's `/chosen`
+population loop at the `"debug-enabled"` lookup — payload offset `0x01a28a` on
+10B329a, `0x0195c2` on 12H1006 — turning that lookup's result into an
+unconditional 1. Seven differing regions in total, each one attributable to a
+flag we asked for. Not the patcher's exit code; the bytes.
+
+### What was not established, stated as such
+
+Whether that global gates the **video** console leg, a **serial** leg, or both,
+was not settled — `cnputc` was not decoded far enough to say. Its 10B329a
+initial value of TRUE (i.e. output suppressed until something clears it) is
+consistent with a real output gate, and that is as far as the evidence goes.
+This changes no decision: `0x2` covers whatever it gates and `0x100` adds
+nothing on top of it either way.
+
+### Who owns the display, checked rather than assumed
+
+The other assumption underneath `-v` was that some userland daemon has to be up
+before the kernel can print anything visible. It does not. The kernel console
+draws into `boot_args->Video`, and **iBoot** populates that structure —
+`PE_init_iokit` reads `/chosen/memory-map`, and the stock iBEC carries
+`setpicture`, `display`, `chosen/memory-map` and the `-s`/`-v`/`debug=` scan
+table. `restored_external`'s IOMobileFramebuffer/IOSurface work is the
+**userland progress UI**: downstream of the kernel console and irrelevant to it.
+So `-v` depends on iBoot having brought the display up (the RestoreLogo
+`setpicture` send documented under "`--tether-boot` visibility" above), not on
+any daemon starting.
+
+### Two methodology corrections, because they will otherwise mislead the next person
+
+Both of these are about *how the kernels were read*, and both were wrong in
+notes this repo already carries at `misc` level.
+
+1. **"There are no MOVW/MOVT string materialisations in either image" is
+   FALSE.** `MOVW/MOVT Rd,#imm32 ; ADD Rd,pc` is the **dominant** PIC form in
+   both kernelcaches. It is easy to miss twice over: the `MOVT` half is often
+   negative (`movt r0,#0xfffc`), so the reconstructed sum must be **masked to 32
+   bits** or it lands nowhere plausible and gets discarded as noise. That alone
+   hid one of the two `debug` xrefs on 10B329a. The kernel also reaches some
+   globals through `__DATA,__nl_symbol_ptr`, so a scan for direct references to
+   an address finds nothing at all even when the global is read constantly. A
+   "zero xrefs" result from either of these tools is a statement about the tool.
+2. **A provenance trap in the firmware cache.**
+   `~/.local/share/blackb0x/AppleTV3,2/<build>/kernelcache.release` — the
+   *unsuffixed* name — is **bake output, not stock**, on both builds. The stock
+   member extracted from the IPSW is `kernelcache.release.j33i` (12H1006) /
+   `kernelcache.release.j33` (10B329a). The two are the same uncompressed length
+   and differ by their complzss adler, so nothing about the file announces which
+   one you have; on disk right now the unsuffixed copies are exactly 112 bytes
+   smaller than their stock siblings (6007124 vs 6007236, 7705436 vs 7705548),
+   which is the same 112-byte shrink the `sigCheckArea` fix documents. Earlier
+   figures in this repo that were read off the unsuffixed name should not be
+   re-trusted by path.
+
+### The pattern, and this is the fourth time
+
+`debug=0x14e` is not an isolated slip. It is the same failure this project has
+now hit four times:
+
+- the IMG3 DATA 16-alignment bug, **write** side (xpwn PR #7);
+- the same bug's **read** side, found only after the write side was fixed;
+- the stale `sigCheckArea` on unsigned IMG3s (commit `880d03e`, which says in
+  its own message: third defect of identical character in that one file in one
+  week);
+- and now the debug bits.
+
+Every one of them looked right from the outside. The artifact was internally
+self-consistent, the tool exited zero, the standard names matched, the community
+documentation agreed, and every check the pipeline knew how to run passed. In
+the `0x14e` case the folklore was not even implausible — XNU really does have a
+`DB_LOG_PI_SCRN` bit, it really is documented as panic-info-to-screen, and it
+really does nothing of the kind on these two kernels.
+
+**The only thing that has ever caught one of these is decoding the bytes that
+were actually produced or actually shipped.** Bit names, header constants,
+upstream documentation and forum consensus are all statements about some other
+build; on an eleven-year-old A5 firmware they are hypotheses, and this log has
+now spent four bugs learning that they are cheap to test and expensive to
+assume.
+
+## On-screen text from userland: the global-IOSurface route, and why `/dev/console` cannot be certified
+
+With `debug=0x2` the kernel will print, but nothing on this hardware reads that
+stream back (no serial tap — see "Why serial console debugging is not
+available"). The display is the only output device the box has, so the question
+became whether a process on the restore ramdisk can put arbitrary text on the
+HDMI output. It can, and by a better route than the obvious one.
+
+### What `restored_external` actually does with the display
+
+Read out of `/usr/local/bin/restored_external` on the real decrypted 12H1006
+ramdisk. It creates **exactly three IOSurfaces** at display-init time, each with
+`kIOSurfaceIsGlobal = kCFBooleanTrue`: BGRA, write-combined, stride
+`(width * 4 + 63) & ~63`. It programs them as compositor layers and presents
+with `SwapBegin` / `SwapSetLayer` / `SwapEnd`:
+
+    layer 0  <-  surface[2]            opaque background, one solid fill
+    layer 1  <-  surface[0]/surface[1] alternating, bzero'd, so alpha 0
+    layer 2  <-  NULL
+
+with src and dst rects both `{0, 0, width, height}`. Surfaces[0]/[1] are the
+double-buffered pair it alternates for the progress bar and the logo;
+surface[2] is the full-screen background.
+
+### Why that is a channel, and why it is better than IOMobileFramebuffer
+
+**A global IOSurface is addressable by ID from any process.** The ramdisk's own
+`IOSurface` binary exports `IOSurfaceLookup`, `IOSurfaceGetID`, the geometry
+getters, `Lock`/`Unlock` and `GetBaseAddress`, and its whole dylib closure is
+CoreFoundation + IOKit + `libSystem.B.dylib`, all present. So the sequence is:
+scan IDs, match on pixel format and geometry, lock, blit.
+
+The consequence that matters: **the display pipe is already scanning those
+surfaces**, so stores into their pixels change the screen with **no swap and no
+cooperation from `restored_external`**. We never open IOMobileFramebuffer, which
+means its exclusive-access question — which could not be settled, and which
+would have been a real risk of taking the display away from the one process that
+knows how to bring it up — simply never arises.
+
+Target surface[2], the opaque background, identified at runtime by reading pixel
+(0,0): the background reads alpha `0xFF`, the two progress buffers read
+`0x00000000`.
+
+### Contention: we win while idle
+
+Checked, not hoped. The only callers of the swap routine are the two draw
+routines — a progress-bar update and an image blit. There is no timer, no
+animation loop and no polling. While `restored_external` sits in `accept()` with
+no host attached — which is the field state for every run this project makes —
+it performs **zero swaps and zero pixel writes**, so anything written into those
+surfaces stays up. A display hot-plug callback does redraw everything, so a slow
+re-blit loop is cheap insurance, but it is insurance and not a correctness
+requirement.
+
+### `/dev/console` is kept, and cannot be certified
+
+`entrypoint`'s output still goes to `/dev/console` (via the unit's
+`StandardOutPath`, with `ensure_console_fds()` as the fallback). That costs
+nothing and stays. But **nobody established whether console bytes remain visible
+after `restored_external` points the display pipe at its own surfaces**, and it
+is entirely possible that the kernel console is painting into a framebuffer that
+is no longer being scanned out. One piece of evidence cuts the other way:
+`restored_external`'s own log primitive ends at `fputs(msg, __stdoutp)` and
+drains syslogd's ASL store on the way, re-printing every record as
+`SYSLOG: %s` — so it is writing to the console itself, which is at least
+consistent with the console still being a live sink after it starts.
+
+**The one-boot experiment that settles it** is worth recording because it is
+cheap and nobody has run it: boot the **stock, unmodified** 12H1006 ramdisk with
+`-v` and watch the TV. If `restored_external`'s own
+`Display Info: width=... height=...` line appears on screen, the console
+survives the takeover and no IOSurface work is needed for basic diagnostics.
+
+### Status: nothing has run on hardware
+
+A host-side prototype exists in `blackb0x-scratch/fbtext/` — a public-domain 8x8
+font (`fbtext.h`) and a BGRA blitter, verified by rendering to an image and
+reading it back, so bit order, stride arithmetic and scaling are proven before
+anything runs on-device — plus `proto_device.c`, a research sketch of the
+lookup-and-blit sequence above. That is the whole of it. **This is not a working
+on-screen channel.** The disassembly of `restored_external` is real, the
+IOSurface exports are real, the host-side rendering is real; the device-side
+path has never executed on an Apple TV.
+
+## Daemon co-existence on the restore ramdisk: one real collision, one corrected claim
+
+`entrypoint` now runs as an ordinary LaunchDaemon alongside Apple's own units
+rather than as PID 1 (commit `5c381a4`), which raises a question the old design
+never had to ask: can anything else on that ramdisk interfere with a
+half-written NAND? Each unit was checked.
+
+- **`syslogd` cannot touch the NAND.** Every path it names is an absolute
+  ramdisk path, and `/var/log` and `/etc/asl.conf` do not exist on this ramdisk
+  at all. Zero references to `/mnt`, `disk0`, `rdisk` or any mount call. One
+  corrected detail: `ASL_DISABLE=1` in its plist is read by `libsystem_asl` **in
+  clients**, not by syslogd — it stops syslogd logging *to itself* and does not
+  disable the ASL store.
+- **`ReportCrash` is on-demand only** — `MachServices`, no `RunAtLoad` — and its
+  `-r /private/var/logs/restored` keeps whatever it writes on the ramdisk, in
+  RAM.
+- **`restored_external` is the only unit on either ramdisk with mount code at
+  all**, and the mountpoint it has wired into itself is **`/mnt1`**:
+  `create_partition_mountpoints`, the string `libpartition, mounting '%s' at
+  '%s'`, and hardcoded `/mnt1/private/var` and `/mnt1/usr/sbin/lsof`. It only
+  mounts on a host `StartRestore` message — which is forbidden while we run — so
+  the collision was conditional rather than certain, but `entrypoint` had been
+  using `/mnt1` for this project's entire life and there is no reason to keep
+  sharing that name.
+
+### The mountpoint moved to `/mnt2`, not `/mnt4`
+
+Worth recording because the obvious answer was wrong. The mountpoint set is
+**not the same on both generations**: 12H1006 ships `/mnt1 /mnt2 /mnt3 /mnt4`,
+while 10B329a ships **only `/mnt1` and `/mnt2`** (checked directly on both
+mounted volumes; all empty). `/mnt4` does not exist on the legacy generation at
+all, so `/mnt2` is the only name that both pre-exists and is empty everywhere
+this project bakes — and pre-existing matters, because `bakeRamdisk()` adds as
+little to Apple's tree as it can and a `mkdir()` would additionally depend on
+the ramdisk root being writable at that instant, which is not established.
+`restored_external` names `/mnt1` and `/mnt2` on 10B329a and `/mnt1`..`/mnt4` on
+12H1006, so no mountpoint is entirely un-referenced by it on either generation;
+distance from the system-partition one is the whole of what is available, and it
+is enough given that a host restore is a usage-rule violation regardless.
+
+### Corrected: the reboot-on-child-exit behaviour is NOT 10B329a-specific
+
+An earlier note in this repo recorded `restored_external`'s
+reboot-when-its-child-exits behaviour as a property of 10B329a. **It is present
+on 12H1006 too.** Its no-argument `main()` forks and execs *itself* with
+`-server`; the parent `waitpid()`s, and when that child exits for any reason the
+parent logs `restored exited ... - rebooting` and reboots via `/sbin/reboot`. If
+that fires mid-merge, the device reboots with our mount dirty.
+
+With no host attached the child blocks in `accept()` forever, so this is a tail
+risk rather than a likely one, and the mitigation is chosen accordingly: **close
+the dirty window** — `main()` `sync()`s and unmounts the instant the merge
+returns, with nothing in between — rather than add a lock or wait for anything.
+There is nothing to lock against (launchd, launchctl, xpcproxy, syslogd and
+ReportCrash contain zero references to `/mnt`, `disk0`, `rdisk` or any mount
+call), and **waiting is the one thing that provably widens the window**.
+
+`restored_external`'s own startup was also checked rather than assumed to be
+harmless: it sets an `IOPMUBootStage` property, starts a gas-gauge thread,
+creates a listen socket, disables the watchdog, calls
+`enable_usb_connections()`, and blocks. Every destructive primitive it has
+(`WipeStorageDevice`, `clean_NAND`, `FormatForLwVM`, `partition_nand_device`,
+`asr`) sits behind a host `StartRestore` message. That is the mechanism behind
+the usage rule this project already had: do not point a restore client at the
+device while a jailbreak ramdisk is running.
+
+**Verdict: safe to co-exist.** One real collision, resolved by moving to
+`/mnt2`; one tail risk, mitigated by ordering rather than by locking; everything
+else on the ramdisk is provably incapable of touching a block device.

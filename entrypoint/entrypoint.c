@@ -2,25 +2,49 @@
  * entrypoint.c
  *
  * Blackb0x's own first-boot installer for the patched restore ramdisk. Not
- * real launchd, and no longer a replacement for it: on the LaunchDaemons
- * generation of ramdisk (AppleTV3,x 12H1006, the primary target) this is
- * installed as the NEW file /usr/sbin/blackb0x_entrypoint and started by
- * Apple's own real /sbin/launchd as an ordinary one-shot LaunchDaemon,
- * /System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist. The
- * older rc.boot generation, which has no daemon-directory loader at all,
- * still gets the legacy splice over /sbin/launchd's content — see
- * BakeRamdisk.cpp's installEntrypoint(), which picks, and
- * entrypoint/README.md's "Run as a launchd unit, not as launchd" for the
- * measured evidence behind the change (short form: replacing PID 1 meant
- * restored_external never ran, so the display never came up AND the USB
- * device stack never came on-bus, because on this hardware nothing
- * enumerates until a userspace process calls
- * IOUSBDeviceControllerSetDescription).
+ * real launchd, and not a replacement for it on ANY path any more:
+ * /sbin/launchd is left byte for byte as Apple shipped it on every firmware
+ * this project bakes. There are two restore-ramdisk generations and they
+ * hand us two different jobs; BakeRamdisk.cpp's installEntrypoint() decides
+ * WHERE this binary goes by probing the mounted image, and this file decides
+ * WHAT to do once it is running by probing the system it woke up in:
  *
- * That buys observability and nothing else. It does NOT dodge AMFI — the
- * kernel's exec of PID 1 and launchd's posix_spawn land in the same
- * signature check, and if anything PID 1 is the less-checked position. The
- * baked boot-args remain the only thing that disables enforcement.
+ *   * LaunchDaemons generation (AppleTV3,x 12H1006, the primary target) —
+ *     installed as the NEW file /usr/sbin/blackb0x_entrypoint and started by
+ *     Apple's own real launchd as an ordinary one-shot LaunchDaemon,
+ *     /System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist.
+ *     launchd hands us live stdout/stderr, and launchd starts
+ *     restored_external itself from com.apple.restored_external.plist.
+ *
+ *   * rc.boot generation (AppleTV2,1 11D258 today; all three devices if the
+ *     10B329a fallback is ever taken) — installed AS /etc/rc.boot, replacing
+ *     Apple's own 8,880-byte stub of that name. That generation's launchd
+ *     has no daemon-directory loader at all: it spawns /bin/launchctl, whose
+ *     system_specific_bootstrap() fwexec()s /etc/rc.boot and blocks in
+ *     waitpid(). So rc.boot is the only hook that generation actually
+ *     reaches, and standing in for it means inheriting its duties — see
+ *     "Standing in for Apple's rc.boot" below.
+ *
+ * ONE BINARY, NO COMPILE-TIME ROLE. Everything generation-specific below is
+ * a RUNTIME PROBE, deliberately. The generation is a property of the RAMDISK
+ * IMAGE, not of the device, and the baker only learns which one it has after
+ * it mounts the image — i.e. long after this binary was compiled. Plumbing
+ * that backwards into a -D flag would encode, at build time, an assumption
+ * about where the artifact will land, and when the assumption is wrong the
+ * result is a device that boots and silently does the wrong thing. That is
+ * the exact failure class this project has spent weeks deleting. A probe
+ * asks the real question instead of a proxy for it, costs a few lines, and
+ * is self-correcting if we ever retarget. It also means the artifact is
+ * IDENTICAL on both generations: one build, one signature, one undefined-
+ * symbol closure, and bakeRamdisk()'s verifyEntrypointRuntimeClosure()
+ * covers both paths at once.
+ *
+ * None of this buys anything but observability. It does NOT dodge AMFI —
+ * the kernel's exec of PID 1, launchctl's fwexec() of rc.boot and launchd's
+ * posix_spawn of a LaunchDaemon all land in the same
+ * mac_vnode_check_signature / AMFI execve hook, and nothing here is a
+ * weaker position than any other. The baked boot-args (src/Patcher.hpp's
+ * `bootargs`) remain the only thing that disables enforcement.
  *
  * Reverse-engineered from the precompiled ARMv6 Mach-O this project shipped
  * at misc/launchd (originally Blackb0x/Files/launchd). See misc/README.md
@@ -108,19 +132,60 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/param.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define MNT "/mnt1"
+/* WHERE WE MOUNT THE NAND: /mnt, OUR OWN DIRECTORY, created at BAKE time by
+ * BakeRamdisk.cpp (createBlackb0xMountpoint()) with the same owner and mode
+ * the pristine ramdisk's own mountpoints carry. There is deliberately no
+ * mkdir() and no fallback here — if /mnt is missing, the mount(2) below
+ * fails loudly and says so, which is the correct response to a ramdisk that
+ * was not baked by us.
+ *
+ * WHY WE STOPPED BORROWING APPLE'S. Three separate problems dissolve at
+ * once, and the potted history is worth keeping because each step was a real
+ * finding:
+ *
+ *   * It was /mnt1 for this project's whole life. /usr/local/bin/
+ *     restored_external is the ONLY process on either ramdisk that contains
+ *     mount code at all, and /mnt1 turned out to be its own system-partition
+ *     mountpoint: it carries /sbin/mount, /sbin/mount_hfs,
+ *     create_partition_mountpoints, "libpartition, mounting '%s' at '%s'",
+ *     and hardcoded /mnt1/private/var and /mnt1/usr/sbin/lsof. It only
+ *     mounts on a host StartRestore — already forbidden while we run — so
+ *     the collision was conditional, but sharing that name bought nothing.
+ *   * /mnt2 was the next answer, and /mnt4 (the intuitive "furthest away"
+ *     pick) was rejected because THE MOUNTPOINT SET IS NOT THE SAME ON BOTH
+ *     GENERATIONS: 12H1006 ships /mnt1 /mnt2 /mnt3 /mnt4, 10B329a ships only
+ *     /mnt1 and /mnt2 (checked directly on both mounted volumes, all empty).
+ *     But restored_external names /mnt1 and /mnt2 on 10B329a and /mnt1../mnt4
+ *     on 12H1006, so NO borrowed mountpoint is un-referenced by it anywhere.
+ *   * So: our own. A directory we create cannot be the one restored_external
+ *     reaches for; it exists on both generations by construction, so there
+ *     is no per-firmware branch and no "which mountpoints does this image
+ *     happen to have" question to get wrong later.
+ *
+ * AND IT IS CREATED AT BAKE TIME, NOT HERE, which is the subtle part. A
+ * runtime mkdir() would depend on the ramdisk root being writable at that
+ * moment — exactly the thing ensure_root_writable() exists because we cannot
+ * assume. The baker has no such problem: it already has the image attached
+ * read-write to stage /blackb0x and the entrypoint itself.
+ *
+ * The minimal-footprint principle this used to be justified by is NOT
+ * abandoned, just paid for honestly: one empty directory is a trivial
+ * addition beside the overlay, and BakeRamdisk.cpp's header states the full
+ * per-generation footprint rather than leaving a reader to wonder. */
+#define MNT "/mnt"
 
-/* The on-NAND install record. /mnt1/var is a symlink to /mnt1/private/var,
+/* The on-NAND install record. MNT/var is a symlink to MNT/private/var,
  * which is where /dev/disk0s1s2 (the data partition) is mounted by main()
  * before do_install() ever runs — so this path only resolves after that
  * mount, which is exactly why the LaunchDaemon plist cannot point
  * StandardOutPath here. See "Where output goes" below. */
-#define INSTALL_LOG_PARENT "/mnt1/var/mobile"
+#define INSTALL_LOG_PARENT MNT "/var/mobile"
 #define INSTALL_LOG_DIR    INSTALL_LOG_PARENT "/Media"
 #define INSTALL_LOG        INSTALL_LOG_DIR "/blackb0x_install.log"
 
@@ -149,18 +214,33 @@
 /* Where output goes                                                       */
 /* ---------------------------------------------------------------------- */
 /*                                                                         */
-/* ONE STREAM, and this process does not configure it. Everything this      */
-/* binary has to say goes to stdout (progress) or stderr (errors) with      */
-/* plain printf/fprintf, and launchd connects both to /dev/console from     */
-/* the unit's StandardOutPath/StandardErrorPath — exactly the way Apple's   */
-/* own com.apple.restored_external.plist does it on this same ramdisk.      */
+/* ONE STREAM, and this process configures it only when nobody else did.    */
+/* Everything this binary has to say goes to stdout (progress) or stderr    */
+/* (errors) with plain printf/fprintf. On the LaunchDaemons generation      */
+/* launchd connects both to /dev/console from the unit's StandardOutPath/   */
+/* StandardErrorPath — exactly the way Apple's own                          */
+/* com.apple.restored_external.plist does it on that same ramdisk — and     */
+/* ensure_console_fds() below then does nothing at all.                     */
+/*                                                                         */
+/* ON THE rc.boot GENERATION NOBODY SETS THEM UP. The kernel does not open  */
+/* /dev/console for init there, launchd inherits nothing, launchctl         */
+/* inherits nothing, and the /etc/rc.boot it fwexec()s inherits nothing —   */
+/* which is precisely why the ORIGINAL binary opened /dev/console by hand   */
+/* as its very first act (the disassembly shows the open/dup2). Without a   */
+/* guard every printf here would fail with EBADF on that path and we would  */
+/* be blind on exactly the generation with the least other observability.   */
+/* ensure_console_fds() restores it, and does so by TESTING each descriptor */
+/* rather than by asking which generation this is: `fcntl(fd, F_GETFD) ==   */
+/* -1` is a direct question about the thing that actually matters.          */
 /*                                                                         */
 /* WHAT WAS DELETED, and why it was not just a cleanup:                     */
 /*                                                                         */
-/*   - console_print(): opened /dev/console itself and dup2()'d it onto     */
-/*     fds 1 and 2 from main(). That is launchd's job now, it is declared   */
-/*     in the plist where it can be read without disassembling anything,    */
-/*     and doing it here would fight whatever launchd already attached.     */
+/*   - console_print(): opened /dev/console itself, dup2()'d it onto fds 1  */
+/*     and 2 UNCONDITIONALLY from main(), and then wrote to it one          */
+/*     write(2) per byte with a sync() after each. The per-byte writer is   */
+/*     gone for good and is not coming back; the open/dup2 is back, but     */
+/*     only behind the fd test above, because an unconditional re-open      */
+/*     would fight whatever launchd already attached on the primary path.   */
 /*   - log_to_file(): a second, entirely independent writer that            */
 /*     open/append/write/close/chown/chmod'd the on-NAND log on EVERY       */
 /*     message. Two writers to two destinations meant the two halves of a   */
@@ -171,16 +251,16 @@
 /*                                                                         */
 /* WHY THE PLIST CANNOT SIMPLY POINT AT THE ON-NAND LOG. launchd opens      */
 /* StandardOutPath when it SPAWNS the job, long before this code has        */
-/* mounted anything. INSTALL_LOG lives under /mnt1, i.e. on the NAND, which */
+/* mounted anything. INSTALL_LOG lives under /mnt, i.e. on the NAND, which */
 /* does not exist yet at that moment — and the failure would not even be    */
 /* loud: launchd would create the file on the RAMDISK under the empty       */
-/* /mnt1 mountpoint, we would then mount the real volume over the top, and  */
+/* /mnt mountpoint, we would then mount the real volume over the top, and   */
 /* every byte would land in an invisible, shadowed file that dies with the  */
 /* RAM disk.                                                                */
 /*                                                                         */
 /* THE ALTERNATIVE THAT WAS REJECTED, since it is the obvious one: point    */
 /* StandardOutPath at a path on the ramdisk itself and copy the finished    */
-/* file onto the NAND once /mnt1 is mounted. Two things kill it.            */
+/* file onto the NAND once /mnt is mounted. Two things kill it.             */
 /*   1. It rests on the ramdisk root being mounted READ-WRITE at the moment */
 /*      launchd spawns us, which is not established anywhere in this        */
 /*      project. If it is read-only, launchd's open() fails, the job gets   */
@@ -295,7 +375,7 @@ static int install_file(const char *src, const char *dst, int uid, int gid, int 
 /* device's final layout, staged at bake time by bakeRamdisk() with each   */
 /* file/directory/symlink already carrying its correct final owner and     */
 /* mode (see BakeRamdisk.cpp) — this just walks it and blindly replicates  */
-/* it onto /mnt1, overwriting whatever's already there. No branching on    */
+/* it onto /mnt, overwriting whatever's already there. No branching on     */
 /* firmware version or install state happens here at all: which files      */
 /* exist under /blackb0x for a given ramdisk was already decided at bake    */
 /* time (bakeRamdisk() knows the target firmware's ProductVersion, so it    */
@@ -320,7 +400,7 @@ static int install_file(const char *src, const char *dst, int uid, int gid, int 
  * Symlinks are unlinked first, then recreated pointing at the source
  * symlink's own target string verbatim — this is how /blackb0x/--early-boot
  * (a real symlink to /untether/expl.js, no different from any other file
- * under /blackb0x) becomes /mnt1/--early-boot.
+ * under /blackb0x) becomes /mnt/--early-boot.
  *
  * opendir/readdir rather than the raw getdirentries(2) this used to parse
  * by hand. readdir() reports end-of-directory and a real error the same
@@ -428,7 +508,7 @@ static void panic(const char *msg) {
     for (;;) sleep(60);
 }
 
-/* Whether /mnt1/private/var/lib/dpkg/status (already written onto the real
+/* Whether /mnt/private/var/lib/dpkg/status (already written onto the real
  * target volume by the merge_tree() call in do_install() below, staged at
  * bake time by BakeRamdisk.cpp's stageManualDpkgInstall()/
  * stageEtasonatv()) has a real `Package: <pkgName>` stanza — a plain
@@ -501,7 +581,7 @@ static int copy_preserving(const char *src, const char *dst) {
  * installed. This intentionally runs from the entrypoint rather than being
  * baked directly into /blackb0x at bake time: bake time only ever sees a
  * pristine, not-yet-patched restore ramdisk with no access to this
- * specific device's actual /mnt1/usr/libexec/rtbuddyd content, so
+ * specific device's actual /mnt/usr/libexec/rtbuddyd content, so
  * "back up whatever's really there first" can only be decided here,
  * against the real mounted target volume, not baked as a static symlink
  * ahead of time.
@@ -513,25 +593,25 @@ static int copy_preserving(const char *src, const char *dst) {
  * itself also relies on, kept here to mirror it exactly rather than lean
  * solely on the caller's own one-shot guarantee). */
 static void fixup_etasonuntether_rtbuddyd(void) {
-    if (!dpkg_status_has_installed_package("/mnt1/private/var/lib/dpkg/status", "net.tihmstar.etasonuntether")) {
+    if (!dpkg_status_has_installed_package(MNT "/private/var/lib/dpkg/status", "net.tihmstar.etasonuntether")) {
         return;
     }
-    if (access("/mnt1/usr/libexec/rtbuddyd.orig", F_OK) == 0) {
+    if (access(MNT "/usr/libexec/rtbuddyd.orig", F_OK) == 0) {
         return; /* already backed up on a prior run */
     }
-    if (access("/mnt1/usr/libexec/rtbuddyd", F_OK) == 0) {
-        if (copy_preserving("/mnt1/usr/libexec/rtbuddyd", "/mnt1/usr/libexec/rtbuddyd.orig") != 0) {
+    if (access(MNT "/usr/libexec/rtbuddyd", F_OK) == 0) {
+        if (copy_preserving(MNT "/usr/libexec/rtbuddyd", MNT "/usr/libexec/rtbuddyd.orig") != 0) {
             fprintf(stderr, "failed to back up rtbuddyd before etasonuntether symlink\n");
             return;
         }
-        unlink("/mnt1/usr/libexec/rtbuddyd");
+        unlink(MNT "/usr/libexec/rtbuddyd");
     }
     /* Either rtbuddyd was just backed up and removed above, or there was
      * never a real one to back up in the first place — the real postinst
      * symlinks unconditionally in that second case too (its own `else`
      * branch). */
     if (symlink("/System/Library/Frameworks/JavaScriptCore.framework/Resources/jsc",
-                "/mnt1/usr/libexec/rtbuddyd") != 0) {
+                MNT "/usr/libexec/rtbuddyd") != 0) {
         fprintf(stderr, "failed to symlink rtbuddyd -> jsc for etasonuntether\n");
     }
 }
@@ -562,17 +642,17 @@ static void fixup_etasonuntether_rtbuddyd(void) {
  * — its presence means real dpkg state now exists to protect, and the safe
  * response is to refuse outright, not press on. */
 static int do_install(void) {
-    if (access("/mnt1/Applications/AppleTV.app/AppleTV", F_OK) != 0) {
+    if (access(MNT "/Applications/AppleTV.app/AppleTV", F_OK) != 0) {
         fprintf(stderr, "Not an AppleTV — refusing to touch this volume\n");
         return 0;
     }
 
-    if (access("/mnt1/var/.blackb0x/install-done", F_OK) == 0) {
+    if (access(MNT "/var/.blackb0x/install-done", F_OK) == 0) {
         panic("/var/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
     }
 
     printf("Merging blackb0x payload\n");
-    int merged = merge_tree("/blackb0x", "/mnt1");
+    int merged = merge_tree("/blackb0x", MNT);
     fixup_etasonuntether_rtbuddyd();
     printf("Finished install\n");
 
@@ -634,6 +714,258 @@ static void set_auto_boot(void) {
     }
 }
 
+/* ====================================================================== */
+/* Standing in for Apple's rc.boot                                        */
+/* ====================================================================== */
+/*                                                                        */
+/* On the rc.boot generation this binary IS /etc/rc.boot: bakeRamdisk()    */
+/* replaces Apple's own 8,880-byte stub of that name with ours. That is    */
+/* the only hook that generation reaches (its launchd has no daemon-       */
+/* directory loader; launchctl's system_specific_bootstrap() fwexec()s     */
+/* /etc/rc.boot and blocks in waitpid()), and standing in for a file means */
+/* INHERITING WHAT IT DID. Apple's stub is tiny and fully disassembled —   */
+/* five imports, _getfsfile _mount _umask _execl _reboot, and four         */
+/* strings:                                                               */
+/*                                                                        */
+/*     f = getfsfile("/");                                                */
+/*     if (!f) reboot(0);                                                 */
+/*     if (mount(f->fs_vfstype, "/", 0x10001, &args{f->fs_spec}))         */
+/*         reboot(0);                                                     */
+/*     umask(0);                                                          */
+/*     for (p in {restored_external, restored_update, restored, ramrod})  */
+/*         execl(p, p, NULL);                                             */
+/*     reboot(0);                                                         */
+/*                                                                        */
+/* Three corrections to how that has been described in this repo, all read */
+/* off the real binary rather than inferred:                              */
+/*                                                                        */
+/*   1. **0x10001 is MNT_UPDATE|MNT_RDONLY, not "read-write".** Apple's    */
+/*      rc.boot DEMOTES the ramdisk root to read-only; it does not promote */
+/*      it. So the root arrives from the kernel writable and Apple gives   */
+/*      that up before handing off to restored_external. We deliberately   */
+/*      do NOT replicate the demotion (see ensure_root_writable()).        */
+/*   2. **getfsfile() here never reads /etc/fstab.** There is no           */
+/*      /etc/fstab on either ramdisk, and the legacy ramdisk's own         */
+/*      libsystem_c contains the string "fstab" nowhere at all — it        */
+/*      imports _getfsstat/_statfs/_fstatfs and synthesises the entry from */
+/*      the LIVE MOUNT TABLE. Apple's rc.boot is therefore asking the      */
+/*      kernel what / actually is, with getfsfile() as the middleman.      */
+/*      statfs("/") asks the same question directly, so that is what       */
+/*      ensure_root_writable() uses: same answer, one fewer moving part,   */
+/*      no dependence on a libc fallback that is invisible in the headers. */
+/*   3. The execl() list always lands on the first entry. /usr/local/bin   */
+/*      holds exactly restored_external and ioflashstoragetool on BOTH     */
+/*      generations; restored_update, restored and ramrod do not exist on  */
+/*      either. The list is still walked in Apple's order below, because   */
+/*      being a faithful stand-in costs three array entries.               */
+
+/* Give this process a console if, and ONLY if, nobody already gave it    */
+/* one. See "Where output goes" above for the whole argument; the short   */
+/* form is that launchd attaches /dev/console from the unit's Standard*   */
+/* Path keys on the LaunchDaemons generation, and NOTHING attaches        */
+/* anything on the rc.boot generation, where the kernel does not even     */
+/* open /dev/console for init.                                           */
+/*                                                                        */
+/* fcntl(fd, F_GETFD) is the cheapest possible "is this descriptor open?" */
+/* — it touches no file, allocates nothing, and returns -1/EBADF exactly  */
+/* when the descriptor is closed. The two descriptors are tested          */
+/* INDEPENDENTLY rather than assuming they share a state: there is no     */
+/* rule that says a process handed a stdout was also handed a stderr, and */
+/* clobbering a live fd 2 to fix a dead fd 1 would be its own bug.        */
+/*                                                                        */
+/* O_WRONLY, not O_RDWR: this process never reads the console, and asking */
+/* for read access on a tty we are not the session leader of is a         */
+/* needless way to fail. The extra descriptor is closed once duplicated   */
+/* unless it already landed on 0/1/2. Failure is silent-but-reported and  */
+/* never fatal — a missing console is a lost diagnostic, not a reason to  */
+/* abandon an install. */
+static void ensure_console_fds(void) {
+    int needOut = (fcntl(1, F_GETFD) == -1);
+    int needErr = (fcntl(2, F_GETFD) == -1);
+    if (!needOut && !needErr) {
+        return; /* launchd already attached both — leave them alone */
+    }
+
+    int fd = open("/dev/console", O_WRONLY);
+    if (fd < 0) {
+        return; /* nothing to report it ON; this is the blind case */
+    }
+    if (needOut) dup2(fd, 1);
+    if (needErr) dup2(fd, 2);
+    if (fd > 2) close(fd);
+}
+
+/* Make sure the ramdisk root is writable, by ASKING rather than by        */
+/* inferring it from the generation.                                      */
+/*                                                                        */
+/* statfs("/") reports the live mount's own device (f_mntfromname), its    */
+/* own filesystem type (f_fstypename) and its own flags, so the whole      */
+/* decision and every argument to the fixup come from the kernel. If       */
+/* MNT_RDONLY is clear we are already writable and this is a no-op — which */
+/* is what it is expected to be on BOTH generations, since the kernel      */
+/* mounts an md0 ramdisk root read-write and Apple's rc.boot only ever     */
+/* took that away again.                                                  */
+/*                                                                        */
+/* WHY PROMOTE RATHER THAN DEMOTE, when Apple demotes: we are not the last */
+/* thing to run on this ramdisk the way Apple's rc.boot is. Apple's stub   */
+/* execs restored_external and is gone; we keep running, we fork           */
+/* restored_external alongside ourselves, and a read-only root would turn  */
+/* any future need to write there (a scratch file, a socket, a mountpoint  */
+/* we did not anticipate) into a silent failure on the generation with the */
+/* least observability. Nothing here writes to the ramdisk root TODAY —    */
+/* /blackb0x is only read, and every write goes to MNT, i.e. the NAND — so */
+/* this is a safety net rather than a dependency, and it is written to     */
+/* announce itself either way.                                            */
+/*                                                                        */
+/* The 11-word args block is the same shape main()'s HFS mounts use and    */
+/* the same shape Apple's rc.boot builds (44 bytes, fully zeroed, word 0 = */
+/* the device path): Darwin's HFS mount takes its device out of word 0 of  */
+/* the mount data rather than as a normal mount(2) argument. Zeroed in     */
+/* full here, unlike main()'s two call sites, which deliberately reproduce */
+/* the original binary's uninitialised stack garbage. */
+static void ensure_root_writable(void) {
+    struct statfs fs;
+    if (statfs("/", &fs) != 0) {
+        fprintf(stderr, "entrypoint: statfs(\"/\") failed (%s) — cannot tell if the ramdisk root is writable\n",
+                strerror(errno));
+        return;
+    }
+    if ((fs.f_flags & MNT_RDONLY) == 0) {
+        return; /* already read-write; nothing to do */
+    }
+
+    long args[11];
+    memset(args, 0, sizeof(args));
+    args[0] = (long)fs.f_mntfromname;
+    if (mount(fs.f_fstypename, "/", MNT_UPDATE, args) != 0) {
+        fprintf(stderr, "entrypoint: could not remount / read-write from %s (%s)\n", fs.f_mntfromname,
+                strerror(errno));
+        return;
+    }
+    printf("Remounted the ramdisk root read-write\n");
+}
+
+/* Apple's rc.boot order, preserved: restored_external first, and the three
+ * it falls back to after. Only the first exists on either ramdisk
+ * (/usr/local/bin is exactly restored_external + ioflashstoragetool on both
+ * 10B329a and 12H1006), so the rest are faithfulness rather than function. */
+static const char *const kRestoredCandidates[] = {
+    "/usr/local/bin/restored_external",
+    "/usr/local/bin/restored_update",
+    "/usr/local/bin/restored",
+    "/usr/libexec/ramrod/ramrod",
+};
+
+/* Bring up restored_external if nothing else is going to.                 */
+/*                                                                         */
+/* THIS IS THE WHOLE REASON THE rc.boot BRANCH EXISTS. restored_external is */
+/* the only binary on either ramdisk that calls                            */
+/* IOUSBDeviceControllerCreate / IOUSBDeviceDescriptionCreateFromDefaults / */
+/* IOUSBDeviceControllerSetDescription, and on this hardware the USB device */
+/* stack stays OFF THE BUS until a userspace process does exactly that      */
+/* (the DeviceTree's usb0-device says configuration-string =               */
+/* "standardMuxOnly" while the in-kernel auto-configurator personality      */
+/* matches only "standardBringup", so it never fires). It is also what      */
+/* draws the display: it links IOMobileFramebuffer and IOSurface and owns   */
+/* /usr/share/progressui. Without it a perfect run is indistinguishable     */
+/* from a dead device.                                                      */
+/*                                                                         */
+/* THE PROBE. The question that matters is "will something else start it?", */
+/* and the direct, causal, observable answer is whether a LaunchDaemon      */
+/* exists that does. com.apple.restored_external.plist is present on the    */
+/* LaunchDaemons generation and absent (with the whole directory) on the    */
+/* rc.boot one, so this one stat() distinguishes the two environments by    */
+/* asking about the exact mechanism in question rather than about a proxy   */
+/* for it — and it stays correct if that plist is ever removed from a       */
+/* ramdisk that still has the directory. The alternatives were weighed and  */
+/* rejected: a process scan needs a userland this ramdisk does not have,    */
+/* and asking IOKit whether the device controller is already configured     */
+/* would mean linking IOKit — a second LC_LOAD_DYLIB dragging in            */
+/* CoreFoundation, libobjc and libicucore, for a probe, against a binary    */
+/* whose one-dylib closure is the thing that makes the bake-time closure    */
+/* check tractable.                                                         */
+/*                                                                         */
+/* FORK, NOT EXEC, and this is the load-bearing decision. Apple's rc.boot   */
+/* execl()s: it REPLACES ITS OWN PROCESS IMAGE, which for us would mean the */
+/* install never happens. Exec'ing at the END instead is worse than it      */
+/* sounds — the display and USB would come up only after the merge, i.e.    */
+/* seconds before reboot(2) tears them down, so the entire window we are    */
+/* trying to make observable would already be over. Forking first puts      */
+/* restored_external up DURING our run: the device enumerates as 05ac:12a7  */
+/* while the merge is in flight, and AppleUSBDeviceMux (prelinked into both */
+/* kernelcaches) makes anything listening reachable from the host.          */
+/*                                                                         */
+/* WE DO NOT WAIT FOR IT, deliberately. It never exits — it blocks in an    */
+/* accept() loop — so a wait4() here would hang the install forever, and    */
+/* widening the window in which the NAND is mounted and half-written is     */
+/* precisely the wrong direction (see main()'s teardown). It is reparented  */
+/* to launchd when we exit, which is launchd's ordinary business.           */
+/*                                                                         */
+/* KNOWN TAIL RISK, recorded rather than defended against. On BOTH          */
+/* generations (12H1006 as well as 10B329a — an earlier note in this repo   */
+/* called it 10B329a-specific and that was wrong) restored_external's       */
+/* main() with no arguments forks and execs ITSELF with -server, and the    */
+/* parent waitpid()s; when that child exits for any reason the parent logs  */
+/* "restored exited ... - rebooting" and reboots via /sbin/reboot. If that  */
+/* happens mid-merge the device reboots with our mount dirty. With no host  */
+/* attached the child blocks in accept() forever, so this is a tail risk    */
+/* rather than a likely one, and the mitigation is to keep the dirty        */
+/* window short (main() syncs and unmounts the instant the merge returns)   */
+/* rather than to add a lock or a wait — nothing else on the ramdisk        */
+/* touches block devices at all (launchd, launchctl, xpcproxy, syslogd and  */
+/* ReportCrash contain zero references to /mnt, disk0, rdisk or any mount   */
+/* call), so there is nothing to lock against.                              */
+/*                                                                         */
+/* Its own startup is non-destructive and that was checked, not assumed: it */
+/* sets an IOPMUBootStage property, starts a gas-gauge thread, creates a    */
+/* listen socket, disables the watchdog, calls enable_usb_connections() and */
+/* blocks. Every destructive primitive it has (WipeStorageDevice,           */
+/* clean_NAND, FormatForLwVM, partition_nand_device, asr) sits behind a     */
+/* host StartRestore message — which is why pointing a restore client at    */
+/* the device while this runs is forbidden. A bonus for our own output: its */
+/* log primitive ends at fputs(msg, __stdoutp) and it drains syslogd's ASL  */
+/* store on the way, re-printing every record as "SYSLOG: %s", so once it   */
+/* is up anything logged through ASL reaches /dev/console too.              */
+static void start_restored_external(void) {
+    struct stat st;
+    if (stat("/System/Library/LaunchDaemons/com.apple.restored_external.plist", &st) == 0) {
+        printf("restored_external has its own LaunchDaemon here — leaving it to launchd\n");
+        return;
+    }
+
+    const char *prog = NULL;
+    for (unsigned i = 0; i < sizeof(kRestoredCandidates) / sizeof(kRestoredCandidates[0]); i++) {
+        if (access(kRestoredCandidates[i], X_OK) == 0) {
+            prog = kRestoredCandidates[i];
+            break;
+        }
+    }
+    if (prog == NULL) {
+        fprintf(stderr,
+                "entrypoint: no restored binary on this ramdisk — the display and USB will stay down, "
+                "and this install will be unobservable\n");
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = {(char *)prog, 0};
+        char *envp[] = {0};
+        execve(prog, argv, envp);
+        /* Only reached if the exec itself failed. Say so on the console we
+         * just inherited from the parent, then leave — the parent is the
+         * one doing the install and must not be disturbed. */
+        fprintf(stderr, "entrypoint: cannot exec %s (%s)\n", prog, strerror(errno));
+        _exit(127);
+    }
+    if (pid < 0) {
+        fprintf(stderr, "entrypoint: fork() for %s failed (%s) — continuing without display or USB\n", prog,
+                strerror(errno));
+        return;
+    }
+    printf("Started %s (pid %d) for display and USB bring-up\n", prog, (int)pid);
+}
+
 /* ---------------------------------------------------------------------- */
 /* main() — disk wait, the two mount()s + devfs, do_install(), then        */
 /* unmount everything and reboot. dyld calls this directly via LC_MAIN's   */
@@ -641,43 +973,40 @@ static void set_auto_boot(void) {
 /* it takes no argc/argv/envp — dyld passes them, and nothing here wants   */
 /* them.                                                                   */
 /*                                                                         */
-/* The console-fd setup the original opened this function with is GONE.    */
-/* fds 1 and 2 arrive already connected to /dev/console, from the          */
-/* LaunchDaemon's StandardOutPath/StandardErrorPath — see "Where output    */
-/* goes" above.                                                            */
+/* THE FIRST THREE CALLS ARE THE RUNTIME PROBES, and they run before       */
+/* anything else because everything else is better with them and none of   */
+/* them can hurt. ensure_console_fds() gives us output if nobody else did; */
+/* ensure_root_writable() promotes the ramdisk root if it arrived          */
+/* read-only; start_restored_external() puts the display and USB up if no  */
+/* LaunchDaemon is going to. Each one asks a direct question about the     */
+/* system it is standing in rather than about which generation it is, so   */
+/* the same instructions are correct in both environments — see each       */
+/* function's own comment, and the header's "ONE BINARY, NO COMPILE-TIME   */
+/* ROLE".                                                                  */
 /*                                                                         */
-/* KNOWN CONSEQUENCE ON THE LEGACY rc.boot GENERATION, recorded rather     */
-/* than silently accepted. Those ramdisks (AppleTV3,2 10B329a, AppleTV2,1  */
-/* 11D258) cannot load a LaunchDaemon plist at all, so BakeRamdisk.cpp's   */
-/* installEntrypoint() still splices this binary over /sbin/launchd there  */
-/* and it runs as PID 1 — with nothing to set up its fds, because the      */
-/* kernel does not open /dev/console for init. (That is precisely why the  */
-/* original binary opened it by hand; the disassembly shows the open/dup2  */
-/* as its first act.) So on that generation stdout/stderr are closed and   */
-/* every printf here fails with EBADF. That path is ALREADY the one        */
-/* documented as producing a dark, un-enumerated device with no            */
-/* restored_external and no display — it is explicitly not endorsed, see   */
-/* installEntrypoint()'s bake-time warning — so this costs a diagnostic    */
-/* channel that was already of little use. If it is ever wanted back, the  */
-/* honest shape is a guard that fires ONLY when launchd did not provide a  */
-/* stream (`if (fcntl(1, F_GETFD) == -1) { ... open + dup2 ... }`), never  */
-/* an unconditional re-open that would fight the plist on the primary      */
-/* path.                                                                   */
+/* Putting them ahead of the disk-wait loop is deliberate: that loop is    */
+/* unbounded, so anything sequenced after it is hostage to a disk that     */
+/* never appears — which is exactly the failure we most want a lit display */
+/* and a USB-enumerated device to be able to report.                       */
 /*                                                                         */
-/* RETURNING FROM HERE MEANS SOMETHING COMPLETELY DIFFERENT NOW. As PID 1  */
-/* an early `return -1` was a kernel-level catastrophe: init exiting takes */
-/* the system with it, and in practice the device just died. As a          */
-/* LaunchDaemon it is an ordinary job exit with an ordinary status —       */
-/* Apple's launchd stays up, restored_external keeps the display lit and   */
-/* the device on the USB bus, and the failure is something a host can      */
-/* actually look at. The error paths below are therefore diagnostics now   */
-/* rather than a second way to brick the boot, and they were left with     */
-/* their original return values deliberately: nothing downstream reads     */
-/* them, and inventing an exit-code scheme no reader exists for would be   */
-/* noise.                                                                  */
+/* RETURNING FROM HERE IS NO LONGER CATASTROPHIC ON EITHER PATH. As PID 1  */
+/* an early `return -1` took the system with it. We are never PID 1 now:   */
+/* on the LaunchDaemons generation this is an ordinary job exit (launchd    */
+/* stays up, restored_external keeps the display lit and the device on the */
+/* USB bus), and on the rc.boot generation we are a child of launchctl,    */
+/* which is blocked in waitpid() and simply resumes its bootstrap. Either  */
+/* way the failure is something a host can look at. The error paths below  */
+/* were left with their original return values deliberately: nothing       */
+/* downstream reads them, and inventing an exit-code scheme no reader      */
+/* exists for would be noise.                                              */
 /* ---------------------------------------------------------------------- */
 
 int main(void) {
+    /* Before stdio is touched: if we were handed no descriptors, attach
+     * /dev/console to them ourselves. setvbuf() on a closed fd 1 would be a
+     * silent no-op followed by a run with no output at all. */
+    ensure_console_fds();
+
     /* Unbuffered, both streams. This is what replaces the old hand-rolled
      * console_print()'s reason for existing: stdio would line-buffer on a
      * tty and FULLY buffer if /dev/console ever failed the isatty() test,
@@ -689,6 +1018,24 @@ int main(void) {
      * inferred. */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+
+    /* Apple's /etc/rc.boot duties, in Apple's order (root, umask, then hand
+     * off to restored), minus the parts that only make sense for a stub
+     * that is about to exec itself out of existence. Each is a no-op when
+     * something else has already taken care of it.
+     *
+     * umask(0) is Apple's, verbatim, and it is also what our LaunchDaemon
+     * plist declares (Umask = 0, copied from com.apple.restored_external
+     * .plist) — so setting it here makes the two paths behave identically
+     * instead of leaving the rc.boot path with whatever launchctl handed
+     * down. merge_tree() chmod()s everything it creates explicitly, so a
+     * nonzero umask would not survive anyway; what this removes is the
+     * window between create and chmod. It is also inherited by the
+     * restored_external we are about to fork, exactly as under Apple's
+     * rc.boot. */
+    ensure_root_writable();
+    umask(0);
+    start_restored_external();
 
     printf("Searching for disk...\n");
     /* Original waits on a stat() of /dev/disk0s1s1 succeeding — matches
@@ -717,25 +1064,34 @@ int main(void) {
     long hfsArgs1[11];
     hfsArgs1[0] = (long)"/dev/disk0s1s1";
     if (mount("hfs", MNT, 0, hfsArgs1) != 0) {
-        fprintf(stderr, "Failed to mount / r/w (%s)\n", strerror(errno));
+        fprintf(stderr, "Failed to mount / r/w at " MNT " (%s)\n", strerror(errno));
+        fprintf(stderr, "  (" MNT " is created at bake time by BakeRamdisk.cpp; ENOENT here means\n"
+                        "   this ramdisk was not baked by blackb0x)\n");
         return -1;
     }
     printf("Main filesystem mounted\n");
 
     printf("Mounting user filesystem...\n");
-    mkdir("/mnt1/private/var2", 0x1ed);
+    mkdir(MNT "/private/var2", 0x1ed);
     long hfsArgs2[11];
     hfsArgs2[0] = (long)"/dev/disk0s1s2";
-    if (mount("hfs", "/mnt1/private/var", 0, hfsArgs2) != 0) {
+    if (mount("hfs", MNT "/private/var", 0, hfsArgs2) != 0) {
         fprintf(stderr, "Failed to mount /var r/w (%s)\n", strerror(errno));
         return -1;
     }
     printf("User Filesystem mounted\n");
 
     printf("Mounting devices...\n");
-    if (mount("devfs", "/mnt1/dev", 0, NULL) != 0) {
+    if (mount("devfs", MNT "/dev", 0, NULL) != 0) {
         fprintf(stderr, "Unable to mount devices! (%s)\n", strerror(errno));
-        unmount("/mnt1", 0);
+        /* Innermost first, and var2 removed while the volume carrying it is
+         * still mounted — the same ordering fix as the teardown below. The
+         * old code unmounted MNT only, leaving the data partition mounted
+         * across a reboot. */
+        sync();
+        unmount(MNT "/private/var", 0);
+        rmdir(MNT "/private/var2");
+        unmount(MNT, 0);
         set_auto_boot();
         /* 0 is RB_AUTOBOOT. It is written as a bare 0 deliberately: Apple
          * strips <sys/reboot.h> from every iPhoneOS SDK, so the RB_*
@@ -750,21 +1106,36 @@ int main(void) {
 
     do_install();
 
-    unmount("/mnt1/dev", 0);
-    unmount("/mnt1", 0);
-    printf("Installation complete\n");
+    /* CLOSE THE DIRTY WINDOW IMMEDIATELY. Nothing goes between the merge
+     * returning and the NAND being flushed and unmounted — not a status
+     * line, not a second thought. The reason is restored_external, which is
+     * alive alongside us on both generations now: its no-argument main()
+     * forks a -server child and waitpid()s, and when that child exits for
+     * ANY reason the parent logs "restored exited ... - rebooting" and
+     * reboots the device via /sbin/reboot. With no host attached the child
+     * blocks in accept() forever, so this is a tail risk rather than a
+     * likely one — but the cheap, correct mitigation is to be unmounted
+     * before it can fire, not to add a lock (there is nothing to lock
+     * against: launchd, launchctl, xpcproxy, syslogd and ReportCrash
+     * contain zero references to /mnt, disk0, rdisk or any mount call, and
+     * restored_external only mounts on a host StartRestore) and not to wait
+     * for anything (waiting is the one thing that provably widens it).
+     *
+     * ORDER FIXED while this was being rewritten, and the old order was
+     * genuinely wrong: it unmounted MNT before MNT/private/var, which is a
+     * submount of it, and then rmdir()'d MNT/private/var2 after MNT was
+     * already gone — i.e. against the pristine ramdisk's own empty
+     * mountpoint rather than the volume the directory was created on.
+     * Innermost first, and var2 removed while the volume that carries it is
+     * still mounted. */
+    sync();
+    rmdir(MNT "/private/var2");
+    unmount(MNT "/dev", 0);
+    unmount(MNT "/private/var", 0);
+    unmount(MNT, 0);
     sync();
 
-    printf("Unmounting disks...\n");
-    rmdir("/mnt1/private/var2");
-    unmount("/mnt1/private/var", 0);
-    unmount("/mnt1/dev", 0);
-    unmount("/mnt1", 0);
-
-    printf("Flushing buffers...\n");
-    sync();
-
-    printf("Rebooting device...\n");
+    printf("Installation complete — rebooting device...\n");
     set_auto_boot();
     /* RB_AUTOBOOT (0), a normal reboot — see the bare-0 note above for why
      * the constant is not spelled out. The original binary passed 1

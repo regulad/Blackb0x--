@@ -17,24 +17,43 @@
 //    * It MODIFIES NOTHING Apple shipped. /sbin/launchd in particular is left
 //      byte for byte alone; it used to be overwritten in place with our
 //      binary (spliceFileContentInPlace()).
-//    * It ADDS THREE THINGS, all brand new names no Apple ramdisk uses:
+//    * It ADDS FOUR THINGS, all brand new names no Apple ramdisk uses:
 //        - /usr/sbin/blackb0x_entrypoint                              (0755 root:wheel)
 //        - /System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist
 //                                                                     (0644 root:wheel)
 //        - /blackb0x, one new top-level directory (stageBlackb0xTree())
+//        - /mnt, one new EMPTY directory (createBlackb0xMountpoint()), mode
+//          and owner mirrored from Apple's own /mnt1
 //
 //  The first two are installEntrypointUnit(), which carries the full design
 //  rationale: Apple's real launchd now runs, starts its own units (so
 //  restored_external brings the display up and, decisively, brings USB
 //  on-bus), and starts OUR binary as an ordinary one-shot LaunchDaemon.
+//  The fourth is where entrypoint mounts the NAND; it used to borrow Apple's
+//  /mnt1, which turned out to be restored_external's own system-partition
+//  mountpoint. One empty directory is a trivial addition beside the overlay,
+//  and it is listed here rather than absorbed so nobody has to wonder whether
+//  the minimal-footprint principle was quietly abandoned.
 //
-//  On the RC.BOOT generation (AppleTV3,2 10B329a, AppleTV2,1 11D258) the old
-//  mechanism is kept unchanged — splice over /sbin/launchd's content, plus
-//  /blackb0x — because a LaunchDaemon plist provably reaches nothing there.
-//  See installEntrypoint(). An older detour spliced into `/etc/rc.boot`
-//  instead of `/sbin/launchd`; that was reverted for a reason that does not
-//  apply to the rc.boot generation — see docs/HISTORY.md's "Entrypoint
-//  injection point" entry and installEntrypoint()'s own comment.
+//  On the RC.BOOT generation (AppleTV2,1 11D258 today; AppleTV3,2 10B329a if
+//  the fallback target is ever taken), where a LaunchDaemon plist provably
+//  reaches nothing:
+//
+//    * It REPLACES ONE APPLE FILE: /etc/rc.boot, the hook launchctl actually
+//      execs on that generation. spliceFileContentInPlace() keeps Apple's own
+//      mode/owner/group/mtime, so only the content changes. **That is a real
+//      difference from the LaunchDaemons path, which modifies nothing** — it
+//      is stated here rather than buried because "adds only" is otherwise a
+//      property this file claims.
+//    * It ADDS /blackb0x and /mnt, exactly as the other path does.
+//    * /sbin/launchd is NOT touched. That used to be the splice target on
+//      this generation and is not one anywhere any more.
+//
+//  See installEntrypoint(). An older detour spliced into `/etc/rc.boot` and
+//  was reverted — for a reason that does not apply here (12H606's /etc has no
+//  rc.boot, and 12H606 is exactly the firmware that has LaunchDaemons
+//  instead). See docs/HISTORY.md's "Entrypoint injection point" entry and
+//  installEntrypoint()'s own comment.
 //
 //  `/blackb0x` (stageBlackb0xTree()) is
 //  a flat mirror of the real device's final layout with every file/dir/
@@ -374,23 +393,26 @@ std::string buildEntrypointBinary() {
     return outputPath;
 }
 
-// NO LONGER THE DEFAULT MECHANISM, and only reached on the older, rc.boot
-// generation of restore ramdisk — see installEntrypoint() below, which is
-// what chooses. On the LaunchDaemons generation (the primary target) Apple's
-// /sbin/launchd is left byte for byte alone and our binary is installed as a
-// new file instead.
+// Only reached on the rc.boot generation of restore ramdisk, and only for
+// `/etc/rc.boot` — see installEntrypoint() below, which is what chooses.
+// **`/sbin/launchd` IS NO LONGER A TARGET OF THIS ON ANY PATH.** It used to
+// be the only one; Apple's PID 1 is now left byte for byte alone on every
+// firmware this project bakes.
 //
 // Overwrites `targetPath`'s content with `newContentPath`'s bytes while
-// preserving the target's existing mode/owner/group/mtime — for
-// `/sbin/launchd`, which already exists for real on every known firmware's
-// pristine ramdisk (unlike `/etc/rc.boot` — see docs/HISTORY.md's
-// "Entrypoint injection point" entry for the real firmware where that
-// assumption broke), where a blind overwrite-and-recreate would silently
-// replace Apple's own permission bits with whatever this repo's checked-in
-// replacement file happens to carry. Refuses to run if `targetPath` doesn't
-// already exist — that would mean an assumption about the pristine
-// ramdisk's layout is wrong, not something to paper over by creating the
-// file fresh with guessed permissions.
+// preserving the target's existing mode/owner/group/mtime. That preservation
+// is the whole reason this exists rather than a plain write: the target is a
+// file Apple shipped (0755 root:wheel for `/etc/rc.boot` on both legacy
+// ramdisks checked), and a blind overwrite-and-recreate would silently
+// replace Apple's own permission bits with whatever this repo's replacement
+// file happens to carry. Refuses to run if `targetPath` doesn't already
+// exist — that would mean an assumption about the pristine ramdisk's layout
+// is wrong, not something to paper over by creating the file fresh with
+// guessed permissions. (`/etc/rc.boot` genuinely is absent on the
+// LaunchDaemons generation — see docs/HISTORY.md's "Entrypoint injection
+// point" entry for the real bake where that was discovered — which is
+// exactly why installEntrypoint() probes before it picks, and why this
+// refusal is a real guard rather than a formality.)
 static bool spliceFileContentInPlace(const std::string& targetPath, const std::string& newContentPath) {
     struct stat st;
     if (stat(targetPath.c_str(), &st) != 0) {
@@ -767,6 +789,80 @@ static bool installEntrypointUnit(const std::string& mountpoint, const std::stri
 }
 
 // ---------------------------------------------------------------------------
+// Our own mountpoint
+// ---------------------------------------------------------------------------
+//
+// entrypoint.c mounts the NAND at `/mnt` — A DIRECTORY WE CREATE, not one of
+// Apple's. This is what creates it, and it runs on both generations.
+//
+// WHY NOT BORROW ONE OF APPLE'S, which is what every previous version of this
+// project did. The potted history, each step a real finding:
+//
+//   * It was /mnt1 for this project's whole life. /usr/local/bin/
+//     restored_external is the ONLY process on either ramdisk that contains
+//     mount code at all, and /mnt1 is its own system-partition mountpoint: it
+//     carries /sbin/mount, /sbin/mount_hfs, create_partition_mountpoints,
+//     "libpartition, mounting '%s' at '%s'", and hardcoded /mnt1/private/var
+//     and /mnt1/usr/sbin/lsof.
+//   * /mnt2 was the next answer, and /mnt4 (the intuitive "furthest away"
+//     pick) was rejected because THE MOUNTPOINT SET DIFFERS BY GENERATION:
+//     12H1006 ships /mnt1 /mnt2 /mnt3 /mnt4, 10B329a ships only /mnt1 and
+//     /mnt2. But restored_external names every mountpoint its own ramdisk
+//     has, so no borrowed name is un-referenced by it anywhere.
+//   * So: our own. It cannot be the one restored_external reaches for, it
+//     exists on both generations by construction, and there is no
+//     per-firmware branch and no "which mountpoints does this image happen to
+//     have" question to get wrong later.
+//
+// AND AT BAKE TIME RATHER THAN AT RUNTIME, which is the subtle part: a
+// runtime mkdir() inside entrypoint would depend on the ramdisk root being
+// writable at that moment, which is exactly what ensure_root_writable()
+// exists because we cannot assume. Here the image is already attached
+// read-write to stage /blackb0x.
+//
+// OWNER AND MODE ARE MIRRORED FROM APPLE'S OWN /mnt1 rather than assumed.
+// Both generations ship it 0755 root:wheel, but reading it off the volume
+// costs one stat() and means this cannot drift from whatever a future
+// ramdisk actually uses. /mnt1 is present on every ramdisk either generation
+// has (it is the one name they all agree on), so its absence is a real
+// signal that the layout assumption is wrong — the same stance every other
+// pristine-layout check in this file takes.
+static bool createBlackb0xMountpoint(const std::string& mountpoint) {
+    const std::string modelPath = mountpoint + "/mnt1";
+    struct stat model;
+    if (stat(modelPath.c_str(), &model) != 0 || !S_ISDIR(model.st_mode)) {
+        fprintf(stderr,
+                "bakeRamdisk: %s is missing on this ramdisk. Every known restore ramdisk has /mnt1, so this\n"
+                "  firmware is a shape nobody has looked at — refusing rather than guessing at the owner and\n"
+                "  mode for our own /mnt. See BakeRamdisk.cpp's createBlackb0xMountpoint().\n",
+                modelPath.c_str());
+        return false;
+    }
+
+    const std::string ourPath = mountpoint + "/mnt";
+    struct stat st;
+    if (stat(ourPath.c_str(), &st) == 0) {
+        fprintf(stderr,
+                "bakeRamdisk: %s already exists on the pristine ramdisk — refusing to reuse it. No Apple\n"
+                "  ramdisk ships this name, so this means the layout assumption is wrong.\n",
+                ourPath.c_str());
+        return false;
+    }
+
+    const mode_t mode = model.st_mode & 07777;
+    // mkdir() masks against the invoking shell's umask, so the mode is set
+    // again explicitly — the same reason createFileOnVolume() chmod()s.
+    if (mkdir(ourPath.c_str(), mode) != 0 || chmod(ourPath.c_str(), mode) != 0 ||
+        chown(ourPath.c_str(), model.st_uid, model.st_gid) != 0) {
+        fprintf(stderr, "bakeRamdisk: cannot create %s: %s\n", ourPath.c_str(), strerror(errno));
+        return false;
+    }
+    printf("bakeRamdisk: created /mnt (%04o %u:%u, mirrored from /mnt1) as entrypoint's mountpoint\n",
+           (unsigned)mode, (unsigned)model.st_uid, (unsigned)model.st_gid);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Which injection mechanism this firmware's ramdisk needs
 // ---------------------------------------------------------------------------
 //
@@ -804,23 +900,59 @@ static bool installEntrypointUnit(const std::string& mountpoint, const std::stri
 //      the first that exists, which is always restored_external. It never
 //      returns.
 //
-// SO THE rc.boot GENERATION KEEPS THE OLD MECHANISM, unchanged: splice our
-// binary over /sbin/launchd's content, exactly as every bake did before this
-// change. That is deliberately NOT an endorsement — it is the configuration
-// known to produce a dark, un-enumerated device, for the reasons in
-// installEntrypointUnit()'s comment — but it is what those firmwares have
-// always had, and silently regressing them to "bake fails" would be worse
-// than leaving them where they were. The warning below says so on every bake.
+// SO THE rc.boot GENERATION GETS THE HOOK IT ACTUALLY REACHES: our binary is
+// installed AS /etc/rc.boot, replacing Apple's own stub of that name.
 //
-// THE RIGHT FIX FOR THAT GENERATION, when someone takes it on, is to replace
-// /etc/rc.boot with a binary that does our work and then execl()s
-// /usr/local/bin/restored_external itself, preserving the display and USB
-// bring-up that make any of this observable. Two things to know before
-// starting: docs/HISTORY.md's "Entrypoint injection point" entry records an
-// rc.boot attempt being tried and reverted, and that warning DOES NOT APPLY —
-// it was reverted because 12H606's /etc has no rc.boot, which is precisely the
-// firmware that has LaunchDaemons instead. And on 10B329a the parent
-// restored_external reboots the device when its -server child exits.
+// **THIS REPLACED THE SPLICE OVER /sbin/launchd, WHICH IS GONE FROM EVERY
+// PATH.** Every bake before this one overwrote PID 1's content on this
+// generation, which meant Apple's launchd never ran, which meant launchctl
+// never ran, which meant restored_external never ran — no display, no USB
+// enumeration, and a working boot indistinguishable from a dead device. That
+// was already documented as not an endorsement; this is the fix for it, and
+// it is the shape installEntrypointUnit()'s comment predicted.
+//
+// WHAT THE LEGACY PATH NOW TOUCHES, stated plainly because it differs from
+// the LaunchDaemons path in a way that matters:
+//
+//   * It REPLACES AN APPLE FILE (`/etc/rc.boot`, 8832 bytes on 11D258, 8880
+//     on 10B329a) rather than adding new names. The LaunchDaemons path adds
+//     two files and modifies nothing Apple shipped; this one cannot, because
+//     the whole mechanism of that generation is "launchctl execs this exact
+//     path". spliceFileContentInPlace() keeps Apple's own mode, owner, group
+//     and mtime on it, so the only thing that changes is the content.
+//   * It adds `/blackb0x` (stageBlackb0xTree()), the same as the other path.
+//   * `/sbin/launchd` is NOT touched, and neither is anything else.
+//
+// AND OUR BINARY INHERITS rc.boot's DUTIES, which is the other half of the
+// change and lives in entrypoint.c (see its "Standing in for Apple's rc.boot"
+// section): it makes sure the ramdisk root is writable, umask(0)s, and FORKS
+// /usr/local/bin/restored_external so the display and USB come up DURING the
+// install rather than after it. Apple's stub execl()s instead, which would
+// replace our process image and mean no install at all. entrypoint.c decides
+// all of that by RUNTIME PROBE, not by a compile-time flag: the generation is
+// a property of the ramdisk image, which is not known until this function
+// mounts it — long after the binary was built. One artifact, one signature,
+// one symbol closure, correct on both generations.
+//
+// WHAT THIS DOES NOT BUY, same as the other path: it does not dodge AMFI.
+// launchctl's fwexec() of /etc/rc.boot is an ordinary execve and lands in the
+// same mac_vnode_check_signature / AMFI hook as everything else. The baked
+// boot-args remain the only thing that disables enforcement.
+//
+// docs/HISTORY.md's "Entrypoint injection point" entry records an rc.boot
+// attempt being tried and REVERTED, and that warning DOES NOT APPLY here: it
+// was reverted because 12H606's /etc has no rc.boot at all — and 12H606 is
+// precisely the firmware that has LaunchDaemons instead. The two generations
+// want opposite mechanisms and each is wrong on the other, which is why this
+// function probes rather than picking a universal answer. The probe is also
+// why this cannot regress that way again: a ramdisk with no rc.boot takes the
+// LaunchDaemons branch, and one with neither fails the bake loudly.
+//
+// One live hazard to know about, not defended against here because it cannot
+// be: on BOTH generations restored_external's no-argument main() forks a
+// `-server` child and waitpid()s it, and reboots the device when that child
+// exits for any reason. entrypoint.c's mitigation is to sync() and unmount
+// the NAND the instant the merge returns; see its teardown comment.
 static bool installEntrypoint(const std::string& mountpoint, const std::string& entrypointBinaryPath) {
     struct stat st;
     const std::string daemonsDir = mountpoint + "/System/Library/LaunchDaemons";
@@ -841,15 +973,19 @@ static bool installEntrypoint(const std::string& mountpoint, const std::string& 
         return false;
     }
 
-    fprintf(stderr,
-            "bakeRamdisk: WARNING: this firmware is the rc.boot generation of restore ramdisk (no\n"
-            "  /System/Library/LaunchDaemons), so it gets the LEGACY mechanism: our binary is spliced\n"
-            "  over /sbin/launchd's content and Apple's real launchd does not run. That means no\n"
-            "  restored_external, so the display never comes up and the device never enumerates on\n"
-            "  USB -- a working boot is indistinguishable from a dead one on this firmware. The\n"
-            "  LaunchDaemons mechanism cannot be used here; see installEntrypoint()'s comment for\n"
-            "  why, and for the rc.boot-replacement shape that would fix it.\n");
-    return spliceFileContentInPlace(mountpoint + "/sbin/launchd", entrypointBinaryPath);
+    // Deliberately on stdout, not stderr: this is a design fact about the
+    // firmware, not a problem with the bake. The old message here was a
+    // WARNING because the mechanism it described was known-broken.
+    printf("bakeRamdisk: rc.boot generation (no /System/Library/LaunchDaemons) — installing our binary\n"
+           "  AS /etc/rc.boot, the hook launchctl actually execs on this firmware. Apple's own rc.boot\n"
+           "  stub is replaced (its mode/owner/mtime are preserved); /sbin/launchd is left untouched, so\n"
+           "  Apple's launchd and launchctl both still run. Our binary takes over rc.boot's duties and\n"
+           "  forks restored_external itself, so the display and USB come up during the install.\n");
+    if (!spliceFileContentInPlace(rcBoot, entrypointBinaryPath)) {
+        return false;
+    }
+    printf("bakeRamdisk: installed /etc/rc.boot (replacing Apple's %lld-byte stub)\n", (long long)st.st_size);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2784,7 +2920,7 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
 }
 
 // ---------------------------------------------------------------------------
-// Symbol-closure check for the spliced entrypoint
+// Symbol-closure check for the installed entrypoint
 // ---------------------------------------------------------------------------
 // Runs against the REAL mounted ramdisk, per device and per build, which is
 // the whole reason it lives in the bake rather than in CI: the bake already
@@ -2807,8 +2943,10 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
 // plus one `nm -u`. Landing it before the conversion is what got it
 // exercised by the existing bakes on all three devices while it still could
 // not fail, rather than debugging the guardrail and the thing it guards at
-// the same time. It does real work now — 38 undefined symbols against one
-// LC_LOAD_DYLIB and /usr/lib/dyld. Do not "simplify" the freestanding case
+// the same time. It does real work now — 43 undefined symbols against one
+// LC_LOAD_DYLIB and /usr/lib/dyld, and it covers BOTH generations from one
+// artifact, since entrypoint picks its behaviour by runtime probe rather
+// than by a build-time flag that would fork the binary in two. Do not "simplify" the freestanding case
 // away regardless: there is deliberately no special case for it, and the
 // empty sets simply make every loop below run zero times.
 //
@@ -3055,9 +3193,11 @@ static bool verifyEntrypointRuntimeClosure(const std::string& mountpoint,
 // file Apple shipped is left COMPLETELY untouched there — content,
 // permissions, ownership and timestamps alike. That is stronger than what
 // this used to say unconditionally: `/sbin/launchd` had its content
-// overwritten in place (spliceFileContentInPlace()), and only still does on
-// the older rc.boot generation. See this file's header comment and
-// installEntrypoint(). /blackb0x does not fit in the
+// overwritten in place (spliceFileContentInPlace()) on every firmware, and
+// is now overwritten on none. The rc.boot generation still replaces exactly
+// one Apple file — `/etc/rc.boot`, the only hook it reaches — and adds
+// `/blackb0x`; see this file's header comment and installEntrypoint().
+// /blackb0x does not fit in the
 // pristine volume's own free space, so the image is GROWN first: measure the
 // staged payload, `hdiutil resize` the decrypted image to fit it, then mount
 // that and write into it. The original volume is never rebuilt and its
@@ -3389,14 +3529,22 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
             return false;
         }
     }
-    // The two new files installEntrypointUnit() adds outside /blackb0x. Small
-    // (~52 KB of binary plus a ~700-byte plist) and comfortably inside the
-    // 4 MiB margin floor below, but counted explicitly rather than absorbed:
-    // the pristine volume ships with ZERO free blocks, so anything written to
-    // it has to come out of the growth, and the old design hid this by
-    // REPLACING a 239 KB /sbin/launchd with a ~52 KB binary — a net saving. It
-    // is a net addition now. A silent dependence on slack is exactly the kind
-    // of thing that starts failing the day the binary grows.
+    // What installEntrypoint() writes outside /blackb0x. Small (~52 KB of
+    // binary plus a ~700-byte plist) and comfortably inside the 4 MiB margin
+    // floor below, but counted explicitly rather than absorbed: the pristine
+    // volume ships with ZERO free blocks, so anything written to it has to
+    // come out of the growth, and the old design hid this by REPLACING a
+    // 239 KB /sbin/launchd with a ~52 KB binary — a net saving. It is a net
+    // addition now. A silent dependence on slack is exactly the kind of thing
+    // that starts failing the day the binary grows.
+    //
+    // Counted UNCONDITIONALLY, for both generations, even though the two
+    // paths write different things: the LaunchDaemons path adds the binary
+    // and the plist, while the rc.boot path replaces an ~8.8 KB Apple file
+    // with the same binary (a net ~43 KB, plus no plist). This over-counts by
+    // under a kilobyte on the legacy path, which is the right direction to be
+    // wrong in, and it keeps the sizing independent of a decision that is not
+    // made until the volume is mounted several dozen lines below.
     uint64_t entrypointUnitSize = 0;
     {
         std::error_code epEc;
@@ -3442,15 +3590,26 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     }
     mount.mounted = true;
 
-    // On the LaunchDaemons generation of ramdisk (the primary target) NOTHING
-    // APPLE SHIPPED IS MODIFIED: this adds two new files and leaves the
-    // pristine tree, /sbin/launchd included, byte for byte as Apple shipped
-    // it. On the older rc.boot generation it falls back to the legacy splice
-    // over /sbin/launchd's content, with a loud warning. installEntrypoint()
-    // is what decides, and its comment plus installEntrypointUnit()'s carry
-    // the whole design: what replacing PID 1 was costing us (the display, and
-    // USB enumeration), and what this does and does not buy.
+    // /sbin/launchd is left byte for byte as Apple shipped it on BOTH
+    // generations now. On the LaunchDaemons generation nothing Apple shipped
+    // is modified at all — two new files are added. On the rc.boot generation
+    // exactly one Apple file is replaced, /etc/rc.boot, because that is the
+    // only hook that generation's launchd/launchctl ever reaches; its mode,
+    // owner and timestamps are preserved and nothing else is touched.
+    // installEntrypoint() probes the mounted volume to decide which, and its
+    // comment plus installEntrypointUnit()'s carry the whole design: what
+    // replacing PID 1 was costing us (the display, and USB enumeration), and
+    // what this does and does not buy (not AMFI, on either path).
     if (!installEntrypoint(mount.mountpoint, entrypointBinaryPath)) {
+        return false;
+    }
+
+    // entrypoint mounts the NAND at /mnt, which is ours and does not exist on
+    // a pristine ramdisk. Created here rather than at runtime because a
+    // runtime mkdir() would depend on the ramdisk root being writable at that
+    // moment; see createBlackb0xMountpoint() for the full argument and for
+    // why none of Apple's own /mnt1../mnt4 is borrowed any more.
+    if (!createBlackb0xMountpoint(mount.mountpoint)) {
         return false;
     }
 

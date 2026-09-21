@@ -1249,13 +1249,50 @@ static void report_log_tail(const char *path) {
 /* The set worth printing, in the order a reader needs them: did our install
  * record get written, did the first-boot daemon run at all, and did sshd say
  * anything on its way down. */
+/* Defined below with the other volume probes; declared here because the
+ * install report is placed next to the log report it belongs with rather
+ * than next to the function it happens to call. */
+static void report_path(const char *path);
+
 static void report_device_logs(void) {
     emit("Logs from the last booted session:\n");
     report_log_tail(BLACKB0X_STATE_DIR "/install.log");
+    /* The loader is the one that has to run FIRST and the only one whose
+     * absence explains everything downstream, so it goes near the top. If
+     * these two are absent, launchd never started our unit and nothing else
+     * in this list could have happened. */
+    report_log_tail(BLACKB0X_STATE_DIR "/loaddaemons.out.log");
+    report_log_tail(BLACKB0X_STATE_DIR "/loaddaemons.err.log");
     report_log_tail(BLACKB0X_STATE_DIR "/postinstall.out.log");
     report_log_tail(BLACKB0X_STATE_DIR "/postinstall.err.log");
-    report_log_tail(BLACKB0X_STATE_DIR "/sshd.out.log");
-    report_log_tail(BLACKB0X_STATE_DIR "/sshd.err.log");
+}
+
+/* DOES THE DEVICE ACTUALLY HAVE THE FILES WE THINK WE INSTALLED.
+ *
+ * Every theory about why sshd does not start has assumed the merge put these
+ * where we meant to. That assumption has never been checked ON the device --
+ * only in the overlay the bake produced, which is a different question. A
+ * plist that never arrived and a plist that arrived and was ignored look
+ * identical from the outside, and they need opposite fixes.
+ *
+ * Each line is one stat, and `ABSENT` is as informative as a mode. */
+static void report_device_install(void) {
+    emit("What the device actually has:\n");
+    /* Ours: the loader, in the only directory launchd's embedded bootstrap
+     * plist lists under Bootstrap>Paths, plus the script it runs. */
+    report_path(MNT "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.loaddaemons.plist");
+    report_path(MNT "/usr/share/blackb0x/loaddaemons.sh");
+    report_path(MNT "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist");
+    /* What the loader needs to be able to run at all. /bin/sh is not stock --
+     * it comes from the bash package -- so its absence would explain the
+     * loader silently doing nothing. */
+    report_path(MNT "/bin/sh");
+    report_path(MNT "/bin/launchctl");
+    /* What it is supposed to load. */
+    report_path(MNT "/Library/LaunchDaemons");
+    report_path(MNT "/Library/LaunchDaemons/com.openssh.sshd.plist");
+    report_path(MNT "/usr/sbin/sshd");
+    report_path(MNT "/etc/rc.d/daemonload");
 }
 
 /* WHICH VOLUME WILL ACCEPT A NEW FILE, AND WHICH WILL NOT.
@@ -1586,9 +1623,11 @@ int main(void) {
     probe_writability();
 
     /* And before anything this run does can overwrite them, print what the
-     * PREVIOUS booted session left behind. This is the only channel that
-     * exists for those logs — see report_device_logs(). */
+     * PREVIOUS booted session left behind, then what that session actually
+     * had installed to work with. This is the only channel that exists for
+     * either — see report_device_logs() and report_device_install(). */
     report_device_logs();
+    report_device_install();
 
     /* NO OVERLAY => SAY SO AND EXIT CLEANLY, WITHOUT REBOOTING.
      *

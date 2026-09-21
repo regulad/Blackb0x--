@@ -120,8 +120,12 @@ std::string resolveAptToolsDir();
 // Resolves the checked-in .deb cache root: $BLACKB0X_DEBCACHE_DIR if set,
 // otherwise "debcache" relative to the current working directory.
 // bakeRamdisk()'s stageDebcache() (BakeRamdisk.cpp) copies exactly the
-// resolved subset from here into /blackb0x/var/.blackb0x/debs/ at bake time
-// — not the whole (append-only, never-pruned) directory.
+// resolved subset from here into the overlay at bake time — not the whole
+// (append-only, never-pruned) directory. The destination is apt's own archive
+// directory, staged at varStage("cache/apt/archives") because the ramdisk
+// cannot write to the data partition; see kVarStageRel in BakeRamdisk.cpp.
+// (This comment used to name /blackb0x/var/.blackb0x/debs/, a path nothing
+// has staged to in a long time.)
 //
 // Read-only from this process's point of view. The directory is GENERATED on
 // Linux by scripts/build_deb_cache.py (real apt-get in podman; it refuses to

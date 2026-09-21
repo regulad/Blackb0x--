@@ -70,7 +70,7 @@ cydia
 # exactly once, and a fake "already installed" stub risks apt/dpkg never
 # giving it that real, one-time chance later. essential's .deb still gets
 # staged into the real on-device apt cache like anything else (see
-# package/local_only_debs.txt) — package/layout/var/.blackb0x/postinstall.sh just
+# package/local_only_debs.txt) — package/layout/usr/share/blackb0x/postinstall.sh just
 # `dpkg -i`s it directly, after cydia has genuinely been installed for
 # real, instead of asking apt to resolve it by name (which it can't do —
 # see local_only_debs.txt for why) or bake-time-preinstalling it (which

@@ -5,16 +5,64 @@
 # target design is AGENTS.md's "Install-time design".
 #
 # Run directly by xyz.regulad.blackb0x's LaunchDaemon plist as
-# `/bin/bash /var/.blackb0x/postinstall.sh` — bash, not sh. `set -ex`
+# `/bin/bash /usr/share/blackb0x/postinstall.sh` — bash, not sh. `set -ex`
 # below is the only logging this script does itself: the plist's own
 # StandardOutPath/StandardErrorPath redirect this whole script's stdout and
 # stderr (every traced command plus every command's own output) straight to
-# /var/.blackb0x/postinstall.out.log and postinstall.err.log
+# /usr/share/blackb0x/postinstall.out.log and postinstall.err.log
 # respectively — two separate files, not one shared between both, since
 # launchd has a real, long-documented bug where pointing both keys at the
 # same path can silently drop or interleave one stream. No need to
 # hand-echo progress messages to a log file line by line either way.
 set -ex
+
+# --- stage /var into place ---------------------------------------------------
+#
+# WHY THIS EXISTS AT ALL. The restore ramdisk that installs blackb0x cannot
+# create a regular file on the data partition. open() with O_CREAT returns
+# EPERM there even as root, while mkdir() on the same volume succeeds — the
+# signature of iOS content protection, where a new regular file needs a
+# per-file key wrapped by a class key from a keybag, and nothing on a restore
+# ramdisk ever loads one (/usr/libexec/keybagd is declared in launchd's
+# embedded bootstrap but is not even present on the image). Measured on real
+# hardware: 130 entries failed in the ramdisk's merge, every one of them bound
+# for /var, and every entry bound for the system partition succeeded.
+#
+# So everything destined for /var — dpkg's database, apt's lists and archives,
+# this project's own state — is staged onto the SYSTEM partition at
+# /usr/share/blackb0x/var, and moving it into place is the first thing that
+# happens on the first fully booted run, where the keybag is loaded and /var
+# behaves normally.
+#
+# THE STAGE IS THE "NOT YET MIGRATED" MARKER. Its existence means the move has
+# not happened; its absence means it has. That is deliberate and it is
+# strictly better than a flag file, because the marker and the thing it
+# describes are the same object — there is no state in which one is right and
+# the other is wrong. install-done still gates the apt install below, which is
+# a different question: "has the network install finished" rather than "has
+# /var been populated". A device can legitimately be past the first and not
+# the second if a boot was interrupted.
+#
+# ORDER MATTERS. This runs before the install-done check, not after, because
+# install-done LIVES in /var/.blackb0x — on a device where the stage has not
+# been moved yet, that path does not exist to be read.
+#
+# cp -a, not mv: the two live on different filesystems (/usr is the system
+# partition, /var is the data partition), so a rename is impossible and a
+# copy is what mv would do anyway, except that mv would leave us unable to
+# distinguish "copied" from "half-copied". The stage is removed only after
+# cp reports success, under `set -e`, so an interrupted copy leaves the stage
+# in place and the next boot does the whole thing again.
+#
+# PARTIALLY-APPLIED DEVICES ARE REAL. The development device is in exactly
+# that state: system partition written by an earlier ramdisk run, /var never
+# populated. `cp -a` of the stage's CONTENTS over an existing /var merges
+# rather than replaces, which is what that device needs and what a device with
+# a normally-populated /var also needs.
+if [ -d /usr/share/blackb0x/var ]; then
+	cp -a /usr/share/blackb0x/var/. /var/
+	rm -rf /usr/share/blackb0x/var
+fi
 
 # One-shot: /var/.blackb0x/install-done is written at the very end
 # of a successful run, with a timestamp. Its presence means the real,
@@ -160,6 +208,12 @@ apt-get autoremove -y --allow-unauthenticated
 # convention onto another's, which is exactly the mistake an earlier pass
 # here made for nitoTV. Nothing to do here at all.
 
-# /var/.blackb0x already exists — entrypoint.c creates it on first
-# install, and this script only ever runs after that.
+# /var/.blackb0x exists by now: the stage-into-place step at the top of this
+# script created it, along with everything else that was bound for /var. It is
+# no longer entrypoint.c that creates it — the ramdisk cannot create files on
+# that volume at all, which is the whole reason the stage exists. mkdir -p
+# anyway, because this one line is the difference between a device that knows
+# it finished and a device that reinstalls itself on every boot, and it costs
+# nothing to not depend on a directory another step was supposed to leave.
+mkdir -p /var/.blackb0x
 date -u "+%Y-%m-%dT%H:%M:%SZ" > /var/.blackb0x/install-done

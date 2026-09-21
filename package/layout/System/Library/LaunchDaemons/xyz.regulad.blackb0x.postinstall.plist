@@ -1,5 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EVERY PATH IN THIS FILE IS ON THE SYSTEM PARTITION, AND THAT IS THE POINT.
+
+  The script used to live at /var/.blackb0x/postinstall.sh and log beside
+  itself. It cannot any more: the restore ramdisk that installs this package
+  is unable to create a regular file anywhere on the data partition. open()
+  with O_CREAT returns EPERM there even as root, while mkdir() on the same
+  volume succeeds -- the signature of iOS content protection, where a new
+  regular file needs a per-file key wrapped by a class key from a keybag that
+  nothing on a restore ramdisk ever loads. Measured on hardware: 130 entries
+  failed in the merge, all of them bound for /var, and every entry bound for
+  the system partition succeeded.
+
+  So the script ships to /usr/share/blackb0x/postinstall.sh, and its first
+  act is to move /usr/share/blackb0x/var into place as /var. Until it has
+  done that, /var/.blackb0x does not exist -- which is exactly why the log
+  paths cannot point there either. launchd creates a StandardOutPath file but
+  NOT its parent directory, so a log under /var/.blackb0x would silently fail
+  to open on the one run whose output matters most.
+
+  The two log paths stay two separate files. Pointing StandardOutPath and
+  StandardErrorPath at one path hits a real, long-documented launchd bug
+  where one stream can be dropped or interleaved.
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -7,12 +31,12 @@
     <key>ProgramArguments</key>
       <array>
 		<string>/bin/bash</string>
-		<string>/var/.blackb0x/postinstall.sh</string>
+		<string>/usr/share/blackb0x/postinstall.sh</string>
       </array>
     <key>StandardErrorPath</key>
-      <string>/var/.blackb0x/postinstall.err.log</string>
+      <string>/usr/share/blackb0x/postinstall.err.log</string>
     <key>StandardOutPath</key>
-      <string>/var/.blackb0x/postinstall.out.log</string>
+      <string>/usr/share/blackb0x/postinstall.out.log</string>
     <key>RunAtLoad</key>
       <true/>
     <key>UserName</key>

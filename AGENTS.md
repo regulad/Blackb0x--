@@ -145,7 +145,7 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   file tree plus `DEBIAN/control` and `DEBIAN/postinst`), `packages.txt` (the apt
   package list templated into `postinstall.sh` at package-build time), and
   `local_only_debs.txt` (the packages bundled as a local apt repo at
-  `/var/.blackb0x/local-debs`, for anything no live repo serves). The package
+  `/usr/share/blackb0x/local-debs`, for anything no live repo serves). The package
   needs no state beyond this tree — `bakeRamdisk()` builds it and installs the
   resulting `.deb` rather than hand-staging its contents.
 - `debcache/` — the checked-in `.deb` cache (107 packages, ~58MB), at the repo
@@ -581,9 +581,14 @@ replicated onto the real device by `entrypoint.c`'s `merge_tree()` at boot.
    but do have a real recovered `.deb` (`essential`, currently the only one).
    `package/local_only_debs.txt` names them by filename. `package/build.sh` bundles
    exactly those into the package as a file-backed apt repo at
-   `/var/.blackb0x/local-debs`, with a real `dpkg-scanpackages` index, reachable
+   `/usr/share/blackb0x/local-debs`, with a real `dpkg-scanpackages` index, reachable
    on-device through `sources.list.d/local.list`
-   (`deb [trusted=yes] file:///var/.blackb0x/local-debs ./`). A `.deb` sitting in
+   (`deb [trusted=yes] file:///usr/share/blackb0x/local-debs ./`). It lives on the
+   system partition permanently rather than being staged and migrated like the rest
+   of the `/var` payload: it *has* to be off `/var` for the content-protection reason
+   documented under `postinstall.sh` below, and a read-only repository of `.deb` bytes
+   that ships with the package and is never written to is what `/usr/share` is for
+   anyway. A `.deb` sitting in
    apt's cache with no matching `Packages` entry is invisible to apt's resolver —
    verified with a real minimal repro — which is why these need an index even though
    the main debcache doesn't.
@@ -747,6 +752,25 @@ Runs once the device boots into its real OS
 (`xyz.regulad.blackb0x.postinstall.plist`, `RunAtLoad`, root). `StandardOutPath` and
 `StandardErrorPath` point at two *separate* log files — pointing both at one path is
 a real, long-documented launchd bug.
+
+**It lives at `/usr/share/blackb0x/postinstall.sh`, not under `/var`, and its first
+act is to move `/usr/share/blackb0x/var` into place as `/var`.** The restore ramdisk
+cannot create a regular file on the data partition at all: `open(O_CREAT)` returns
+`EPERM` there even as root while `mkdir()` on the same volume succeeds, which is iOS
+content protection with no keybag loaded — nothing on a restore ramdisk ever loads
+one, and `/usr/libexec/keybagd` is declared in launchd's embedded bootstrap but is not
+present on the image. Measured on an AppleTV3,2 at 12H1006: **130 merge entries failed,
+all of them bound for `/var`; everything bound for the system partition landed.** So
+everything destined for `/var` — dpkg's database, apt's lists and archives, the
+`file://` local repo, `/var/root/.profile` — is staged onto the system partition and
+moved by this script, which runs in the fully booted OS where the keybag is loaded.
+
+The staging directory's *existence* is the "not yet migrated" marker; there is no
+separate flag file, so the marker and the thing it describes cannot disagree. That is
+a different question from `install-done`, which still gates the apt install and means
+"the network install finished". A device can legitimately be past one and not the other.
+Note also that **partially-applied devices are real** — system partition written, `/var`
+never populated — so nothing here may assume `/var` is untouched.
 
 **The original plan called for hard-disabling the network for the whole install
 window. That is impossible in practice**: Kodi and a few other real packages are far

@@ -1,1 +1,1 @@
-deb file:///var/.blackb0x/local-debs ./
+deb file:///usr/share/blackb0x/local-debs ./

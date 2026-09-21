@@ -78,22 +78,29 @@ if grep -q '__BLACKB0X_VERSION__' "$STAGING/DEBIAN/control"; then
     exit 1
 fi
 
-# The bundled file-backed apt repository at /var/.blackb0x/local-debs.
+# The bundled file-backed apt repository at /usr/share/blackb0x/local-debs.
 #
 # Contents are exactly package/local_only_debs.txt -- every .deb that can only
 # ever come from a local repo, because no live repo carries a usable stanza for
 # it.
 #
-# That is what keeps the package buildable on its own: everything it needs is
-# checked in -- this list, packages.txt, layout/, and debcache.
+# THE SYSTEM PARTITION IS ITS PERMANENT HOME, not a staging area it gets moved
+# out of. Two reasons, and the second is the one that made it the right call
+# rather than merely the convenient one.
 #
-# The Packages index is generated below by the real dpkg-scanpackages -- apt
-# needs a real index, not just loose .deb bytes, to resolve these by name. The
-# index is unsigned, which is why postinstall.sh installs with
-# --allow-unauthenticated.
-: "${LOCAL_ONLY_LIST:=$(dirname "$0")/local_only_debs.txt}"
-: "${BLACKB0X_DEBCACHE_DIR:=$(dirname "$0")/../debcache}"
-LOCAL_DEBS_DEST="$STAGING/var/.blackb0x/local-debs"
+# It has to be off /var: the restore ramdisk that installs this package cannot
+# create a regular file on the data partition at all -- open(O_CREAT) returns
+# EPERM there even as root while mkdir() on the same volume succeeds, which is
+# iOS content protection with no keybag loaded. 130 merge entries failed on
+# hardware and every one of them was bound for /var.
+#
+# But it also BELONGS here. A read-only repository of .deb bytes that ships
+# with the package and is never written to is exactly what /usr/share is for,
+# and everything bound for /var has to be copied by the first-boot daemon and
+# then deleted from the stage -- work this repo would be paying for no reason.
+# So it is not staged and migrated like the rest; it simply lives here, and
+# sources.list.d/local.list points straight at it.
+LOCAL_DEBS_DEST="$STAGING/usr/share/blackb0x/local-debs"
 
 if [ -f "$LOCAL_ONLY_LIST" ]; then
     mkdir -p "$LOCAL_DEBS_DEST"
@@ -132,7 +139,7 @@ fi
 # cydia is filtered out: postinstall.sh installs it first, on its own, because
 # its postinst does its own thing and nothing else may assume Cydia is
 # configured yet. Leaving it in the array would install it twice.
-POSTINSTALL="$STAGING/var/.blackb0x/postinstall.sh"
+POSTINSTALL="$STAGING/usr/share/blackb0x/postinstall.sh"
 PLACEHOLDER=__BLACKB0X_PACKAGES__
 : "${PACKAGES_FILE:=$(dirname "$0")/packages.txt}"
 
@@ -167,7 +174,7 @@ fi
 # files 0644, then the handful of things that must execute.
 find "$STAGING" -type d -exec chmod 755 {} +
 find "$STAGING" -type f -exec chmod 644 {} +
-for f in DEBIAN/postinst DEBIAN/preinst DEBIAN/prerm DEBIAN/postrm var/.blackb0x/postinstall.sh; do
+for f in DEBIAN/postinst DEBIAN/preinst DEBIAN/prerm DEBIAN/postrm usr/share/blackb0x/postinstall.sh; do
     [ -f "$STAGING/$f" ] && chmod 755 "$STAGING/$f"
 done
 
@@ -179,7 +186,8 @@ done
 #     else         { $tf->chown("root", "wheel"); }      # force 0:0
 # So a NON-root dm.pl stamps every entry root:wheel by construction, which is
 # exactly what this package wants for all of it: /etc/apt sources and
-# keyrings, the LaunchDaemon plist, root's own .profile, and /var/.blackb0x.
+# keyrings, the LaunchDaemon plist, root's own .profile, and
+# /usr/share/blackb0x.
 # launchd in particular REFUSES to load a plist that is not root-owned or is
 # group/world-writable, and fails as "the daemon simply never ran" with
 # nothing pointing at permissions.

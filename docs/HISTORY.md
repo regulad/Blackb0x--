@@ -6277,3 +6277,306 @@ device while a jailbreak ramdisk is running.
 **Verdict: safe to co-exist.** One real collision, resolved by moving to
 `/mnt2`; one tail risk, mitigated by ordering rather than by locking; everything
 else on the ramdisk is provably incapable of touching a block device.
+
+## Getting a pixel onto the TV took three wrong answers, each of which looked right
+
+The channel itself was settled earlier (see "On-screen text from userland"
+above): `/dev/console` is wired up and does not reach the display, measured by
+a diagnostic ramdisk that printed a ten-second heartbeat through launchd's
+`StandardOutPath` and produced nothing on screen for as long as anyone cared to
+watch. Once `restored_external` points the display pipe at its own IOSurfaces,
+the boot framebuffer the kernel console draws into is off-screen. So
+`entrypoint/screen.h` looks `restored_external`'s global surfaces up by ID with
+`IOSurfaceLookup()` and stores text straight into their pixels — no compositor
+call, no cooperation from the owning process.
+
+That was the easy part. **Three successive versions of the drawing code were
+written, each of which was the obvious answer to the failure of the one before,
+and the first two produced no readable output on hardware.** They are worth
+recording in order, because each was defensible on paper and each was refuted by
+one run on a real AppleTV3,2 at 12H1006.
+
+### Iteration 1: choose the right surface — and choose the one that cannot be seen
+
+The first version picked exactly one target: the opaque background,
+`surface[2]`, layer 0. It was identified at runtime rather than by index, by
+reading pixel (0,0) — the background reads alpha `0xFF`, the two progress-layer
+buffers read `0x00000000`. The reasoning had two legs, and both were true: the
+layer above the background is transparent, so text drawn underneath should show
+through it; and the background is the one buffer `restored_external` does *not*
+rewrite on a progress update, so our stores should survive.
+
+**Hardware: the text was written correctly and was never visible.** It appeared
+only in the instant the boot graphics were torn down at the end of the run —
+which is itself the proof that the stores had been landing in the right memory
+all along. The background layer is composited *under* the logo/progress layer,
+and that layer is not transparent where we were drawing. "The layer above is
+transparent" was a statement about how the buffer is initialised (`bzero`'d,
+alpha 0), not about what is in it once the Apple logo has been blitted into it.
+
+The lesson is narrow but sharp: the most defensible-sounding choice of target
+was the single choice that could not be seen.
+
+### Iteration 2: stop choosing — and the TV goes fully black
+
+The fix for "picked the wrong one" is to stop picking. The second version
+collects *every* plausible BGRA surface and writes the same text to all of them,
+so whichever one is composited on top, scanned out, or swapped in next is
+carrying it. Locks are still taken one surface at a time, never two at once.
+Three surfaces is three times the blitting of one, which is nothing at a few
+dozen glyphs per line.
+
+**Hardware: the TV went fully black and stayed up.** No reboot, no panic — a
+black screen for the whole run. That was us, and the cause is embarrassing in
+hindsight: every console cleared its row band to **opaque black** before drawing
+glyphs, which is correct and invisible on an opaque background layer and
+catastrophic on a transparent overlay. Roughly forty rows of see-through surface
+became a solid black sheet covering nearly the entire frame. The text was
+drawing correctly the whole time; the rectangle painted behind it was what the
+owner was looking at.
+
+Both failures have the same shape. In iteration 1 the text was right and
+invisible; in iteration 2 the text was right and the *background* was the
+visible artifact. Neither run was a failure of the blitter, which had been
+verified on the host against a rendered image before any of this ran on a
+device.
+
+### Iteration 3: `FBTEXT_NOFILL` — a sentinel, not a colour
+
+`fbtext.h` gained `FBTEXT_NOFILL` (`0x00000001u`, a BGRA value — alpha 0, blue 1
+— that no caller could ever mean as a real colour, so it cannot collide). It is
+not a background colour; it is a background *sentinel*. A row clear with it does
+nothing at all, and a glyph writes only its lit pixels. Text therefore lands on
+top of whatever the display is already showing and every other pixel in the
+frame is left exactly as it was found. It is now the default background for
+every console this binary creates.
+
+**Hardware: works.** Text over the Apple logo.
+
+State the general lesson explicitly, because it generalises past this file:
+**there is no colour that is correct to paint on a surface owned by another
+process.** Any value we choose is a guess about content we do not own and cannot
+read back cheaply (the mapping is write-combined). Not writing is the only
+answer that is safe for all possible contents.
+
+The cost accepted is real and bounded: a reused row overdraws the one before it
+rather than replacing it. That is tolerable because the scrolling region is ~89
+rows and a diagnostic run prints well under that, and because the status row
+rewrites a *constant* string, so its repeats land on identical pixels. A blanked
+display is the worse failure by a very wide margin.
+
+### The glyph size, twice too big, and the divisor that silently cancelled itself out
+
+The same commit sequence got the glyph scale wrong twice, and the second wrong
+answer contains an arithmetic accident worth recording on its own.
+
+The scale started at `width/416` — scale 3 on 720p, about 50 columns — taken
+from ten-foot legibility guidance, whose rule of thumb is a minimum comfortable
+glyph height of roughly 1/30 of the frame. That guidance is written for UI
+glanced at from a sofa. This is a log, read by someone who has deliberately
+walked over to the television to look at it, and the two have nothing to do with
+each other. Scale 3 was measured as far too big on the real display. It went to
+`width/640` — scale 2, about 75 columns — and was **still** too big, and still
+short of columns. It is now `width/960` floored at 1, which on the 1280x720 this
+device drives is scale 1: the font at its native 8x8, 160 columns and 90 rows
+(89 scrolling plus the non-scrolling status row). There is no gentler step
+available, because the font is a bitmap and the scale is an integer — below 2
+the only value is 1.
+
+**The accident.** The old code also inset the text area by `width/32` on each
+side, as overscan protection. With *both* the inset and the scale divisor
+proportional to `width`, the column count cancels out entirely:
+
+    cols = (w - 2*(w/32)) / (8*(w/640)) = (w*30/32) / (w/80) = 75
+
+Exactly 75 columns at **every** resolution. Two independent width-proportional
+constants, each individually sensible, silently produced a resolution-*in*dependent
+result. That is not merely a curiosity: it meant the first real error this
+console ever displayed was truncated at column 75, and the truncation point
+therefore revealed **nothing whatsoever about the panel's actual resolution** —
+the one free measurement a truncated line would normally hand you. The overscan
+inset is now gone entirely (text starts at pixel (0,0); this display maps 1:1),
+and the console **wraps** by column rather than truncating, because on paths and
+errno strings the informative part is at the tail, not the front.
+
+Separately and compounding it, `SCREEN_LINE_MAX` was 112 while the error message
+in question is **121 characters**. The line was therefore being truncated
+*twice*, in two different places, for two different reasons — so fixing only the
+renderer would have moved the cut rather than removed it, and would have looked
+like a partial fix of one bug instead of the two bugs it actually was.
+`SCREEN_LINE_MAX` is now 256.
+
+## The data partition refuses new files, and `mkdir` is what proves it
+
+The first real error the working console displayed was the install record
+failing to open. The chronology matters, because each step eliminated the
+comfortable explanation for the step before it.
+
+- **`/var/mobile/Media/blackb0x_install.log`** — this project's install-record
+  path since the original Blackb0x — failed with `EPERM`. The obvious
+  explanation was immediately available and sounded complete: `/var/mobile/Media`
+  is a data-protected location.
+- **Moved to `/var/.blackb0x/install.log`**, which is not an arbitrary
+  relocation: it sits beside `install-done` and the `postinstall.out.log` /
+  `postinstall.err.log` the first-boot daemon writes, i.e. exactly where this
+  project already keeps its on-NAND state, and it is directly under `/var`, which
+  carries no protection class of its own. **Same `EPERM`, as root.** The
+  comfortable explanation is dead.
+- **The decisive observation:** `mkdir("/mnt/var/.blackb0x", 0755)` **succeeded**
+  on that same volume in that same run. The directory is on the device, at mode
+  0755. The file create beside it is refused.
+
+That pair is the entire diagnosis. **A directory needs no per-file content key;
+a regular file does** — creating one requires a fresh per-file key, wrapped by a
+class key that comes out of the keybag. `mkdir` succeeding where `open(O_CREAT)`
+returns `EPERM` is the *fingerprint* of iOS content protection with no keybag
+loaded; it is not, as it first looks, evidence against a protection problem. Note
+what it also rules out: a plain permissions problem would have failed the `mkdir`
+too, and a read-only mount would have failed it too *and* returned `EROFS`
+rather than `EPERM`.
+
+### Corroboration, read off the ramdisk image itself
+
+Three facts, all read out of the real decrypted 12H1006 restore ramdisk rather
+than inferred:
+
+- **`/usr/libexec/keybagd` is referenced but absent.** `/sbin/launchd`'s
+  *embedded* bootstrap plist carries a job keyed `keybag`, with `Program`
+  `/usr/libexec/keybagd` and `ProgramArguments` `keybagd --init`. The binary is
+  **not present on the ramdisk**. The job is declared and cannot run.
+- **`MobileKeyBag.framework` *is* present**, so the absence above is not simply
+  "no keybag machinery exists here".
+- **`restored_external` links `MobileKeyBag` and imports exactly three symbols:**
+  `_MKBKeyBagCreateSystem`, `_MKBDeviceObliterateClassDKey`, `_MKBSetLogFunction`.
+  Those are the restore-time *destructive* operations — create a brand-new system
+  keybag, obliterate the class D key — plus a logging hook. There is no
+  "load the existing bag" anywhere in that import set.
+
+That is a coherent picture rather than three coincidences: a restore ramdisk is
+designed to **erase** the data partition, not to write into it, so nothing that
+ships on one ever needs to load an existing keybag.
+
+One device-specific angle is worth stating because it changes what this costs to
+fix: this is an Apple TV with **no passcode**, so its class keys unlock from
+device-only material and need no user input. The bag does not need a *secret*;
+it needs **loading**. That makes this a setup step this project does not
+currently perform, not a wall it has run into.
+
+**Loading it anyway was considered and rejected.** `keybagd` is absent from the
+ramdisk but it *is* present on the device's own system partition, which is
+mounted at `/mnt` by the time any of this matters — so `/mnt/usr/libexec/keybagd
+--init` is, on its face, a one-line experiment against a many-file relocation.
+It was not attempted, and the reason is the one that sinks most "just run
+Apple's binary" ideas on a restore ramdisk: `keybagd` is a full-OS daemon and
+will expect the dyld shared cache and the frameworks that come with it, none of
+which this image carries. A ramdisk is not a small copy of the OS; it is a
+different environment that happens to share a kernel. The cost of finding that
+out is a boot cycle and the cost of being wrong about it is an unbounded chase
+after whatever it links against next, so the relocation — which depends on
+nothing but our own code — is the path taken instead.
+
+This is worth recording as a *rejected* option rather than an unexplored one.
+A future reader who rediscovers that `keybagd` sits on the mounted volume should
+know it was seen and passed over deliberately, not missed.
+
+### The scope of the consequence is much larger than one log file
+
+State this plainly, because the log file is the least important thing on the
+list. `/blackb0x` stages a large part of its payload onto the data partition:
+
+- `/var/lib/dpkg` — dpkg's database;
+- `/var/lib/apt` and `/var/cache/apt` — apt's lists and archives;
+- `/private/var/.blackb0x` — this project's own state, including `postinstall.sh`;
+- plus `/var/mobile` and `/var/root` entries.
+
+If every file create on that volume is refused, **that entire portion of the
+install has been failing silently on every run this project has ever done.**
+
+It went unnoticed for a specific, fixable reason: `merge_tree()` recorded a
+failure as `ok = 0` and moved on. A run in which an entire volume was refused
+was therefore indistinguishable, from the outside, from a run in which one file
+happened to be busy — and the only surviving signal was a single summary line
+pointing the reader at a console stream that, until the screen console existed,
+nothing on this hardware could read. Merge failures are now **counted**, with
+the first kept in full along with its `errno`, reported after the merge and
+written into the install record. A count plus one worked example is precisely
+what separates "a file was busy" from "the volume said no"; printing all of them
+would push the rest of the log off a 90-row screen.
+
+### Open question at the time of writing: is it the volume, or is it us?
+
+Not yet answered, and marked as such. Two things remain open:
+
+1. Whether the **system** partition (`disk0s1s1`) accepts new files at all.
+2. Whether the restriction is on the volume at all, rather than on the process.
+   `EPERM` is equally the canonical sandbox denial for an ad-hoc-signed binary
+   the kernel does not treat as a platform binary, regardless of the AMFI
+   boot-args. The counter-argument is already on the table and is not weak:
+   `mkdir` and `chown` are just as sandbox-able as `open(O_CREAT)`, and the
+   `mkdir` went through.
+
+`probe_writability()` was added to settle all of it in a single run: a create on
+the **ramdisk's own root** as the control for "the restriction is on us, not the
+volume"; a create on the **system partition**; `mkdir`-versus-create on the
+**data partition** to confirm the pair above; and a **directory listing** of the
+data partition to prove the mount is real, since a create failure on a mount
+that silently did nothing would be a consequence rather than a cause. Every
+probe cleans up after itself and none of them can fail the run.
+
+## DECISION RECORD (not implemented): the staged payload moves to `/usr/share/blackb0x`, not `/opt`
+
+**This describes a change that has not been made.** Nothing in the tree
+implements it at the time of writing; a future reader should not go looking for
+the code. It is recorded here so the reasoning does not have to be rebuilt when
+the probe results come back.
+
+**The plan, conditional on the data partition being confirmed off-limits at
+ramdisk time.** Everything in the repository that refers to `/var/.blackb0x`
+moves to `/usr/share/blackb0x`. Everything the merge would write to `/var` or
+`/private/var` (the former is a symlink to the latter) is instead written under
+`/usr/share/blackb0x/var`, to be moved into place by the first-boot postinstall
+daemon — which runs in the fully booted OS, where the keybag **is** loaded and
+`/var` is writable in the ordinary way. The ramdisk stops trying to write to a
+volume it cannot write to, and the one component that provably can do it does it.
+
+### Why not `/opt`
+
+`/opt` is the reflexive answer for "third-party payload that is not part of the
+base system", and it was considered and rejected. What was actually checked:
+
+- **`/opt` does not exist on the 12H1006 restore ramdisk.**
+- **`/opt` does not exist in the `/blackb0x` overlay**, whose root is exactly:
+  `Applications Library System bin boot dev etc extrainst_ lib mnt private sbin
+  tmp untether usr var`. That overlay is built from real Debian packages, so this
+  is direct evidence that none of the packages this project stages install
+  anything under `/opt`.
+- **Darwin's own `hier(7)` does not document `/opt` at all.**
+
+FHS does define `/opt` for add-on application software, and on Debian proper it
+would be perfectly defensible. But the pre-rootless iOS jailbreak ecosystem maps
+into `/usr`, `/Library` and `/Applications` instead, and the overlay's own layout
+is direct evidence of that choice rather than an appeal to convention. (The
+`/var/jb` convention people may reach for is rootless-era, iOS 15+, and entirely
+irrelevant to a 2014 tvOS.)
+
+One gap, recorded honestly: **only the restore ramdisk was inspected, not the
+AppleTV's own booted system partition.** "Stock tvOS 8.4.7 ships no `/opt`" is a
+strong inference from three independent observations, not a direct observation.
+
+**The deciding factor was not convention, though.** It was the *partition*:
+`/opt` would sit on `disk0s1s1` alongside `/usr` and `/Library`, and would
+therefore dodge content protection exactly as well as `/usr/share/blackb0x`
+does. On the thing that actually matters the two are equivalent.
+`/usr/share/blackb0x` wins on tidiness alone — it lives inside an existing
+hierarchy, it is unmistakably ours, and it does not invent a root-level
+directory that a half-completed migration would leave behind on a user's device
+forever.
+
+### The constraint any future sizing decision has to work against
+
+`disk0s1s1` has about **115 MB free** on the owner's device. That is not an
+estimate: it was measured by the entrypoint's own `report_volume()` on the run
+where the install died. The staged `/var` payload — dpkg's database, apt's lists
+and apt's archives — has to fit inside that, on the **system** partition,
+instead of on the data partition where it was always meant to live. Whatever
+shape the migration eventually takes, 115 MB is the number it has to fit in.

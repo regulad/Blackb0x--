@@ -473,7 +473,7 @@ decrypted 12H1006 ramdisk.
   ecosystem ships XML, this project's own on-device plist is XML, and it
   keeps `plutil` off the bake's runtime-dependency list.
 - **Not modelled on `xyz.regulad.blackb0x.postinstall.plist`.** That one runs
-  `/bin/bash /var/.blackb0x/postinstall.sh`, and **there is no shell on
+  `/bin/bash /usr/share/blackb0x/postinstall.sh`, and **there is no shell on
   either ramdisk** — `/bin` is exactly `cat expr launchctl ln mkdir mv rm`.
   `ProgramArguments` here must name a real binary.
 

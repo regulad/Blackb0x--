@@ -135,8 +135,8 @@ than here.
 Writes <output-dir>/local-repo/: a real, `dpkg-scanpackages`-generated
 Packages index plus copies of local_only_debs.txt's actual .deb files —
 BakeRamdisk.cpp stages this verbatim at
-/var/.blackb0x/local-debs/ on-device, matching misc/apt/
-local.list's `deb [trusted=yes] file:///var/.blackb0x/local-debs ./`
+/usr/share/blackb0x/local-debs/ on-device, matching
+local.list's `deb [trusted=yes] file:///usr/share/blackb0x/local-debs ./`
 source entry, so the real device's own apt-get can resolve and install
 these by name (e.g. "essential") exactly like anything else, with zero
 network involved.
@@ -516,7 +516,7 @@ def main():
     apt_lists_path = output_dir / "apt-lists"
 
     # local.list is deliberately excluded here: it points at
-    # /var/.blackb0x/local-debs, a path that only exists once
+    # /usr/share/blackb0x/local-debs, a path that only exists once
     # BakeRamdisk.cpp stages local-repo/ onto a real device — nothing on
     # this host/container can ever resolve it, and it isn't meant to be
     # part of this sandbox's own apt resolution anyway (see the module

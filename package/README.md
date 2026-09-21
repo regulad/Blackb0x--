@@ -78,7 +78,7 @@ dependency.
 
 Everything is `root:wheel` (0:0), which is correct for all of it — `/etc/apt`
 sources and keyrings, the LaunchDaemon plist, root's own `.profile`, and
-`/var/.blackb0x`. **launchd refuses to load a plist that is not root-owned or
+`/usr/share/blackb0x`. **launchd refuses to load a plist that is not root-owned or
 is group/world-writable**, and that failure presents as "the daemon simply
 never ran" with nothing pointing at permissions.
 
@@ -104,7 +104,7 @@ also what makes `dm.pl` get ownership right without help.
 - `packages.txt` — the flat set of package names blackb0x installs. This is
   the *request*; what apt can actually satisfy is the resolved closure.
 - `local_only_debs.txt` — which of those ship from the bundled local repo at
-  `/var/.blackb0x/local-debs` rather than a live one.
+  `/usr/share/blackb0x/local-debs` rather than a live one.
 
 Both live here rather than in `misc/` because they describe what this
 package installs. `misc/prebake_package_blacklist.txt` deliberately
@@ -113,7 +113,7 @@ not a statement about package content.
 
 ## The bundled local repository
 
-`/var/.blackb0x/local-debs` is a real file-backed apt repo shipped inside the
+`/usr/share/blackb0x/local-debs` is a real file-backed apt repo shipped inside the
 package. Its contents are exactly `local_only_debs.txt`: every `.deb` that can
 only ever come from a local repo, because no live repo carries a usable stanza
 for it.
@@ -145,7 +145,7 @@ with the one that actually matters.
 
 ## What's assembled at bake time
 
-`layout/` is static except for one file. `var/.blackb0x/postinstall.sh` ships
+`layout/` is static except for one file. `usr/share/blackb0x/postinstall.sh` ships
 as a template and `build.sh` substitutes `__BLACKB0X_PACKAGES__` with the
 resolved package list at package-build time, from the
 `<resolved-packages-file>` argument. The bundled local-repo `.deb`s are added
@@ -166,4 +166,8 @@ space), so `resolved_packages.txt` can be handed over as-is. It is required
 whenever the staged `postinstall.sh` still contains the placeholder.
 
 `<staging-dir>` must contain `DEBIAN/control`; the payload sits alongside it at
-final on-device paths (e.g. `var/.blackb0x/...`).
+final on-device paths (e.g. `usr/share/blackb0x/...`) — with one deliberate
+exception: everything bound for `/var` sits under `usr/share/blackb0x/var/` and
+is moved into place by `postinstall.sh` on first boot, because the restore
+ramdisk cannot create files on the data partition. See `AGENTS.md`'s
+`postinstall.sh` section.

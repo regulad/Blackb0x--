@@ -59,7 +59,23 @@
 //  a flat mirror of the real device's final layout with every file/dir/
 //  symlink already carrying its correct final owner/mode — entrypoint.c's
 //  own merge_tree() just blindly replicates whatever's under there onto
-//  the real device at boot, no branching left on-device at all. Which of
+//  the real device at boot, no branching left on-device at all.
+//
+//  WITH ONE EXCEPTION, AND IT IS NOT A SMALL ONE: nothing bound for the
+//  device's own /var is mirrored at a /var path. A restore ramdisk cannot
+//  create a regular file on the data partition at all — open(O_CREAT)
+//  returns EPERM as root while mkdir() on the same volume succeeds, which
+//  is iOS content protection with no keybag loaded, and it cost exactly
+//  130 failed entries on real hardware (AppleTV3,2, 12H1006) while every
+//  system-partition entry succeeded. So every var-bound entry is staged
+//  under `usr/share/blackb0x/var` instead, on the system partition, with
+//  the `private/var`/`var` prefix stripped, and the first-boot postinstall
+//  daemon moves it into /var once the real OS is up. kVarStageRel and
+//  varStage() are where that lives; read kVarStageRel's comment before
+//  adding ANY new staged path under /var, and note that a device may sit
+//  in a partially-applied state (system written, /var not) as a result.
+//
+//  Which of
 //  the three known per-firmware persistence payloads goes into /blackb0x
 //  is decided here too, from this firmware's own ProductVersion — see
 //  stageVersionBranch(). Fully static either way (no per-device secrets
@@ -665,7 +681,11 @@ static bool spliceFileContentInPlace(const std::string& targetPath, const std::s
 //
 // NOT MODELLED ON package/layout/xyz.regulad.blackb0x.postinstall.plist, the
 // project's other LaunchDaemon, and the difference matters: that one runs
-// `/bin/bash /var/.blackb0x/postinstall.sh` on a real, fully booted OS.
+// `/bin/bash /usr/share/blackb0x/postinstall.sh` on a real, fully booted OS.
+// (That script lives on the SYSTEM partition — not under /var, where it used
+// to be — for the content-protection reason kVarStageRel documents below: a
+// restore ramdisk cannot create the file at all on the data partition, so a
+// postinstall script staged there would never exist to be run.)
 // **There is no shell on either ramdisk** — /bin is exactly cat, expr,
 // launchctl, ln, mkdir, mv, rm — so ProgramArguments here must name a real
 // binary and nothing else.
@@ -1013,6 +1033,72 @@ static bool installEntrypoint(const std::string& mountpoint, const std::string& 
 static constexpr uid_t kUidMobile = 501;
 static constexpr gid_t kGidStaff = 20;
 
+// WHERE EVERYTHING BOUND FOR THE DEVICE'S /var IS STAGED — on the SYSTEM
+// partition, at a path that does NOT merge onto /var. This is a hardware
+// finding, not a preference, and it is the single most surprising thing about
+// the layout of this overlay, so it is written out in full.
+//
+// WHAT WAS MEASURED (AppleTV3,2, 12H1006, real device, real restore ramdisk
+// running our own entrypoint). The device has two volumes that matter here:
+// /dev/disk0s1s1, the system partition, which entrypoint mounts at /mnt, and
+// /dev/disk0s1s2, the data partition, which IS the system volume's own
+// /private/var — so both /mnt/private/var and /mnt/var (a symlink into it)
+// land on the data partition, and everything else lands on the system one.
+// On the data partition, as root:
+//
+//     open(path, O_CREAT|O_WRONLY, mode)   ->  EPERM, every time
+//     mkdir(path, mode)                    ->  SUCCEEDS, same directory,
+//                                              same process, same moment
+//
+// A full merge run to completion failed on exactly 130 entries, and they were
+// exactly the entries bound for /var. Every single entry bound for the system
+// partition succeeded. The system partition was not implicated at all.
+//
+// WHY. That asymmetry is the signature of iOS content protection, not of a
+// permission problem or a read-only mount (either of those would refuse the
+// mkdir too). Creating a new REGULAR FILE on a protected volume requires a
+// fresh per-file key, wrapped by a class key that only the keybag can supply,
+// and nothing in a restore ramdisk ever loads a keybag: /usr/libexec/keybagd
+// is declared in launchd's embedded bootstrap but is not present on the image
+// at all. A DIRECTORY has no per-file key to wrap, so mkdir() needs nothing
+// from the keybag and goes through. Being root does not help, because the
+// refusal comes from the data-protection layer underneath the permission
+// check — which is exactly why this looked for a while like a permissions bug
+// and was not one.
+//
+// SO: anything bound for the device's /var is staged HERE instead, relative
+// to the overlay root, with the `private/var` (or `var`) prefix STRIPPED:
+//
+//     private/var/lib/dpkg             ->  usr/share/blackb0x/var/lib/dpkg
+//     private/var/cache/apt/archives   ->  usr/share/blackb0x/var/cache/apt/archives
+//     private/var/root/Media           ->  usr/share/blackb0x/var/root/Media
+//
+// That lands on the SYSTEM partition, where creating files demonstrably
+// works, and entrypoint's merge_tree() copies it there like anything else.
+// The first-boot postinstall daemon — /usr/share/blackb0x/postinstall.sh, run
+// once by xyz.regulad.blackb0x.postinstall.plist — is what moves the stage
+// into the real /var and deletes it afterwards. It runs in the fully booted
+// OS, where the keybag IS loaded and /var is an ordinary writable volume, so
+// it needs none of this machinery; only the ramdisk does.
+//
+// A DEVICE MAY ALREADY BE IN A PARTIALLY-APPLIED STATE, and the owner's is,
+// right now: system partition written, /var not — because that is precisely
+// the shape those 130 failures left behind. So nothing here or on-device may
+// assume /var is untouched, that the stage is pristine, or that a stage entry
+// has never been copied across before. The copy has to be idempotent and an
+// already-present destination is normal, not evidence of a second install.
+static constexpr const char* kVarStageRel = "usr/share/blackb0x/var";
+
+// Joins `relToVar` — a path relative to the device's own /var, no leading
+// slash — onto the staging root above. Exists so kVarStageRel appears exactly
+// once in this file and every var-bound call site still reads as the /var
+// path it is really about: varStage("lib/dpkg") is "the device's
+// /var/lib/dpkg", wherever that happens to be staged this week.
+static std::string varStage(const std::string& relToVar) {
+    if (relToVar.empty()) return kVarStageRel;
+    return std::string(kVarStageRel) + "/" + relToVar;
+}
+
 // Creates every path component between `root` and `fullPath`'s parent that
 // doesn't already exist, as root:wheel 0755 — the same convention every
 // other top-level pristine-ramdisk directory already uses (confirmed
@@ -1134,6 +1220,13 @@ static bool stageDirectoryTree(const fs::path& blackb0xRoot, const std::string& 
 // old kCydiaDirs[] (see docs/HISTORY.md for FUN_00001b14's original order),
 // just without the /mnt1 prefix (relative to /blackb0x now) and staged here
 // instead of mkdir'd on-device. All mobile:staff 0755.
+//
+// The /var half of that original list is NOT here — it is kCydiaVarDirs
+// below, staged through varStage() onto the system partition, for the
+// content-protection reason kVarStageRel documents in full. The split is
+// deliberate: a `private/var/...` string in this list would be a directory
+// merged onto a volume that cannot take our files, which is the exact bug
+// that cost 130 failed entries on real hardware.
 static const std::vector<std::string> kCydiaDirs = {
     "Library/LaunchDaemons",
     "private/etc/alternatives",
@@ -1151,29 +1244,6 @@ static const std::vector<std::string> kCydiaDirs = {
     "private/etc/ssl",
     "private/etc/ssl/certs",
     "private/etc/ssl/private",
-    "private/var/backups",
-    "private/var/cache",
-    "private/var/cache/apt",
-    "private/var/cache/apt/archives",
-    "private/var/cache/apt/archives/partial",
-    "private/var/cache/findutils",
-    "private/var/lib",
-    "private/var/lib/apt",
-    "private/var/lib/apt/lists",
-    "private/var/lib/apt/lists/partial",
-    "private/var/lib/apt/periodic",
-    "private/var/lib/cydia",
-    "private/var/lib/dpkg",
-    "private/var/lib/dpkg/alternatives",
-    "private/var/lib/dpkg/info",
-    "private/var/lib/dpkg/parts",
-    "private/var/lib/dpkg/updates",
-    "private/var/lib/misc",
-    "private/var/local",
-    "private/var/lock",
-    "private/var/log/apt",
-    "private/var/root/Media",
-    "private/var/run",
     "usr/etc",
     "usr/games",
     "usr/include",
@@ -1227,20 +1297,57 @@ static const std::vector<std::string> kCydiaDirs = {
     "usr/share/terminfo/x",
 };
 
+// The /var half of kCydiaDirs above, written RELATIVE TO THE DEVICE'S /var
+// (no `private/var` prefix, no leading slash) because that is the only form
+// varStage() takes — these are the same directories the original
+// kCydiaDirs[] had, in the same order, with the same mobile:staff 0755
+// metadata, staged at usr/share/blackb0x/var/... instead of a path that
+// merges onto the data partition. Nothing was added or dropped in the move;
+// see kVarStageRel for why the move had to happen.
+static const std::vector<std::string> kCydiaVarDirs = {
+    "backups",
+    "cache",
+    "cache/apt",
+    "cache/apt/archives",
+    "cache/apt/archives/partial",
+    "cache/findutils",
+    "lib",
+    "lib/apt",
+    "lib/apt/lists",
+    "lib/apt/lists/partial",
+    "lib/apt/periodic",
+    "lib/cydia",
+    "lib/dpkg",
+    "lib/dpkg/alternatives",
+    "lib/dpkg/info",
+    "lib/dpkg/parts",
+    "lib/dpkg/updates",
+    "lib/misc",
+    "local",
+    "lock",
+    "log/apt",
+    "root/Media",
+    "run",
+};
+
 // Stages a verbatim copy of build_deb_cache.py's own sandboxed `apt-get
 // update` cache (its real apt-lists/ output — see that script's own module
-// docstring) at the real device's own /var/lib/apt/lists/ path. This is
-// what lets apt on-device know about every package the configured
-// regulad/saurik/awkwardtv/xbmc repos currently offer — including anything
-// too big to also stage the .deb bytes for locally (kNeverStageDebs below)
-// — without needing network at install time at all; network only becomes
-// necessary for whatever wasn't also staged in private/var/cache/apt/archives/.
+// docstring) for the real device's own /var/lib/apt/lists/ path. It is NOT
+// staged AT that path: like everything else bound for /var it goes to the
+// var stage on the system partition (varStage(), kVarStageRel), and the
+// first-boot postinstall daemon is what puts it in /var/lib/apt/lists.
+// Either way it is what lets apt on-device know about every package the
+// configured regulad/saurik/awkwardtv/xbmc repos currently offer — including
+// anything too big to also stage the .deb bytes for locally (kNeverStageDebs
+// below) — without needing network at install time at all; network only
+// becomes necessary for whatever wasn't also staged alongside it in
+// varStage("cache/apt/archives").
 static bool stageAptListsCache(const fs::path& blackb0xRoot, const std::string& aptListsDir) {
     if (!fs::exists(aptListsDir)) {
         fprintf(stderr, "bakeRamdisk: build_deb_cache.py did not produce apt-lists/\n");
         return false;
     }
-    return stageDirectoryTree(blackb0xRoot, "private/var/lib/apt/lists", aptListsDir, 0, 0, 0644);
+    return stageDirectoryTree(blackb0xRoot, varStage("lib/apt/lists"), aptListsDir, 0, 0, 0644);
 }
 
 // Which .deb archives never get copied into the ramdisk's apt cache. The list
@@ -1697,6 +1804,9 @@ static std::set<std::string> computePreinstallEligibleFilenames(const std::vecto
 // Destination directories that already exist are left with their own
 // metadata untouched (same "don't clobber" rule as ensureParentDirs()) —
 // only freshly-created ones get this tree's metadata applied.
+static bool mergeRealFilesystemEntry(const fs::path& blackb0xRoot, const std::string& destRel,
+                                      const fs::path& hostSrcPath);
+
 static bool mergeRealFilesystemTree(const fs::path& blackb0xRoot, const std::string& destRelDir,
                                      const fs::path& hostSrcDir) {
     bool ok = true;
@@ -1704,35 +1814,43 @@ static bool mergeRealFilesystemTree(const fs::path& blackb0xRoot, const std::str
     for (const auto& entry : fs::directory_iterator(hostSrcDir, dirEc)) {
         std::string name = entry.path().filename().string();
         std::string destRel = destRelDir.empty() ? name : destRelDir + "/" + name;
-        struct stat st;
-        if (lstat(entry.path().c_str(), &st) != 0) {
-            ok = false;
-            continue;
-        }
-        if (S_ISLNK(st.st_mode)) {
-            char buf[4096];
-            ssize_t n = readlink(entry.path().c_str(), buf, sizeof(buf) - 1);
-            if (n < 0) {
-                ok = false;
-                continue;
-            }
-            buf[n] = '\0';
-            ok &= stageSymlink(blackb0xRoot, destRel, std::string(buf));
-        } else if (S_ISDIR(st.st_mode)) {
-            fs::path destPath = blackb0xRoot / destRel;
-            ensureParentDirs(blackb0xRoot, destPath);
-            std::error_code cdEc;
-            if (fs::create_directory(destPath, cdEc)) {
-                chmod(destPath.c_str(), st.st_mode & 07777);
-                chown(destPath.c_str(), st.st_uid, st.st_gid);
-            }
-            ok &= mergeRealFilesystemTree(blackb0xRoot, destRel, entry.path());
-        } else if (S_ISREG(st.st_mode)) {
-            ok &= stageFile(blackb0xRoot, destRel, entry.path().string(), st.st_uid, st.st_gid,
-                             st.st_mode & 07777);
-        }
+        ok &= mergeRealFilesystemEntry(blackb0xRoot, destRel, entry.path());
     }
     return ok;
+}
+
+// One entry of the merge above, split out so a caller that has to REDIRECT a
+// single top-level name can still get the identical treatment for everything
+// else — the var-stage remap in mergePreinstalledPackages() and
+// stageBlackb0xPackage() is the whole reason this is a separate function, and
+// splitting it is what keeps those two from hand-rolling a partial copy of
+// this dispatch (which would quietly drop top-level symlinks and files).
+// Recurses back into mergeRealFilesystemTree() for a directory.
+static bool mergeRealFilesystemEntry(const fs::path& blackb0xRoot, const std::string& destRel,
+                                      const fs::path& hostSrcPath) {
+    struct stat st;
+    if (lstat(hostSrcPath.c_str(), &st) != 0) return false;
+    if (S_ISLNK(st.st_mode)) {
+        char buf[4096];
+        ssize_t n = readlink(hostSrcPath.c_str(), buf, sizeof(buf) - 1);
+        if (n < 0) return false;
+        buf[n] = '\0';
+        return stageSymlink(blackb0xRoot, destRel, std::string(buf));
+    }
+    if (S_ISDIR(st.st_mode)) {
+        fs::path destPath = blackb0xRoot / destRel;
+        ensureParentDirs(blackb0xRoot, destPath);
+        std::error_code cdEc;
+        if (fs::create_directory(destPath, cdEc)) {
+            chmod(destPath.c_str(), st.st_mode & 07777);
+            chown(destPath.c_str(), st.st_uid, st.st_gid);
+        }
+        return mergeRealFilesystemTree(blackb0xRoot, destRel, hostSrcPath);
+    }
+    if (S_ISREG(st.st_mode)) {
+        return stageFile(blackb0xRoot, destRel, hostSrcPath.string(), st.st_uid, st.st_gid, st.st_mode & 07777);
+    }
+    return true;
 }
 
 // The container script that does the actual work: the standard real-
@@ -2134,15 +2252,29 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
 // across every firmware a single bake-firmware run bakes (see
 // computeGlobalDebcacheOnce()) while this part still runs once per
 // firmware, into that firmware's own /blackb0x.
+//
+// The preinstall payload root is DEVICE-SHAPED — it is the union of real .deb
+// data.tar payloads, so a package that ships files under /var has them at a
+// bare top-level `var/` here (never `private/var/`; checked against every
+// .deb in debcache/, and several do ship one — seatbeltunlock, p0sixspwn,
+// a few of the tihmstar tools). Merging that at the overlay root would put
+// them on /mnt/var, which is a symlink onto the data partition and therefore
+// exactly the volume that refuses new files; so `var` alone is redirected
+// into the var stage here, and every other top-level name keeps its
+// device-shaped path. See kVarStageRel.
 static bool mergePreinstalledPackages(const fs::path& blackb0xRoot, const std::string& preinstallDir,
                                        const std::string& dpkgStateDir) {
     bool ok = true;
-    ok &= mergeRealFilesystemTree(blackb0xRoot, "", preinstallDir);
+    std::error_code dirEc;
+    for (const auto& entry : fs::directory_iterator(preinstallDir, dirEc)) {
+        std::string name = entry.path().filename().string();
+        ok &= mergeRealFilesystemEntry(blackb0xRoot, name == "var" ? varStage("") : name, entry.path());
+    }
     if (fs::exists(dpkgStateDir + "/status")) {
-        ok &= stageFile(blackb0xRoot, "private/var/lib/dpkg/status", dpkgStateDir + "/status", 0, 0, 0644);
+        ok &= stageFile(blackb0xRoot, varStage("lib/dpkg/status"), dpkgStateDir + "/status", 0, 0, 0644);
     }
     if (fs::exists(dpkgStateDir + "/info")) {
-        ok &= mergeRealFilesystemTree(blackb0xRoot, "private/var/lib/dpkg/info", dpkgStateDir + "/info");
+        ok &= mergeRealFilesystemTree(blackb0xRoot, varStage("lib/dpkg/info"), dpkgStateDir + "/info");
     }
     return ok;
 }
@@ -2313,8 +2445,9 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
 
 // Stages this firmware's share of the (per-firmware-version cached)
 // debcache result into `blackb0xRoot`: the non-preinstalled .deb set (minus
-// kNeverStageDebs) into the real apt cache directory
-// (private/var/cache/apt/archives/) — apt finds these itself via its
+// kNeverStageDebs) staged for the real apt cache directory
+// (/var/cache/apt/archives/ on-device, varStage("cache/apt/archives") in the
+// overlay — see kVarStageRel) — apt finds these itself via its
 // normal cache-before-download check, no local file:// source or
 // synthetic Packages index needed at all anymore (see
 // scripts/build_deb_cache.py's own module docstring for why that whole
@@ -2346,7 +2479,7 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
                     filename.c_str());
             continue;
         }
-        allOk &= stageFile(blackb0xRoot, "private/var/cache/apt/archives/" + filename, debsRoot + "/" + filename, 0,
+        allOk &= stageFile(blackb0xRoot, varStage("cache/apt/archives/" + filename), debsRoot + "/" + filename, 0,
                             0, 0644);
     }
 
@@ -2359,7 +2492,8 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
     // picklist is involved: every local-only filename is in the picklist
     // unconditionally, so filtering against it would be a no-op).
     //
-    // The debcache staged above (private/var/cache/apt/archives + apt-lists)
+    // The debcache staged above (varStage("cache/apt/archives") + apt-lists,
+    // both bound for the device's own /var/cache and /var/lib)
     // is a different thing entirely: the native apt cache, filled by the
     // baker with whatever could not usefully be pre-baked. Both happen to be
     // .debs, which is the only reason they were ever conflated.
@@ -2371,7 +2505,8 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
 // Hand-writes a real dpkg `status` stanza for a package whose persistence
 // files stageEtasonatv()/stageP0sixspwn() below extract directly from its
 // real .deb instead of running a genuine `dpkg --unpack`/`--configure` —
-// merged (appended) into the exact same private/var/lib/dpkg/status
+// merged (appended) into the exact same varStage("lib/dpkg/status") — the
+// device's own /var/lib/dpkg/status —
 // stageDebcache()'s mergePreinstalledPackages() already staged earlier in
 // stageBlackb0xTree() (see that function's own call ordering), not a
 // separate/competing status file. Both callers' packages are firmware-
@@ -2414,7 +2549,7 @@ static bool stageDebcache(const fs::path& blackb0xRoot, const std::string& firmw
 // even though it isn't one of the files this function itself stages).
 static bool stageManualDpkgInstall(const fs::path& blackb0xRoot, const std::string& stanza,
                                     const std::string& pkgName, const std::vector<std::string>& ownedPaths) {
-    fs::path statusPath = blackb0xRoot / "private/var/lib/dpkg/status";
+    fs::path statusPath = blackb0xRoot / varStage("lib/dpkg/status");
     std::ofstream status(statusPath, std::ios::app);
     if (!status) {
         fprintf(stderr, "bakeRamdisk: cannot append dpkg status for %s at %s\n", pkgName.c_str(),
@@ -2424,7 +2559,7 @@ static bool stageManualDpkgInstall(const fs::path& blackb0xRoot, const std::stri
     status << stanza << "\n";
     status.close();
 
-    fs::path listPath = blackb0xRoot / ("private/var/lib/dpkg/info/" + pkgName + ".list");
+    fs::path listPath = blackb0xRoot / varStage("lib/dpkg/info/" + pkgName + ".list");
     ensureParentDirs(blackb0xRoot, listPath);
     std::ofstream list(listPath, std::ios::trunc);
     if (!list) {
@@ -2436,7 +2571,7 @@ static bool stageManualDpkgInstall(const fs::path& blackb0xRoot, const std::stri
     chmod(listPath.c_str(), 0644);
     chown(listPath.c_str(), 0, 0);
 
-    fs::path md5Path = blackb0xRoot / ("private/var/lib/dpkg/info/" + pkgName + ".md5sums");
+    fs::path md5Path = blackb0xRoot / varStage("lib/dpkg/info/" + pkgName + ".md5sums");
     std::ofstream md5(md5Path, std::ios::trunc);
     if (!md5) {
         fprintf(stderr, "bakeRamdisk: cannot write %s\n", md5Path.c_str());
@@ -2739,9 +2874,12 @@ static bool stageP0sixspwn(const fs::path& blackb0xRoot) {
     const std::string& stanza = extracted.stanza;
     bool ok = true;
     ok &= stageFile(blackb0xRoot, "usr/libexec/dirhelper", tempDir + "/usr/libexec/dirhelper", 0, 0, 0755);
-    stageDir(blackb0xRoot, "private/var/untether", 0, 0, 0755);
-    ok &= stageFile(blackb0xRoot, "private/var/untether/_.dylib", tempDir + "/var/untether/_.dylib", 0, 0, 0644);
-    ok &= stageFile(blackb0xRoot, "private/var/untether/untether", tempDir + "/var/untether/untether", 0, 0, 0755);
+    // /var/untether/... on the device, so it stages through varStage() like
+    // everything else bound for the data partition (kVarStageRel). The source
+    // paths below are the .deb's own extracted `var/`, which is unrelated.
+    stageDir(blackb0xRoot, varStage("untether"), 0, 0, 0755);
+    ok &= stageFile(blackb0xRoot, varStage("untether/_.dylib"), tempDir + "/var/untether/_.dylib", 0, 0, 0644);
+    ok &= stageFile(blackb0xRoot, varStage("untether/untether"), tempDir + "/var/untether/untether", 0, 0, 0755);
     ok &= stageFile(blackb0xRoot, "System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
                      resolvePackagePath("System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist"), 0, 0, 0644);
     if (!stanza.empty()) {
@@ -2799,10 +2937,17 @@ static bool stageVersionBranch(const fs::path& blackb0xRoot, const std::string& 
 // what the LaunchDaemon plist needs -- launchd refuses to load a plist that
 // is not root-owned -- and mergeRealFilesystemTree() preserves that.
 //
-// Top-level etc/ and var/ are remapped to private/etc/ and private/var/. The
-// .deb ships them unprefixed, which is right for dpkg on-device (iOS's /etc
-// and /var are symlinks into /private), but /blackb0x is a flat mirror that
-// entrypoint.c replicates literally, so the real paths are used here.
+// Top-level etc/ is remapped to private/etc/: the .deb ships it unprefixed,
+// which is right for dpkg on-device (iOS's /etc is a symlink into /private),
+// but /blackb0x is a flat mirror that entrypoint.c replicates literally, so
+// the real path is used here.
+//
+// Top-level var/ USED TO be remapped the same way, to private/var/, and that
+// is exactly the path that cannot be written on a restore ramdisk — /private/
+// var IS the data partition. It goes to the var stage instead
+// (varStage()/kVarStageRel), and the first-boot postinstall daemon moves it
+// into the real /var. The dpkg .list this function writes still records the
+// real on-device paths, which are the unprefixed ones either way.
 static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string& productVersion) {
     std::string stagingDir = makeTempDir("blackb0x-package-stage-");
     std::string outDir = makeTempDir("blackb0x-package-out-");
@@ -2857,8 +3002,9 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
             continue;
         }
         std::string destRel = name;
-        if (name == "etc" || name == "var") destRel = "private/" + name;
-        ok &= mergeRealFilesystemTree(blackb0xRoot, destRel, entry.path());
+        if (name == "etc") destRel = "private/etc";
+        if (name == "var") destRel = varStage("");
+        ok &= mergeRealFilesystemEntry(blackb0xRoot, destRel, entry.path());
     }
 
     // Record the real on-device paths, which are the .deb's own (unprefixed)
@@ -2869,7 +3015,7 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
                           "/etc/apt/trusted.gpg.d/regulad.gpg", "/etc/apt/trusted.gpg.d/saurik.gpg",
                           "/etc/apt/trusted.gpg.d/awkwardtv.gpg", "/etc/apt/trusted.gpg.d/bigboss.gpg",
                           "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
-                          "/var/.blackb0x/postinstall.sh", "/var/root/.profile"}) {
+                          "/usr/share/blackb0x/postinstall.sh", "/var/root/.profile"}) {
         ownedPaths.push_back(p);
     }
     ok &= stageManualDpkgInstall(blackb0xRoot, extracted.stanza, "xyz.regulad.blackb0x", ownedPaths);
@@ -2902,6 +3048,20 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
     stageDir(blackb0xRoot, "private/etc/ssh", kUidMobile, kGidStaff, 0700);
     for (const auto& dir : kCydiaDirs) {
         stageDir(blackb0xRoot, dir, kUidMobile, kGidStaff, 0755);
+    }
+
+    // The var stage itself and its parent, root:wheel 0755 — the same
+    // convention every other directory this bake creates from scratch uses
+    // (ensureParentDirs()). Created explicitly rather than left to be implied
+    // by the first thing staged under it, so the stage exists, and exists with
+    // known metadata, even on a run where every var-bound payload is missing.
+    // The directories INSIDE it keep the mobile:staff 0755 they had when they
+    // were spelled private/var/... — the postinstall daemon copies them into
+    // /var with their metadata, so that ownership still has to be right here.
+    stageDir(blackb0xRoot, "usr/share/blackb0x", 0, 0, 0755);
+    stageDir(blackb0xRoot, varStage(""), 0, 0, 0755);
+    for (const auto& dir : kCydiaVarDirs) {
+        stageDir(blackb0xRoot, varStage(dir), kUidMobile, kGidStaff, 0755);
     }
 
     // net.tihmstar's keyring is staged loose, alone among the repo keys: it

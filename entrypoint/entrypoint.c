@@ -273,28 +273,37 @@ static void emit_err(const char *fmt, ...)
  * mount, which is exactly why the LaunchDaemon plist cannot point
  * StandardOutPath here. See "Where output goes" below.
  *
- * MOVED OUT OF /var/mobile/Media, on evidence. That was this project's path
- * since the original, and on the first run where the screen console could
- * actually show an error it said:
+ * IT IS ON THE SYSTEM PARTITION, AND IT TOOK TWO FAILURES TO GET THERE.
+ *
+ * It was /var/mobile/Media/blackb0x_install.log, this project's path since
+ * the original. The first run where the screen console could show an error
+ * said:
  *
  *     entrypoint: cannot open /mnt/var/mobile/Media/blackb0x_install.log (o
  *
- * /var/mobile/Media is a data-protected location, and on a device whose
- * keybag has never been unlocked — which is every boot of a restore ramdisk
- * — opening a file there fails even as root. That is a property of the class
- * key, not of permissions, so there is nothing to chmod past.
+ * The obvious reading was that /var/mobile/Media is a data-protected
+ * location, so it moved to /var/.blackb0x — beside install-done and the
+ * postinstall logs, directly under /var, which carries no protection class.
+ * SAME EPERM, as root. What settled it was that the mkdir of that directory
+ * SUCCEEDED on the same volume in the same run: a directory needs no
+ * per-file content key, a regular file does, and nothing on a restore
+ * ramdisk loads a keybag to supply one. The whole data partition refuses new
+ * regular files; the volume never cared which directory we picked.
  *
- * /var/.blackb0x is where this project already keeps its on-NAND state
- * (install-done, and postinstall.out.log / postinstall.err.log written by
- * the first-boot LaunchDaemon). It sits directly under /var, which carries
- * no protection class, so it is writable exactly where the old path was not
- * — and putting the record beside the rest of our state is what the
- * convention already was everywhere except here. Note the leading dot: the
- * directory is `.blackb0x`, matching install-done and the postinstall logs.
+ * So the record lives on the SYSTEM partition, which accepts writes — 130
+ * merge entries failed on that hardware run and every one of them was bound
+ * for /var, while everything bound for the system partition landed. It sits
+ * in /usr/share/blackb0x, the directory this project now owns there, beside
+ * postinstall.sh and the staged /var payload.
+ *
+ * NOT under /usr/share/blackb0x/var: that subtree is the staging area the
+ * first-boot daemon moves into /var and then deletes. This record is about
+ * what the RAMDISK did, so it belongs somewhere permanent, not somewhere
+ * designed to be consumed and removed.
  *
  * The directory is created if absent, because panic() can call this before
- * the overlay that would otherwise have supplied it is merged. */
-#define BLACKB0X_STATE_DIR MNT "/var/.blackb0x"
+ * the merge that would otherwise have supplied it. */
+#define BLACKB0X_STATE_DIR MNT "/usr/share/blackb0x"
 #define INSTALL_LOG        BLACKB0X_STATE_DIR "/install.log"
 
 /* uid/gid used throughout for installed files — 501:20, "mobile:staff",
@@ -786,15 +795,19 @@ static void fixup_etasonuntether_rtbuddyd(void) {
  * dpkg's own binary, if apt ever replaces it) with this ramdisk's stale,
  * bake-time copies — silent, hard-to-diagnose corruption of a live package
  * database, not a merely-redundant no-op. /var/.blackb0x itself
- * isn't the right signal for that, though — this merge is what CREATES
- * that directory in the first place (postinstall.sh lands inside it), so
- * it already exists after the very first ramdisk run, before
- * postinstall.sh has done any real apt work at all against a repeat boot
- * of this same ramdisk. /var/.blackb0x/install-done is the real
+ * isn't the right signal for that: it is not even ours to create any more —
+ * this ramdisk cannot create anything on the data partition, so that
+ * directory now appears only when the first-boot daemon moves the staged
+ * payload into place. /var/.blackb0x/install-done is the real
  * signal: postinstall.sh itself only writes it, with a timestamp, at the
- * end of a genuinely successful apt-driven install (see Misc/postinstall.sh)
- * — its presence means real dpkg state now exists to protect, and the safe
- * response is to refuse outright, not press on. */
+ * end of a genuinely successful apt-driven install — its presence means real
+ * dpkg state now exists to protect, and the safe response is to refuse
+ * outright, not press on.
+ *
+ * READING it still works, which is the only reason this check survived the
+ * move. The data partition refuses new regular files; it serves existing
+ * ones normally, so an access(F_OK) against a file the booted OS wrote is
+ * exactly as reliable as it ever was. */
 static int do_install(void) {
     if (access(MNT "/Applications/AppleTV.app/AppleTV", F_OK) != 0) {
         emit_err("Not an AppleTV — refusing to touch this volume\n");
@@ -1443,9 +1456,12 @@ int main(void) {
     }
     emit("User Filesystem mounted\n");
     report_volume("data", MNT "/private/var");
-    report_path(BLACKB0X_STATE_DIR);
     report_path(MNT "/var/.blackb0x/install-done");
     report_path(MNT "/var/mobile");
+    /* The system-partition side: where the record goes and where the staged
+     * /var payload will land. Both are on the volume that accepts writes. */
+    report_path(BLACKB0X_STATE_DIR);
+    report_path(BLACKB0X_STATE_DIR "/var");
 
     emit("Mounting devices...\n");
     if (mount("devfs", MNT "/dev", 0, NULL) != 0) {

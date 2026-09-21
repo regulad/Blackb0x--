@@ -40,6 +40,95 @@ jobs:
                        ldid afsctool dpkg \
                        berkeley-db@5 openssl@3 xxhash lz4 xz gettext
 
+      # ----------------------------------------------------------------------
+      # Vendored-dependency cache
+      # ----------------------------------------------------------------------
+      # MEASURED, not assumed. On run 35560011769 (all green, cold cache) the
+      # `build` job's two compile steps cost 229 s, and essentially all of it
+      # is third_party/:
+      #   * "Build jailbreak" 111 s -- the last ExternalProject
+      #     (libfragmentzip_ext) completes at T+108 s and `blackb0x` links 3 s
+      #     later. Every first-party object in the jailbreak half is built
+      #     inside that 3 s tail.
+      #   * "Build authoring" 118 s -- every first-party target, plus the
+      #     fork/exec'd patchers and xpwn, is finished 10 s in; the remaining
+      #     108 s is `apt_ext` alone, which is the entire critical path.
+      # The three bake legs pay it again: their "Build the authoring tools"
+      # step measured 180 s, 211 s and 254 s on the same run.
+      #
+      # So: cache the DEPENDENCY ARTIFACTS, and let our own sources recompile
+      # every time. That is deliberately narrower than caching `build/`. A
+      # restored CMakeCache.txt is the classic way this goes wrong -- it
+      # records absolute paths and a compiler identity from whichever runner
+      # populated it, and when they do not match the failure is confusing
+      # rather than loud. `cmake -S . -B build` writes a fresh one below.
+      #
+      # WHERE THE ARTIFACTS ACTUALLY LAND, checked rather than assumed:
+      #   * build/deps -- DEPS_PREFIX (CMakeLists.txt sets it to
+      #     ${CMAKE_BINARY_DIR}/deps). Every dependency installs its headers,
+      #     static libs and .pc files here; this is what consumers link.
+      #   * build/<name>_ext-prefix/src/<name>-stamp/ -- ExternalProject's step
+      #     stamps. These are what make a restored cache a cache: with
+      #     <name>-done present, the configure/build/install steps are skipped
+      #     outright. Nine of the ExternalProjects are BUILD_IN_SOURCE 1, so
+      #     their object files live in third_party/<lib>/ (a fresh checkout,
+      #     not cached) -- which is fine precisely because the stamps stop
+      #     anything from wanting them again, and build/deps already holds the
+      #     installed result.
+      #   * build/apt-tools -- apt_ext's install step copies the binaries the
+      #     bake execs out of its prefix to here, so the stamp alone would be a
+      #     lie without it. (build/triehash-bin is NOT cached: CMake recreates
+      #     it at configure time as a symlink into third_party/.)
+      # Local measurement of that set: ~137 MB uncompressed, most of it
+      # apt_ext-prefix and curl_ext-prefix.
+      #
+      # THE KEY. Two inputs decide a vendored dependency's output: which commit
+      # each submodule is pinned at, and the ExternalProject_Add blocks that
+      # configure them -- all of which live in the root CMakeLists.txt.
+      # `git submodule status --recursive` is the direct expression of the
+      # first: one line per submodule, printing its SHA, changing if and only
+      # if a pin moves. The compiler version and runner OS/arch go in as well,
+      # because a hosted-image Xcode bump changes the ABI of everything cached
+      # and neither of the first two inputs would notice.
+      #
+      # NO restore-keys, deliberately. A partial match would serve dependency
+      # binaries built from a DIFFERENT submodule commit, and the failure would
+      # be a subtle link-time or runtime mismatch rather than an obvious error.
+      # Exact hit or full rebuild is the honest policy for vendored native code.
+      #
+      # One residual risk, stated rather than hidden: the cached `apt` links
+      # Homebrew's berkeley-db@5/openssl@3, and a Homebrew bump does not change
+      # this key. It fails LOUDLY at the existing `apt-get --version` assertion
+      # at the end of this job rather than silently, and the fix is to bump the
+      # `v1` below. Putting `brew list --versions` in the key instead would
+      # cost a full rebuild every time any of a dozen formulas moved.
+      - name: Compute the vendored-dependency cache key
+        id: deps-key
+        run: |
+          set -eu
+          {
+            git submodule status --recursive
+            shasum -a 256 CMakeLists.txt
+            cc --version
+          } > "$RUNNER_TEMP/deps-key-inputs.txt"
+          digest=$(shasum -a 256 "$RUNNER_TEMP/deps-key-inputs.txt" | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "cache key inputs:"
+          cat "$RUNNER_TEMP/deps-key-inputs.txt"
+
+      # The `bake` job restores this same key (restore-only -- it never builds
+      # the jailbreak half, so its tree is a subset and saving from there would
+      # be strictly worse). `needs: build` guarantees this job's post-step save
+      # has already run.
+      - name: Cache the vendored dependency builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/deps
+            build/apt-tools
+            build/*_ext-prefix
+          key: deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.deps-key.outputs.digest }}
+
       - name: Configure
         run: cmake -S . -B build
 
@@ -564,6 +653,35 @@ jobs:
           git -C "$HOME/theos" submodule update --init --depth 1 vendor/dm.pl
           test -x "$HOME/theos/bin/dm.pl"
 
+      # Same key, same reasoning, same measured motivation as the identical
+      # block in the `build` job above -- this leg's "Build the authoring
+      # tools" step measured 180-254 s on a cold cache, effectively all of it
+      # third_party/. RESTORE ONLY: `build` has already saved an entry built
+      # from a superset of these targets (it builds both groups), `needs:
+      # build` means that save has completed, and a save from here would only
+      # race the three legs against each other over a smaller tree. A miss is
+      # not an error; it just rebuilds.
+      - name: Compute the vendored-dependency cache key
+        id: deps-key
+        run: |
+          set -eu
+          {
+            git submodule status --recursive
+            shasum -a 256 CMakeLists.txt
+            cc --version
+          } > "$RUNNER_TEMP/deps-key-inputs.txt"
+          digest=$(shasum -a 256 "$RUNNER_TEMP/deps-key-inputs.txt" | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the vendored dependency builds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/deps
+            build/apt-tools
+            build/*_ext-prefix
+          key: deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.deps-key.outputs.digest }}
+
       - name: Build the authoring tools
         run: |
           cmake -S . -B build
@@ -800,12 +918,27 @@ jobs:
       # goes looking in a ~/Downloads that does not exist on a runner, and
       # hard-fails (it will not substitute the system compiler). Which is the
       # correct behaviour, and the reason these two names have to be here.
+      #
+      # --diagnostic-ramdisks IS PASSED ON EVERY RUN, EVEN THOUGH THE TWO EXTRA
+      # IMAGES ARE PURE DIAGNOSTICS AND COST THIS LEG TWO MORE RAMDISK BAKES.
+      # That is not thoroughness; it is the only way the owner can obtain them
+      # at all. Baking a ramdisk needs root, Theos, apt, afsctool and the
+      # pinned Xcode, and takes ~30 minutes -- exactly the set of requirements
+      # this job exists to keep off end users' machines (see this file's header
+      # and AGENTS.md). A "run it locally when you need it" policy would mean
+      # the images are unavailable precisely when a device is sitting in DFU
+      # waiting to be bisected. So they ride along in the firmware-<device>
+      # artifact, and blackb0x's --diag-ramdisk-repack / --diag-ramdisk-binary
+      # find them already there. What each isolates, and the hardware
+      # observation that made the bisect necessary, are in
+      # src/BakeRamdisk.hpp's RamdiskVariant.
       - name: Bake
         run: |
           sudo env "PATH=$PATH" "THEOS=$HOME/theos" \
                    "XCODE_TOOLCHAIN=$XCODE_TOOLCHAIN" "DEVICE=$DEVICE" \
             ./build/bake-firmware --device '${{ matrix.device }}' \
-                                  --build '${{ steps.target.outputs.build }}'
+                                  --build '${{ steps.target.outputs.build }}' \
+                                  --diagnostic-ramdisks
 
       - name: Check the bake produced a complete, uploadable suite
         run: |
@@ -828,6 +961,22 @@ jobs:
           size=$(stat -f%z "dist/RestoreRamDisk${suffix}.dmg")
           echo "ramdisk is $size bytes ($((size / 1048576)) MiB)"
           test "$size" -le $((64 * 1024 * 1024))
+
+          # The two diagnostic images (--diagnostic-ramdisks, passed above).
+          # Asserted for the same reason as everything else here: a flag that
+          # silently produced nothing would be discovered by a human with a
+          # device in DFU, which is the most expensive place to find out. They
+          # are held to the same 64 MiB ceiling -- both are SMALLER than the
+          # real ramdisk by construction (one adds nothing, one adds a few
+          # hundred KB), so a diagnostic image at or over the ceiling means
+          # the bake did something nobody predicted and the bisect it feeds
+          # would be meaningless.
+          for c in RestoreRamDiskDiagRepack RestoreRamDiskDiagBinary; do
+            test -s "dist/${c}${suffix}.dmg"
+            dsize=$(stat -f%z "dist/${c}${suffix}.dmg")
+            echo "$c is $dsize bytes ($((dsize / 1048576)) MiB)"
+            test "$dsize" -le $((64 * 1024 * 1024))
+          done
 
       # The artifact name is a contract with ensureBakedFirmware() (Cli.cpp),
       # which runs `gh run download -n "firmware-<deviceModel>"` -- device only,

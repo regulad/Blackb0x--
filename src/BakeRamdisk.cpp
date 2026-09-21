@@ -73,6 +73,11 @@
 
 #include "BakeRamdisk.hpp"
 #include "ResourcePath.hpp"
+// For img3ValidateFile() only -- the post-republish guard applied to the
+// re-encrypted ramdisk at the end of bakeRamdisk(). It lives in Patcher.cpp,
+// the crypto-free half of the Patcher split, precisely so any authoring TU can
+// reach it without putting xpwn on a link line; see its comment in Patcher.hpp.
+#include "Patcher.hpp"
 
 // No <plist/plist.h> here any more: the only plist_* use in this file was
 // readVolumeLabel(), parsing `diskutil info -plist` output to name a freshly
@@ -3207,10 +3212,38 @@ static bool verifyEntrypointRuntimeClosure(const std::string& mountpoint,
 // Linux-side write tooling (xpwn's grow_hfs(), libhfsp, the kernel driver)
 // and does not apply to Apple's own hdiutil -- which is a large part of why
 // this project is macOS-only.
+//
+// THE TWO DIAGNOSTIC VARIANTS RUN THROUGH THIS EXACT FUNCTION, and that is
+// the entire point of them -- see RamdiskVariant in BakeRamdisk.hpp for the
+// hardware evidence that motivated the bisect. They are not a parallel
+// implementation and must never become one: the same decrypt, the same
+// UDIF/raw detection, the same `hdiutil resize` up, the same
+// `hdiutil attach -owners on` with -imagekey diskimage-class=CRawDiskImage,
+// the same detach, the same `resize -size min`, the same re-encrypt through
+// decrypt() with the original as IMG3 template, the same img3ValidateFile()
+// guard and the same 64 MiB ceiling. Only three blocks below are skipped, and
+// each says so by name. If a future change to this function forgets to apply
+// to the diagnostics, the diagnostics stop answering the question they exist
+// to answer -- so prefer a `if (variant == ...)` around the few lines that
+// differ over any arrangement that forks the flow.
 bool bakeRamdisk(const std::string& path, const std::string& key, const std::string& iv,
                   const std::string& productVersion, const std::string& outputPath,
-                  const std::string& entrypointBinaryPath, bool& outSizeWarning) {
+                  const std::string& entrypointBinaryPath, bool& outSizeWarning,
+                  RamdiskVariant variant) {
     outSizeWarning = false;
+
+    // The two things a variant actually changes, named once here so every
+    // site below reads as a statement about what is on the image rather than
+    // as an enum comparison.
+    //
+    //   Full        stageOverlay=1  installOurBinary=1
+    //   DiagBinary  stageOverlay=0  installOurBinary=1
+    //   DiagRepack  stageOverlay=0  installOurBinary=0
+    const bool stageOverlay = (variant == RamdiskVariant::Full);
+    const bool installOurBinary = (variant != RamdiskVariant::DiagRepack);
+    const char* variantName = variant == RamdiskVariant::Full         ? "full"
+                              : variant == RamdiskVariant::DiagRepack ? "diagnostic: repack only"
+                                                                      : "diagnostic: entrypoint, no overlay";
 
     // Resolved here, at the very top, even though it is not used until the
     // finished image is measured at the end of this function. A bake takes
@@ -3256,7 +3289,10 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     std::string decDMG = decryptedDMGFor(path);
     const std::string& patchedDMG = outputPath;
 
-    fprintf(stderr, "Patching ramdisk...\n");
+    // Named on every run, not just the diagnostic ones: a bake log that says
+    // "Patching ramdisk..." three times in a row with no way to tell which
+    // image is which is exactly how a diagnostic gets misread later.
+    fprintf(stderr, "Patching ramdisk (%s) -> %s\n", variantName, patchedDMG.c_str());
 
     decrypt(const_cast<char*>(path.c_str()), const_cast<char*>(decDMG.c_str()), const_cast<char*>(key.c_str()),
             const_cast<char*>(iv.c_str()), (char*)"FALSE", nullptr);
@@ -3465,61 +3501,75 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // recognized". Verified directly.
     // ---------------------------------------------------------------------
 
-    // Staged before the resize, because its real size is what decides how far
-    // to grow. Unlike the old flow this is the ONLY thing measured -- the
-    // original content is already on the volume and already accounted for by
-    // the image's existing size, so there is nothing to re-measure.
-    std::string blackb0xStagingDir = makeTempDir("blackb0x-payload-");
-    if (blackb0xStagingDir.empty()) {
-        fprintf(stderr, "bakeRamdisk: cannot create /blackb0x staging dir\n");
-        return false;
-    }
-    if (!stageBlackb0xTree(blackb0xStagingDir, productVersion)) {
-        fprintf(stderr, "bakeRamdisk: failed to stage /blackb0x\n");
-        return false;
+    // ------------------------------------------------------------------
+    // STAGE /blackb0x -- THE ONLY THING THE DIAGNOSTIC VARIANTS SKIP HERE.
+    // ------------------------------------------------------------------
+    // DiagRepack and DiagBinary both leave payloadSize at 0 and never create
+    // a staging directory, so nothing is compressed, nothing is measured and
+    // nothing is copied onto the volume later. Everything else in this
+    // function still runs, unchanged, on all three variants -- see
+    // RamdiskVariant in BakeRamdisk.hpp for why that identity is the whole
+    // value of the diagnostics.
+    std::string blackb0xStagingDir;
+    uint64_t payloadSize = 0;
+    if (stageOverlay) {
+        // Staged before the resize, because its real size is what decides how far
+        // to grow. Unlike the old flow this is the ONLY thing measured -- the
+        // original content is already on the volume and already accounted for by
+        // the image's existing size, so there is nothing to re-measure.
+        blackb0xStagingDir = makeTempDir("blackb0x-payload-");
+        if (blackb0xStagingDir.empty()) {
+            fprintf(stderr, "bakeRamdisk: cannot create /blackb0x staging dir\n");
+            return false;
+        }
+        if (!stageBlackb0xTree(blackb0xStagingDir, productVersion)) {
+            fprintf(stderr, "bakeRamdisk: failed to stage /blackb0x\n");
+            return false;
+        }
+
+        // Compress BEFORE measuring, so the volume is grown to fit the compressed
+        // tree rather than the uncompressed one. Order matters more than it looks:
+        // compressing after the copy (the obvious arrangement, and the first one
+        // tried) reclaims almost nothing, because HFS+ can only shrink down to its
+        // highest allocated block. Measured on a real bake-shaped tree: usage fell
+        // from 62 MiB to 31 MiB, and `hdiutil resize -size min` still could not go
+        // below 73 MiB, since in-place compression frees blocks scattered through
+        // the volume without relocating anything. Growing the right amount once is
+        // the only arrangement that actually pays.
+        //
+        // -T ZLIB is NOT optional, and must never be relaxed to whatever the host
+        // prefers. decmpfs codecs are per-kernel, and the oldest firmware this
+        // project targets cannot read the modern default:
+        //
+        //   * The 10B329a (6.1.3) kernelcache ships AppleFSCompressionTypeZlib.kext
+        //     declaring `providesType3` and `providesType4`, and carries NO LZVN or
+        //     LZFSE compressor at all. Confirmed by reading the prelinked kext
+        //     Info.plists out of the decrypted kernelcache, not inferred.
+        //   * Its RestoreRamdisk uses only types 3 and 4. The 8.4.x ramdisks also
+        //     carry type 8 (LZVN), so support genuinely varies across the range.
+        //   * `ditto --hfsCompression` on a current macOS produces type 8. Using it
+        //     here would bake something that boots on 8.4.x and fails on 6.1.x --
+        //     silently, and only on hardware.
+        //
+        // afsctool already defaults to ZLIB; passing -T makes that a stated
+        // requirement rather than a default this project happens to rely on. It
+        // skips files that do not compress (the staged .deb bytes, already gzip/
+        // lzma) rather than inflating them.
+        if (!commandExistsOnPath("afsctool")) {
+            fprintf(stderr,
+                    "bakeRamdisk: afsctool not found on PATH -- required to HFS+-compress the staged\n"
+                    "  payload (brew install afsctool). Without it the finished ramdisk is far larger\n"
+                    "  and will not fit under the 64 MiB limit.\n");
+            return false;
+        }
+        if (!runCommand({"afsctool", "-c", "-T", "ZLIB", blackb0xStagingDir})) {
+            fprintf(stderr, "bakeRamdisk: afsctool failed to compress the staged /blackb0x\n");
+            return false;
+        }
+
+        payloadSize = directoryContentSize(blackb0xStagingDir);
     }
 
-    // Compress BEFORE measuring, so the volume is grown to fit the compressed
-    // tree rather than the uncompressed one. Order matters more than it looks:
-    // compressing after the copy (the obvious arrangement, and the first one
-    // tried) reclaims almost nothing, because HFS+ can only shrink down to its
-    // highest allocated block. Measured on a real bake-shaped tree: usage fell
-    // from 62 MiB to 31 MiB, and `hdiutil resize -size min` still could not go
-    // below 73 MiB, since in-place compression frees blocks scattered through
-    // the volume without relocating anything. Growing the right amount once is
-    // the only arrangement that actually pays.
-    //
-    // -T ZLIB is NOT optional, and must never be relaxed to whatever the host
-    // prefers. decmpfs codecs are per-kernel, and the oldest firmware this
-    // project targets cannot read the modern default:
-    //
-    //   * The 10B329a (6.1.3) kernelcache ships AppleFSCompressionTypeZlib.kext
-    //     declaring `providesType3` and `providesType4`, and carries NO LZVN or
-    //     LZFSE compressor at all. Confirmed by reading the prelinked kext
-    //     Info.plists out of the decrypted kernelcache, not inferred.
-    //   * Its RestoreRamdisk uses only types 3 and 4. The 8.4.x ramdisks also
-    //     carry type 8 (LZVN), so support genuinely varies across the range.
-    //   * `ditto --hfsCompression` on a current macOS produces type 8. Using it
-    //     here would bake something that boots on 8.4.x and fails on 6.1.x --
-    //     silently, and only on hardware.
-    //
-    // afsctool already defaults to ZLIB; passing -T makes that a stated
-    // requirement rather than a default this project happens to rely on. It
-    // skips files that do not compress (the staged .deb bytes, already gzip/
-    // lzma) rather than inflating them.
-    if (!commandExistsOnPath("afsctool")) {
-        fprintf(stderr,
-                "bakeRamdisk: afsctool not found on PATH -- required to HFS+-compress the staged\n"
-                "  payload (brew install afsctool). Without it the finished ramdisk is far larger\n"
-                "  and will not fit under the 64 MiB limit.\n");
-        return false;
-    }
-    if (!runCommand({"afsctool", "-c", "-T", "ZLIB", blackb0xStagingDir})) {
-        fprintf(stderr, "bakeRamdisk: afsctool failed to compress the staged /blackb0x\n");
-        return false;
-    }
-
-    uint64_t payloadSize = directoryContentSize(blackb0xStagingDir);
     uint64_t currentImageSize = 0;
     {
         std::error_code szEc;
@@ -3545,8 +3595,14 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // under a kilobyte on the legacy path, which is the right direction to be
     // wrong in, and it keeps the sizing independent of a decision that is not
     // made until the volume is mounted several dozen lines below.
+    //
+    // Zero for RamdiskVariant::DiagRepack, which installs nothing at all: that
+    // image is the pristine volume opened and re-sealed, so the only growth it
+    // asks for is the margin below (and `resize -size min` gives that back
+    // before the re-encrypt). DiagBinary counts it exactly as the real bake
+    // does -- it installs exactly the same two files.
     uint64_t entrypointUnitSize = 0;
-    {
+    if (installOurBinary) {
         std::error_code epEc;
         entrypointUnitSize = (uint64_t)fs::file_size(entrypointBinaryPath, epEc);
         if (epEc) {
@@ -3600,7 +3656,14 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // comment plus installEntrypointUnit()'s carry the whole design: what
     // replacing PID 1 was costing us (the display, and USB enumeration), and
     // what this does and does not buy (not AMFI, on either path).
-    if (!installEntrypoint(mount.mountpoint, entrypointBinaryPath)) {
+    //
+    // SKIPPED ENTIRELY FOR RamdiskVariant::DiagRepack, and that is what makes
+    // that image mean something: it leaves the mounted volume byte-identical
+    // to what Apple shipped, so a DiagRepack that will not boot indicts the
+    // decrypt/resize/attach/detach/re-seal machinery and nothing else. Both
+    // the entrypoint install and the /mnt mountpoint below are part of "what
+    // we add", so they move together.
+    if (installOurBinary && !installEntrypoint(mount.mountpoint, entrypointBinaryPath)) {
         return false;
     }
 
@@ -3609,7 +3672,11 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // runtime mkdir() would depend on the ramdisk root being writable at that
     // moment; see createBlackb0xMountpoint() for the full argument and for
     // why none of Apple's own /mnt1../mnt4 is borrowed any more.
-    if (!createBlackb0xMountpoint(mount.mountpoint)) {
+    //
+    // DiagBinary creates it, deliberately: that variant isolates the OVERLAY's
+    // size, so everything else the install mechanism puts on the volume has to
+    // be present or it is measuring the wrong difference.
+    if (installOurBinary && !createBlackb0xMountpoint(mount.mountpoint)) {
         return false;
     }
 
@@ -3625,10 +3692,20 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // parameters: BakeFirmware.cpp builds it as
     // dist/RestoreRamDisk-<device>_<buildID>.dmg, so the stem already carries
     // exactly the device and build this bake is for.
-    {
+    //
+    // Not run for DiagRepack: there is no binary on that image to verify. It
+    // IS run for DiagBinary, which installs the same binary the real bake
+    // does, so that variant still gets the full closure proof.
+    if (installOurBinary) {
         std::string label = fs::path(outputPath).stem().string();
-        const std::string prefix = "RestoreRamDisk-";
+        // Every variant's filename starts with "RestoreRamDisk"; the diagnostic
+        // ones just carry a suffix on the component name (DiagRepack /
+        // DiagBinary -- see Patcher.hpp's `diagramdisk` namespace). Trimming
+        // the common prefix alone leaves the variant visible in the label,
+        // which is what a three-image bake log needs.
+        const std::string prefix = "RestoreRamDisk";
         if (label.rfind(prefix, 0) == 0) label = label.substr(prefix.size());
+        if (!label.empty() && label.front() == '-') label = label.substr(1);
         if (label.empty()) label = outputPath;
         if (!verifyEntrypointRuntimeClosure(mount.mountpoint, entrypointBinaryPath, label)) {
             return false;
@@ -3648,12 +3725,20 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // Only the new tree moves. Apple's own content is never read or rewritten,
     // which is what preserves ITS compression, hard links and ownership for
     // free.
-    if (!runCommand({"ditto", blackb0xStagingDir + "/blackb0x", mount.mountpoint + "/blackb0x"})) {
-        fprintf(stderr, "bakeRamdisk: failed to copy staged /blackb0x onto the ramdisk\n");
-        return false;
+    //
+    // Nothing to copy on either diagnostic variant -- neither staged a tree.
+    // DiagBinary's whole point is that /blackb0x is absent, so this must stay
+    // skipped rather than copying an empty directory: an empty /blackb0x would
+    // make entrypoint's merge_tree() a no-op on a real boot and quietly turn
+    // the size probe into a second, weaker install probe.
+    if (stageOverlay) {
+        if (!runCommand({"ditto", blackb0xStagingDir + "/blackb0x", mount.mountpoint + "/blackb0x"})) {
+            fprintf(stderr, "bakeRamdisk: failed to copy staged /blackb0x onto the ramdisk\n");
+            return false;
+        }
+        std::error_code stagingRmEc;
+        fs::remove_all(blackb0xStagingDir, stagingRmEc);
     }
-    std::error_code stagingRmEc;
-    fs::remove_all(blackb0xStagingDir, stagingRmEc);
 
     if (!runCommand({"hdiutil", "detach", mount.mountpoint})) {
         fprintf(stderr, "bakeRamdisk: failed to detach the ramdisk\n");
@@ -3727,6 +3812,22 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
 
     decrypt(const_cast<char*>(decDMG.c_str()), const_cast<char*>(patchedDMG.c_str()), const_cast<char*>(key.c_str()),
             const_cast<char*>(iv.c_str()), (char*)"FALSE", const_cast<char*>(path.c_str()));
+
+    // POST-REPUBLISH GUARD -- iBoot's own img3 well-formedness gate, re-run on
+    // what we just wrote. Same stance PatcherPatch.cpp's patchiBSS()/
+    // patchiBEC()/patchKernel() take on their own outputs: decrypt() already
+    // runs this check internally and DELETES a malformed image (see
+    // Img3Crypt.cpp's own POST-REPUBLISH GUARD), but asserting again here is
+    // what lets this bake name the stage and stop, rather than surfacing a
+    // deleted file three statements later as a confusing "cannot stat finished
+    // ramdisk". The diagnostic variants go through this identically -- an
+    // image iBoot would reject as malformed is worthless as a bisect point,
+    // and publishing one would make the bisect actively misleading.
+    if (!img3ValidateFile(patchedDMG, "bakeRamdisk: re-encrypted RestoreRamdisk")) {
+        std::error_code rmBadEc;
+        fs::remove(patchedDMG, rmBadEc);
+        return false;
+    }
 
     // Same reason as the bootchain half's publish(): this function requires
     // root, but its output is a build artifact the invoking user owns in

@@ -484,6 +484,39 @@ inline constexpr const char* kIBECTetherComponent = "iBECTether";
 
 } // namespace bootargs
 
+// ---------------------------------------------------------------------------
+// The two DIAGNOSTIC ramdisks -- dist/ component names
+// ---------------------------------------------------------------------------
+//
+// Header-only and shared, exactly like `bootargs` above, because three
+// otherwise-disjoint binaries all have to agree on these spellings: the baker
+// writes them (BakeFirmware.cpp, gated behind --diagnostic-ramdisks), and
+// blackb0x reads them (Cli.cpp's takeBaked()-style lookup, selected by
+// --diag-ramdisk-repack / --diag-ramdisk-binary). A literal string in each
+// place would be three places to get wrong, and the failure mode is a flag
+// that silently finds nothing.
+//
+// The names deliberately extend the real component name rather than replacing
+// it, so dist/ sorts them next to the image they are being compared against
+// and a plain `ls dist/ | grep RestoreRamDisk` shows the whole bisect:
+//
+//     dist/RestoreRamDisk-<device>_<build>.dmg            the real bake
+//     dist/RestoreRamDiskDiagRepack-<device>_<build>.dmg  opened + re-sealed
+//     dist/RestoreRamDiskDiagBinary-<device>_<build>.dmg  entrypoint, no overlay
+//
+// What each one isolates, and the hardware observation that motivated them,
+// are in BakeRamdisk.hpp's RamdiskVariant. They are NOT listed in the
+// per-tuple Manifest-<device>_<build>.txt index: that file's presence is the
+// "this tuple is complete and jailbreakable" signal (see BakeFirmware.cpp),
+// and a diagnostic image is neither required for a jailbreak nor present on a
+// run that did not ask for one.
+namespace diagramdisk {
+
+inline constexpr const char* kRepackComponent = "RestoreRamDiskDiagRepack";
+inline constexpr const char* kBinaryComponent = "RestoreRamDiskDiagBinary";
+
+} // namespace diagramdisk
+
 struct PatchedComponents {
     std::optional<std::string> iBSS;
     // The iBEC this run will actually send. On the jailbreak path it is
@@ -578,6 +611,22 @@ public:
     // cannot load -- which is exactly why the old decrypt-on-stock path never
     // booted. The stockRecovery parameter is now vestigial.
     bool useStockRamdisk(const std::string& path, bool stockRecovery = false);
+
+    // --diag-ramdisk-repack / --diag-ramdisk-binary (Cli.hpp's CliOptions):
+    // sends one of the two DIAGNOSTIC ramdisks bake-firmware produces under
+    // --diagnostic-ramdisks, instead of patchRamdisk()'s usual
+    // dist/RestoreRamDisk-<tuple>.dmg lookup. `component` is one of
+    // diagramdisk::kRepackComponent / kBinaryComponent above; what each
+    // isolates is documented there and in BakeRamdisk.hpp's RamdiskVariant.
+    //
+    // Same shape as patchRamdisk(): this takes no path, because there is
+    // nothing to download -- the image is a baked dist/ entry keyed off
+    // loadKeysForDevice()/setBuildID()'s own member variables. Like
+    // patchRamdisk() it treats a missing entry as fatal rather than a
+    // "try the next component" failure, for the same reason: there is no
+    // ramdisk to send this device no matter what else the run does, and the
+    // fix (re-bake WITH the flag) is specific enough to say outright.
+    bool useDiagnosticRamdisk(const std::string& component);
 
     // --stock-recovery (Cli.hpp's CliOptions): sends iBSS/iBEC exactly as
     // Apple shipped them -- still encrypted, still img3-wrapped, no

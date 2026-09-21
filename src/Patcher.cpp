@@ -526,6 +526,47 @@ bool Patcher::useStockRamdisk(const std::string& path, bool /*stockRecovery*/) {
     return true;
 }
 
+// See Patcher.hpp's own comment, and BakeRamdisk.hpp's RamdiskVariant for what
+// each of the two images actually isolates. Sent exactly like the real baked
+// ramdisk -- still encrypted, still img3-wrapped, straight out of dist/ -- so
+// the ONLY difference between this and a normal jailbreak run is which of the
+// three images the kernel is handed. That is what makes the comparison mean
+// something: everything else in the chain (checkm8, iBSS, iBEC, boot-args,
+// kernelcache, DeviceTree, RestoreLogo) is bit-for-bit the same run.
+bool Patcher::useDiagnosticRamdisk(const std::string& component) {
+    const std::string diagDMG = "dist/" + component + "-" + deviceModel_ + "_" + buildID_ + ".dmg";
+    if (!fs::exists(diagDMG)) {
+        // Hard stop, same as patchRamdisk(). The distinctive failure here is
+        // "the suite was baked, but without --diagnostic-ramdisks", which is
+        // the DEFAULT -- so this is the expected first experience of the flag
+        // and the message has to name the fix rather than the symptom.
+        // ensureBakedFirmware() (Cli.cpp) cannot help either: it keys
+        // "complete" off the Manifest index and the real ramdisk, neither of
+        // which says anything about the diagnostics.
+        fprintf(stderr,
+                "blackb0x: PANIC: no diagnostic ramdisk for %s %s (%s doesn't exist).\n"
+                "The diagnostic images are NOT baked by default -- they cost two extra ramdisk\n"
+                "bakes per tuple. Produce them with:\n"
+                "  sudo ./build/bake-firmware --only ramdisk --diagnostic-ramdisks \\\n"
+                "                             --device %s --build %s\n"
+                "Or pull a CI artifact new enough to contain them (CI always passes that flag;\n"
+                "see .github/workflows/ci.yml).\n",
+                deviceModel_.c_str(), buildID_.c_str(), diagDMG.c_str(), deviceModel_.c_str(),
+                buildID_.c_str());
+        std::exit(1);
+    }
+
+    fprintf(stderr,
+            "DIAGNOSTIC ramdisk: sending %s instead of the real baked RestoreRamdisk. Everything else\n"
+            "  about this run -- iBSS, iBEC, boot-args, kernelcache, DeviceTree -- is unchanged, so a\n"
+            "  difference in behaviour is attributable to this image alone. The device will NOT be\n"
+            "  jailbroken.\n",
+            diagDMG.c_str());
+    outputs_.ramdisk = diagDMG;
+    checkPatching();
+    return true;
+}
+
 void Patcher::setBakedIBSSPath(const std::string& path) {
     outputs_.iBSS = path;
     checkPatching();

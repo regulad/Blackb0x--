@@ -618,20 +618,57 @@ static TargetResult bakeBootchainForked(const std::string& device, const std::st
 // handful of device models, and newestVersionForDevice() is a live ipsw.me
 // network call with no caching of its own. Without this, every tuple for the
 // same model would re-fetch and get the identical answer.
+//
+// `diagnostics` adds the two DIAGNOSTIC images to what this target produces
+// (bake-firmware's --diagnostic-ramdisks). They are baked from the same
+// downloaded, decrypted source by the same bakeRamdisk() call with a different
+// RamdiskVariant -- see BakeRamdisk.hpp for what each isolates and for the
+// hardware observation that makes the three-way comparison worth its cost.
+// Off by default because it triples this target's ramdisk work.
 static RamdiskOutcome bakeRamdiskForTarget(const std::string& device, const std::string& buildID,
                                             const std::string& entrypointBinaryPath, bool force,
+                                            bool diagnostics,
                                             std::map<std::string, std::string>& newestVersionCache,
                                             std::string& noteOut) {
     const std::string label = device + " " + buildID;
+    const std::string tupleSuffix = "-" + device + "_" + buildID + ".dmg";
+
+    // What this target is being asked for, in the order it gets baked: the
+    // real image first, so a run that dies partway through still leaves the
+    // one image an actual jailbreak needs.
+    struct PlannedRamdisk {
+        RamdiskVariant variant;
+        std::string outputPath;
+        const char* what;
+    };
+    std::vector<PlannedRamdisk> planned;
     // Same flat convention as the bootchain half above, and the same Apple
     // manifest key: RestoreRamDisk, not "Ramdisk".
-    const std::string outputPath = "dist/RestoreRamDisk-" + device + "_" + buildID + ".dmg";
+    planned.push_back({RamdiskVariant::Full, "dist/RestoreRamDisk" + tupleSuffix, "ramdisk"});
+    if (diagnostics) {
+        planned.push_back({RamdiskVariant::DiagRepack,
+                           "dist/" + std::string(diagramdisk::kRepackComponent) + tupleSuffix,
+                           "diag repack"});
+        planned.push_back({RamdiskVariant::DiagBinary,
+                           "dist/" + std::string(diagramdisk::kBinaryComponent) + tupleSuffix,
+                           "diag binary"});
+    }
 
     // Existence is the whole check -- see --force in this file's header for
-    // why there is no staleness detection any more.
-    if (!force && fs::exists(outputPath)) {
-        printf("already baked, skipping (use --force to rebuild)\n");
-        return RamdiskOutcome::Skipped;
+    // why there is no staleness detection any more. Applied PER IMAGE rather
+    // than to the real one alone, so adding --diagnostic-ramdisks to a tree
+    // that already has a baked suite produces just the two missing images
+    // instead of needing --force and re-baking all three.
+    if (!force) {
+        std::vector<PlannedRamdisk> missing;
+        for (auto& p : planned) {
+            if (!fs::exists(p.outputPath)) missing.push_back(p);
+        }
+        if (missing.empty()) {
+            printf("already baked, skipping (use --force to rebuild)\n");
+            return RamdiskOutcome::Skipped;
+        }
+        planned = std::move(missing);
     }
 
     IpswFetch fetcher;
@@ -743,20 +780,38 @@ static RamdiskOutcome bakeRamdiskForTarget(const std::string& device, const std:
         }
     }
 
+    // One decrypt/resize/attach/detach/re-seal cycle per planned image. Each
+    // bakeRamdisk() call starts again from `localRamdiskPath`, the pristine
+    // downloaded file, so the three images are genuinely independent products
+    // of one source rather than successive edits of each other -- which is
+    // exactly what a bisect needs. They run sequentially on purpose: they
+    // share one decrypted-intermediate filename (decryptedDMGFor(), see
+    // ResourcePath.hpp) and each overwrites it.
+    //
+    // A failure in ANY of them fails the target. A diagnostic image that
+    // silently did not get produced would be discovered as "the flag does
+    // nothing" on real hardware, which is the same class of quiet failure this
+    // whole bisect exists to end.
     bool sizeWarning = false;
-    if (!bakeRamdisk(localRamdiskPath, it->second.key, it->second.iv, productVersion, outputPath,
-                      entrypointBinaryPath, sizeWarning)) {
-        printf("FAILED (bake)\n");
-        fprintf(stderr, "%s: %s: bakeRamdisk() failed — see stderr above\n", kProg, label.c_str());
-        addNote(noteOut, "ramdisk: bake failed");
-        return RamdiskOutcome::BakeFailed;
+    for (const auto& p : planned) {
+        bool thisSizeWarning = false;
+        if (!bakeRamdisk(localRamdiskPath, it->second.key, it->second.iv, productVersion, p.outputPath,
+                          entrypointBinaryPath, thisSizeWarning, p.variant)) {
+            printf("FAILED (bake: %s)\n", p.what);
+            fprintf(stderr, "%s: %s: bakeRamdisk() failed for %s — see stderr above\n", kProg, label.c_str(),
+                    p.what);
+            addNote(noteOut, std::string("ramdisk: ") + p.what + " bake failed");
+            return RamdiskOutcome::BakeFailed;
+        }
+        sizeWarning = sizeWarning || thisSizeWarning;
     }
 
     if (sizeWarning) {
-        printf("OK (with size warning, see stderr) -> %s\n", outputPath.c_str());
+        printf("OK (with size warning, see stderr) -> %s\n", planned.front().outputPath.c_str());
         return RamdiskOutcome::BakedWithSizeWarning;
     }
-    printf("OK -> %s\n", outputPath.c_str());
+    printf("OK -> %s%s\n", planned.front().outputPath.c_str(),
+           planned.size() > 1 ? " (+ diagnostic images)" : "");
     return RamdiskOutcome::Baked;
 }
 
@@ -778,7 +833,22 @@ static void usage() {
     fprintf(stderr,
             "usage: bake-firmware [--device <model>] [--build <buildID>]\n"
             "                     [--only bootchain|ramdisk] [--bootchain-out <dir>]\n"
-            "                     [--force] [--stop-early]\n");
+            "                     [--force] [--stop-early] [--diagnostic-ramdisks]\n"
+            "\n"
+            "  --diagnostic-ramdisks  Also bake the two DIAGNOSTIC ramdisks alongside the\n"
+            "                         real one, for the boot bisect described in\n"
+            "                         src/BakeRamdisk.hpp's RamdiskVariant:\n"
+            "                           RestoreRamDiskDiagRepack-<tuple>.dmg -- Apple's\n"
+            "                             image opened, resized and re-sealed with NOTHING\n"
+            "                             added, through the identical code path. Isolates\n"
+            "                             the image-rebuilding machinery itself.\n"
+            "                           RestoreRamDiskDiagBinary-<tuple>.dmg -- entrypoint,\n"
+            "                             its LaunchDaemon plist and /mnt, but no /blackb0x\n"
+            "                             overlay. Isolates the overlay's SIZE from the\n"
+            "                             install mechanism.\n"
+            "                         Off by default: it triples the ramdisk work, which is\n"
+            "                         the slow half of a bake. blackb0x sends them with\n"
+            "                         --diag-ramdisk-repack / --diag-ramdisk-binary.\n");
 }
 
 int main(int argc, char** argv) {
@@ -786,6 +856,7 @@ int main(int argc, char** argv) {
     bool stopEarly = false;
     bool doBootchain = true;
     bool doRamdisk = true;
+    bool diagnosticRamdisks = false;
     std::string deviceFilter;
     std::string buildFilter;
     std::string bootchainOut = "dist";
@@ -795,6 +866,11 @@ int main(int argc, char** argv) {
             force = true;
         } else if (strcmp(argv[i], "--stop-early") == 0) {
             stopEarly = true;
+        } else if (strcmp(argv[i], "--diagnostic-ramdisks") == 0) {
+            // See usage() above and BakeRamdisk.hpp's RamdiskVariant. Takes no
+            // value: the two images answer one question between them and there
+            // has never been a reason to ask for only half of it.
+            diagnosticRamdisks = true;
         } else if (strcmp(argv[i], "--device") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "%s: --device requires a value (e.g. --device AppleTV3,2)\n", kProg);
@@ -877,6 +953,15 @@ int main(int argc, char** argv) {
     printf("Baking: %s.\n", doBootchain && doRamdisk ? "bootchain and ramdisk"
                             : doBootchain           ? "bootchain only"
                                                     : "ramdisk only");
+    if (diagnosticRamdisks && doRamdisk) {
+        printf("--diagnostic-ramdisks: three ramdisks per tuple (real, repack-only, entrypoint-only).\n"
+               "  This roughly triples the ramdisk half's runtime. See BakeRamdisk.hpp's RamdiskVariant.\n");
+    } else if (diagnosticRamdisks) {
+        // Not an error: --only bootchain is the fast patch-iteration loop and
+        // combining the two is a harmless leftover in a shell history. Saying
+        // so beats silently doing nothing with the flag.
+        printf("--diagnostic-ramdisks has no effect under --only bootchain (it bakes ramdisks).\n");
+    }
     // Root, unconditionally, checked here rather than per-half.
     //
     // The ramdisk half genuinely cannot work without it, and the reasons are
@@ -1032,7 +1117,7 @@ int main(int argc, char** argv) {
                 result.note = "entrypoint build failed for this device model";
             } else {
                 result.ramdisk = bakeRamdiskForTarget(device, buildID, entrypointBinaryPath, force,
-                                                      newestVersionCache, result.note);
+                                                      diagnosticRamdisks, newestVersionCache, result.note);
             }
         }
 
@@ -1113,6 +1198,12 @@ int main(int argc, char** argv) {
         if (ramdiskFailed) printf(", %zu FAILED to bake", ramdiskFailed);
         printf(".\n");
         printf("Ramdisk output: dist/RestoreRamDisk-<device>_<buildID>.dmg\n");
+        if (diagnosticRamdisks) {
+            printf("Diagnostic ramdisks: dist/%s-<device>_<buildID>.dmg (repack only, nothing added)\n"
+                   "                     dist/%s-<device>_<buildID>.dmg (entrypoint, no /blackb0x)\n"
+                   "  Send them with blackb0x --diag-ramdisk-repack / --diag-ramdisk-binary.\n",
+                   diagramdisk::kRepackComponent, diagramdisk::kBinaryComponent);
+        }
     }
 
     // A target that could not be downloaded is not this tool's failure --

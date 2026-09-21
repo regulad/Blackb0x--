@@ -35,6 +35,63 @@ struct CliOptions {
     // patching/entrypoint.c or earlier in the chain (see
     // Patcher::useStockRamdisk()'s own comment).
     bool stockRamdisk = false;
+    // DIAGNOSTIC: send dist/RestoreRamDiskDiagRepack-<tuple>.dmg -- Apple's
+    // own pristine ramdisk run through this project's ENTIRE image-rebuilding
+    // machinery with NOTHING ADDED. Same decrypt, same hdiutil resize up, same
+    // `attach -owners on`, same detach, same `resize -size min`, same IMG3
+    // re-seal against the original as template, same img3ValidateFile() guard,
+    // same 64 MiB ceiling. The only thing that does not happen is the staging.
+    //
+    // WHAT IT ISOLATES, and why the question is worth a flag. On real
+    // AppleTV3,2 hardware today: --stock-ramdisk shows the Apple logo,
+    // --tether-boot boots the installed OS, and the real baked ramdisk does
+    // NOTHING AT ALL -- no logo. That last result is evidence in itself,
+    // because the bake leaves Apple's /sbin/launchd byte-identical and leaves
+    // com.apple.restored_external.plist (RunAtLoad) alone, and restored_external
+    // is what draws the logo. If the kernel had mounted our image and run
+    // launchd, the logo would appear whether or not our own binary was ever
+    // accepted. No logo means the failure is BEFORE launchd -- the kernel is
+    // not rooting off our image at all. Two candidates remain: the image is
+    // too big (~44.3 MB against stock's ~16.6 MB, and the 64 MiB ceiling comes
+    // from a measured USB upload short-write, not from anything the kernel
+    // said), or the rebuild itself produces something unmountable.
+    //
+    // This flag answers the second. If THIS does not boot, size and content
+    // are both exonerated -- the image carries not one changed byte of
+    // content -- and the repack machinery is the bug. If it does boot, the
+    // machinery is cleared and --diag-ramdisk-binary is the next point.
+    //
+    // Requires a suite baked with `bake-firmware --diagnostic-ramdisks`; CI
+    // always passes it, so a downloaded artifact has them. Mutually exclusive
+    // with --diag-ramdisk-binary, --stock-ramdisk and the other ramdisk-path
+    // diagnostics (parseCliOptions() refuses the combination) -- each names a
+    // different image for the same slot, and silently letting one win would
+    // make the bisect report the wrong answer. NOT a jailbreak: this image has
+    // no /blackb0x and no entrypoint on it, so a successful boot installs
+    // nothing.
+    bool diagRamdiskRepack = false;
+    // DIAGNOSTIC: send dist/RestoreRamDiskDiagBinary-<tuple>.dmg -- the
+    // entrypoint binary, its LaunchDaemon plist and our /mnt mountpoint, and
+    // NO /blackb0x OVERLAY AT ALL. A few hundred KB over stock rather than the
+    // ~28 MB the real overlay adds.
+    //
+    // WHAT IT ISOLATES: the overlay's SIZE, separately from the install
+    // mechanism. Everything the bake does to Apple's tree is present here
+    // except the one thing that makes the image large. Read against the other
+    // three points:
+    //   * boots, while the real bake does not -> SIZE is the answer; the
+    //     install mechanism is fine and the work is shedding content.
+    //   * does not boot, while --diag-ramdisk-repack does -> the INSTALL
+    //     MECHANISM is the answer (the entrypoint install, the plist, or
+    //     creating /mnt), and size is irrelevant.
+    //   * neither boots -> the repack itself, which --diag-ramdisk-repack
+    //     will already have said.
+    //
+    // Same requirements and same exclusivity as --diag-ramdisk-repack above.
+    // NOT a jailbreak: entrypoint's merge_tree() has nothing to merge, so even
+    // a perfect boot installs nothing -- a device that reaches the Apple logo
+    // and reboots is this flag SUCCEEDING.
+    bool diagRamdiskBinary = false;
     // Sends the stock iBSS/iBEC exactly as downloaded from Apple instead
     // of blackb0x's own patched versions -- checkm8/the pwntool still runs
     // first (SecureROM's own signature check still needs bypassing to

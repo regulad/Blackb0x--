@@ -177,6 +177,16 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   `blackb0x` picks one by mode and never needs both. Do not collapse them back
   into one — see `src/Patcher.hpp`'s `bootargs` namespace for the disassembly
   and `docs/HISTORY.md`'s "`setenv boot-args` is INERT on this bootloader".
+  `RestoreRamDiskDiagRepack-` and `RestoreRamDiskDiagBinary-` are the two
+  **diagnostic ramdisks**, written only when `bake-firmware
+  --diagnostic-ramdisks` is passed (CI always passes it). They are ordinary
+  baked output of the same `bakeRamdisk()` call with a different
+  `RamdiskVariant`, held to the same 64 MiB ceiling and the same
+  `img3ValidateFile()` guard as everything else, and they exist to bisect one
+  hardware failure — see "The ramdisk boot bisect" below. They are
+  deliberately **not** listed in `Manifest-<device>_<build>.txt`: that index's
+  presence is the "this tuple is complete and jailbreakable" signal, and a
+  diagnostic image is neither required nor present on a default run.
   There is no
   `bootchain/` subdirectory any more, and the ramdisk is no longer named
   differently from everything else. An entry that already
@@ -255,6 +265,7 @@ cmake --build build --target authoring   # bake-firmware, vendored apt, tests, x
 # Writes flat dist/<Component>-<device>_<buildID> entries (Apple's manifest keys):
 ./build/bake-firmware [--device <model>] [--build <buildID>]
                       [--only bootchain|ramdisk] [--force] [--stop-early]
+                      [--diagnostic-ramdisks]
 
 ./build/blackb0x [--ecid <id> | --udid <id>] [--dry-run]
 ```
@@ -334,7 +345,12 @@ same fix would apply, but that is a cache rather than build output.
 
   `--device`/`--build` narrow a run to one model or one build. `--only bootchain`
   skips the entrypoint build and the debcache entirely, which is the fast loop for
-  iterating on patch logic.
+  iterating on patch logic. `--diagnostic-ramdisks` additionally bakes the two
+  diagnostic images described under "The ramdisk boot bisect" below — off by
+  default because it roughly triples the ramdisk half's runtime, and passed
+  unconditionally by CI because a bake is the one thing end users cannot do.
+  The per-image existence check means adding the flag to a tree that already
+  has a baked suite produces only the two missing images, with no `--force`.
 
   **There is no `--signed-only`, and don't add one back.** It existed, and asked
   ipsw.me which builds Apple still signs so it could bake only those. That filter
@@ -816,6 +832,55 @@ turns it into a surfaced warning instead. (The ceiling was a 70MB rule-of-thumb
 warning under the Linux design; the A4/A5 iBEC has no `ramdisk-size` variable to ask,
 and 64 MiB was confirmed against a live AppleTV3,2 as at-or-very-near the real limit.)
 
+### The ramdisk boot bisect
+
+Four send-time flags that differ only in which RestoreRamdisk reaches the
+device, so the comparison between runs is clean. Three points are already
+measured on real AppleTV3,2 hardware:
+
+| run | image | result |
+|---|---|---|
+| `--stock-ramdisk` | Apple's, untouched | **Apple logo appears** |
+| `--tether-boot` | none (NAND root) | **installed OS boots** |
+| default | the real baked ramdisk | **nothing at all, no logo** |
+
+That third result is itself evidence about *where* it fails. The bake leaves
+Apple's `/sbin/launchd` byte-identical and leaves
+`com.apple.restored_external.plist` (`RunAtLoad`) untouched, and
+`restored_external` is what draws the logo — so if the kernel had mounted our
+image and run launchd, the logo would appear **whether or not our own binary
+was ever accepted**. No logo means the failure is *before* launchd: the kernel
+is not successfully rooting off our image. Two candidates remain, and nothing
+distinguished them:
+
+- **Size.** Stock 12H1006 is ~16.6 MB raw; ours is ~44.3 MB. The 64 MiB
+  ceiling came from a measured USB upload short-write, which is where the
+  *upload* breaks, not necessarily what the kernel can mount — and there is no
+  runtime check to ask (`ramdisk-size` does not exist on 32-bit iBoot at all).
+- **Our rebuild machinery.** decrypt → resize up → attach → write → detach →
+  resize to minimum → re-seal.
+
+The two diagnostic images separate them, and both go through the *same*
+`bakeRamdisk()` call as a real bake — a `RamdiskVariant` switch over three
+small blocks, not a parallel implementation. Keep it that way: the identity of
+the code path is the entire value of the result.
+
+- **`--diag-ramdisk-repack`** (`RestoreRamDiskDiagRepack-`): Apple's pristine
+  image through the entire rebuild with **nothing added** — not one changed
+  byte of content. If this does not boot, size and content are both exonerated
+  and the repack is the bug.
+- **`--diag-ramdisk-binary`** (`RestoreRamDiskDiagBinary-`): the entrypoint
+  binary, its LaunchDaemon plist and `/mnt`, and **no `/blackb0x` overlay** —
+  a few hundred KB over stock instead of ~28 MB over. Separates the overlay's
+  SIZE from the install mechanism.
+
+The flags are mutually exclusive with each other, with `--stock-ramdisk`/
+`--stock-firmware` and with `--tether-boot`; `parseCliOptions()` refuses the
+combination rather than warning, because whichever branch ran first would
+silently win and a bisect whose answer depends on argument order is worse than
+no bisect. Neither image jailbreaks anything — `--diag-ramdisk-binary` reaching
+the Apple logo and rebooting *is* that flag succeeding.
+
 ## CI
 
 `.github/workflows/ci.yml`. `build` runs on every push: both build groups, both
@@ -836,6 +901,37 @@ code under sudo), one runner per device, and publishes `dist/` as artifacts so
 end users never need root or the authoring toolchain.
 
 Artifacts refresh on the 23rd of every month.
+
+**The bake job always passes `--diagnostic-ramdisks`**, even though the two
+extra images are pure diagnostics and cost it two more ramdisk bakes per leg.
+That is not thoroughness: a bake needs root, Theos, apt, afsctool and the
+pinned Xcode and takes ~30 minutes, which is exactly the set of requirements
+this job exists to keep off end users' machines — so CI is the *only* way the
+owner can obtain them. They ride along in the `firmware-<device>` artifact and
+the post-bake check asserts both exist and are under the 64 MiB ceiling.
+
+**The vendored dependency builds are cached** (`actions/cache`), because they
+are essentially the whole build cost. Measured on run 35560011769, cold: the
+`build` job's compile steps were 229 s, of which the last ExternalProject
+finishes 3 s before `blackb0x` links (jailbreak half) and `apt_ext` alone is
+108 of the authoring half's 118 s; each bake leg paid another 180–254 s. What
+is cached is the **dependency artifacts only** — `build/deps` (the shared
+`DEPS_PREFIX` install root), `build/*_ext-prefix` (ExternalProject's step
+stamps, which are what make the restore skip the work) and `build/apt-tools`
+(`apt_ext`'s install destination, outside its own prefix). Our own objects and
+`CMakeCache.txt` are **not** cached: a restored cache file records absolute
+paths and a compiler identity from another runner, and that fails confusingly
+rather than loudly. Nine ExternalProjects are `BUILD_IN_SOURCE 1` so their
+objects live in `third_party/` and are not cached either — correct, because the
+stamps stop anything wanting them and `build/deps` already holds the installed
+result. The key is `git submodule status --recursive` + the root
+`CMakeLists.txt` hash (where every `ExternalProject_Add` lives) + `cc
+--version` + runner OS/arch, with **no `restore-keys`**: a partial match would
+serve binaries built from a different submodule commit, which surfaces as a
+subtle link/runtime mismatch instead of an error. The `bake` job restores the
+same key read-only. One known gap, accepted: a Homebrew bump under the cached
+`apt` is not in the key and shows up at the existing `apt-get --version`
+assertion — bump the `deps-v1-` prefix if that ever happens.
 
 **How the pinned `entrypoint/` toolchain reaches a runner.** No runner has a
 `~/Downloads` full of DMGs, and the build hard-fails rather than substituting

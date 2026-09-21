@@ -71,6 +71,28 @@ void printCliUsage(const char* argv0) {
     printf("                            patching/entrypoint.c or earlier in the chain.\n");
     printf("                            The device will NOT be jailbroken by a run\n");
     printf("                            using this flag.\n");
+    printf("  --diag-ramdisk-repack     DIAGNOSTIC: send the ramdisk that is Apple's own\n");
+    printf("                            image run through blackb0x's ENTIRE rebuild\n");
+    printf("                            machinery (decrypt, resize, attach, detach,\n");
+    printf("                            resize to minimum, IMG3 re-seal) with NOTHING\n");
+    printf("                            added -- not one changed byte of content.\n");
+    printf("                            ISOLATES THE REBUILD ITSELF: if this does not\n");
+    printf("                            boot, size and content are both exonerated and\n");
+    printf("                            the repack is the bug; if it boots, the repack\n");
+    printf("                            is cleared. Needs a suite baked with\n");
+    printf("                            `bake-firmware --diagnostic-ramdisks` (CI always\n");
+    printf("                            passes it). NOT a jailbreak -- the image carries\n");
+    printf("                            no /blackb0x and no entrypoint.\n");
+    printf("  --diag-ramdisk-binary     DIAGNOSTIC: send the ramdisk carrying the\n");
+    printf("                            entrypoint binary, its LaunchDaemon plist and\n");
+    printf("                            /mnt, but NO /blackb0x overlay -- a few hundred\n");
+    printf("                            KB over stock instead of ~28 MB over.\n");
+    printf("                            ISOLATES THE OVERLAY'S SIZE from the install\n");
+    printf("                            mechanism: if this boots while the real ramdisk\n");
+    printf("                            does not, size is the answer; if it fails while\n");
+    printf("                            --diag-ramdisk-repack boots, the install\n");
+    printf("                            mechanism is. Same bake requirement as above.\n");
+    printf("                            NOT a jailbreak -- there is nothing to install.\n");
     printf("  --stock-recovery          DIAGNOSTIC: send the stock iBSS/iBEC exactly\n");
     printf("                            as downloaded from Apple (still runs checkm8\n");
     printf("                            first -- SecureROM's own signature check still\n");
@@ -178,6 +200,10 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.noPwn = true;
         } else if (arg == "--stock-ramdisk") {
             options.stockRamdisk = true;
+        } else if (arg == "--diag-ramdisk-repack") {
+            options.diagRamdiskRepack = true;
+        } else if (arg == "--diag-ramdisk-binary") {
+            options.diagRamdiskBinary = true;
         } else if (arg == "--stock-recovery") {
             options.stockRecovery = true;
         } else if (arg == "--stock-firmware") {
@@ -218,6 +244,69 @@ CliOptions parseCliOptions(int argc, char** argv) {
     // unrelated to either -- it controls whether a pwntool runs at all.
     if (options.stockFirmware && options.stockRamdisk) {
         fprintf(stderr, "--stock-ramdisk is redundant with --stock-firmware\n");
+    }
+    // THE RAMDISK SLOT HOLDS EXACTLY ONE IMAGE, and every flag here names a
+    // different one for it. Unlike the --stock-firmware/--stock-ramdisk pair
+    // above (which agree on what to send, so redundancy is only a warning),
+    // these genuinely disagree, and whichever one the code happened to test
+    // first would silently win. A bisect whose answer depends on argument
+    // order is worse than no bisect, so this REFUSES rather than warns.
+    //
+    // Listed explicitly rather than counted through a helper so the error can
+    // name what the user actually typed; see CliOptions' own comments for what
+    // each image isolates.
+    {
+        std::vector<std::string> ramdiskChoices;
+        if (options.diagRamdiskRepack) ramdiskChoices.push_back("--diag-ramdisk-repack");
+        if (options.diagRamdiskBinary) ramdiskChoices.push_back("--diag-ramdisk-binary");
+        // --stock-ramdisk and --stock-firmware are ONE claim between them, not
+        // two: --stock-firmware stocks the ramdisk as well (see
+        // downloadAndPatchComponents()'s `stockRamdisk || stockFirmware`), so
+        // they ask for the same image and combining them stays the mere
+        // redundancy the warning below already reports. Collapsing them here
+        // is what keeps that case a warning rather than turning it into a
+        // hard failure as a side effect of adding the diagnostics.
+        if (options.stockRamdisk || options.stockFirmware) {
+            ramdiskChoices.push_back(options.stockFirmware ? "--stock-firmware (implies a stock ramdisk)"
+                                                           : "--stock-ramdisk");
+        }
+        if (ramdiskChoices.size() > 1) {
+            std::string joined;
+            for (size_t i = 0; i < ramdiskChoices.size(); i++) joined += (i ? ", " : "") + ramdiskChoices[i];
+            fprintf(stderr,
+                    "These flags each choose a DIFFERENT RestoreRamdisk and cannot be combined: %s.\n"
+                    "Pick one per run -- the whole point of the diagnostic images is that everything\n"
+                    "except the ramdisk stays identical between runs, so they are compared across runs,\n"
+                    "never within one.\n",
+                    joined.c_str());
+            printCliUsage(argv[0]);
+            exit(2);
+        }
+        // --tether-boot sends NO ramdisk at all (see its own comment), so
+        // asking it to send a particular one is incoherent, the same way the
+        // --stock-* combination below is. Only the diagnostic images are
+        // checked here; the --stock-* side of the same problem has its own
+        // check a few lines down and keeps its own wording.
+        if (options.tetherBoot && (options.diagRamdiskRepack || options.diagRamdiskBinary)) {
+            fprintf(stderr,
+                    "--tether-boot sends no Ramdisk at all, so it cannot be combined with %s.\n",
+                    options.diagRamdiskRepack ? "--diag-ramdisk-repack" : "--diag-ramdisk-binary");
+            printCliUsage(argv[0]);
+            exit(2);
+        }
+        // --stock-recovery/--stock-securerom drive their own single-connection
+        // send path and both require --stock-firmware (which the exclusivity
+        // check above already refuses alongside a diagnostic image). Named
+        // here anyway, because reaching that error through "--stock-firmware
+        // is required" would point at the wrong flag.
+        if ((options.diagRamdiskRepack || options.diagRamdiskBinary) &&
+            (options.stockRecovery || options.stockSecurerom)) {
+            fprintf(stderr,
+                    "The --diag-ramdisk-* images are blackb0x's own baked output and can never satisfy the "
+                    "real APTicket verification --stock-recovery/--stock-securerom leave in force.\n");
+            printCliUsage(argv[0]);
+            exit(2);
+        }
     }
     // Opposite PWND-state requirements (noPwn hard-fails if NOT already
     // pwned; stockSecurerom hard-fails if it IS) -- not useful together,
@@ -757,7 +846,8 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
                                                               const std::string& buildToRequest,
                                                               bool stockRamdisk,
                                                               bool stockRecovery, bool stockFirmware,
-                                                              bool stockSecurerom, bool tetherBoot) {
+                                                              bool stockSecurerom, bool tetherBoot,
+                                                              const std::string& diagRamdiskComponent) {
 
     printf("Downloading firmware for %s %s...\n", device.deviceModel.c_str(), buildToRequest.c_str());
     IpswFetch fetcher;
@@ -997,7 +1087,21 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
 
     // onlyBootComponents is gone with the tether-boot path -- this was
     // its only guard here, and it is now unconditionally taken.
-    if (stockRamdisk || stockFirmware) {
+    //
+    // Three mutually exclusive ways to fill the ramdisk slot; parseCliOptions()
+    // already refused any combination of them, so the order of these branches
+    // cannot decide an argument (see its own comment for why that mattered
+    // enough to be a hard error rather than a warning).
+    if (!diagRamdiskComponent.empty()) {
+        // Diagnostic bisect images. Nothing to download -- they are baked
+        // dist/ entries like the real ramdisk, produced by
+        // `bake-firmware --diagnostic-ramdisks`. Note ensureBakedFirmware()
+        // above has already run (a diagnostic run is never fullyStock), but it
+        // only guarantees the real suite; useDiagnosticRamdisk() does its own
+        // existence check and names the re-bake command if the flag was never
+        // passed.
+        patcher.useDiagnosticRamdisk(diagRamdiskComponent);
+    } else if (stockRamdisk || stockFirmware) {
         // Diagnostic routes: useStockRamdisk() genuinely needs the
         // downloaded file (see its own comment) -- unchanged from
         // before.
@@ -1495,6 +1599,10 @@ int runCli(const CliOptions& options) {
     if (options.stockRecovery) stockFlags.push_back("--stock-recovery (stock iBSS/iBEC)");
     if (options.stockRamdisk && !options.stockFirmware)
         stockFlags.push_back("--stock-ramdisk (stock RestoreRamdisk)");
+    if (options.diagRamdiskRepack)
+        stockFlags.push_back("--diag-ramdisk-repack (pristine ramdisk, repacked, nothing added)");
+    if (options.diagRamdiskBinary)
+        stockFlags.push_back("--diag-ramdisk-binary (entrypoint + plist + /mnt, no /blackb0x overlay)");
     if (!options.sendOnly.empty())
         stockFlags.push_back("--send-only " + options.sendOnly + " (send that stage, then exit for inspection)");
     if (!stockFlags.empty()) {
@@ -1539,8 +1647,12 @@ int runCli(const CliOptions& options) {
         return 1;
     }
     std::string buildToRequest = targetBuild;
+    // The --diag-ramdisk-* images are baked per tuple exactly like the real
+    // ramdisk, so they are listed here for the same reason the --stock-* flags
+    // are: a diagnostic run must stay on the build this project baked a suite
+    // for, not follow an already-jailbroken device's own installed build.
     if (device.jailbroken && !options.stockFirmware && !options.stockRecovery && !options.stockSecurerom &&
-        !options.stockRamdisk)
+        !options.stockRamdisk && !options.diagRamdiskRepack && !options.diagRamdiskBinary)
         buildToRequest = device.buildID;
     printf("Targeting %s %s for this run.\n", device.deviceModel.c_str(), buildToRequest.c_str());
     // Both --stock-securerom (real SecureROM, no checkm8) AND --stock-recovery
@@ -1612,10 +1724,19 @@ int runCli(const CliOptions& options) {
         // only build there is.
     }
 
+    // Empty unless one of the two diagnostic images was asked for; they are
+    // mutually exclusive (parseCliOptions()), so one string is the whole
+    // channel. The names live in Patcher.hpp's `diagramdisk` namespace,
+    // shared with the baker that writes them.
+    const std::string diagRamdiskComponent = options.diagRamdiskRepack  ? diagramdisk::kRepackComponent
+                                             : options.diagRamdiskBinary ? diagramdisk::kBinaryComponent
+                                                                         : "";
+
     auto components = downloadAndPatchComponents(patcher, device, buildToRequest,
                                                    options.stockRamdisk,
                                                    options.stockRecovery, options.stockFirmware,
-                                                   options.stockSecurerom, options.tetherBoot);
+                                                   options.stockSecurerom, options.tetherBoot,
+                                                   diagRamdiskComponent);
     if (!components) {
         // Not "...to patch..." -- on any --stock-* route nothing here
         // actually patches anything (useStockIBSS()/useStockIBEC()/etc.

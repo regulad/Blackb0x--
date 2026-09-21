@@ -1057,6 +1057,48 @@ static void start_restored_external(void) {
     emit("Started %s (pid %d) for display and USB bring-up\n", prog, (int)pid);
 }
 
+/* THE ONE PLACE THIS BINARY WAITS TO BE READ.
+ *
+ * Both endings of a run now go through here, and they did not used to. The
+ * no-overlay diagnostic ending had its own ten-second heartbeat loop, and the
+ * normal ending had no wait at all: it printed "Installation complete" and
+ * called reboot(2) on the next line, so the last thing a human most wants to
+ * see was on screen for whatever fraction of a second the kernel took to tear
+ * the display down. Two different endings meant two different amounts of time
+ * to read them, which is exactly backwards -- the interesting ending is the
+ * one that goes past fastest.
+ *
+ * So: one function, one interval, announced. Thirty seconds is long enough to
+ * read a screenful and short enough that an unattended run is not wedged, and
+ * saying so on the way in means a still screen is legible as "waiting" rather
+ * than as "hung", which on a device with no other output channel is the whole
+ * difference between a measurement and a mystery.
+ *
+ * THE LINE GOES TO BOTH DESTINATIONS BUT NOT THE SAME WAY, and that is
+ * arithmetic rather than inconsistency. The console has free scrollback, so
+ * it gets an ordinary line. The screen console is about forty rows; a caller
+ * that loops here would wrap it in twenty minutes and erase the boot lines
+ * the run exists to show, so the screen gets the same text on its
+ * non-scrolling status row, rewritten in place. One buffer, formatted once,
+ * two destinations.
+ *
+ * SAFE AT BOTH CALL SITES because both call it with the NAND already
+ * unmounted and sync()'d. Waiting while mounted would widen the window in
+ * which restored_external can decide to reboot under us (see the teardown
+ * comment in main()); waiting after the teardown cannot. */
+#define HOLD_SECONDS 30
+
+static void wait_to_be_read(void)
+{
+    char line[SCREEN_LINE_MAX];
+    snprintf(line, sizeof(line), "waiting %d seconds...", HOLD_SECONDS);
+    fputs(line, stdout);
+    fputc('\n', stdout);
+    fflush(stdout);
+    screen_status(line);
+    sleep(HOLD_SECONDS);
+}
+
 /* ---------------------------------------------------------------------- */
 /* main() — disk wait, the two mount()s + devfs, do_install(), then        */
 /* unmount everything and reboot. dyld calls this directly via LC_MAIN's   */
@@ -1225,14 +1267,13 @@ int main(void) {
      * whatever we print here has somewhere to land and a human has time to
      * read it.
      *
-     * WHAT THIS TESTS. It is not known whether console output survives
-     * restored_external pointing the display pipe at its own IOSurfaces --
-     * the kernel console draws into the boot framebuffer iBoot set up, and
-     * once that swap lands the boot framebuffer is plausibly off-screen. If
-     * this line appears on the TV, /dev/console is a real diagnostic channel
-     * and the framebuffer work is unnecessary. If the logo comes up and this
-     * never does, the console is dead behind it and drawing into the shared
-     * IOSurface is the only way to get a pixel out.
+     * WHAT THIS TESTED, and the answer. The open question was whether console
+     * output survives restored_external pointing the display pipe at its own
+     * IOSurfaces -- the kernel console draws into the boot framebuffer iBoot
+     * set up, and once that swap lands the boot framebuffer is plausibly
+     * off-screen. It does not survive: on hardware the logo came up and this
+     * line never did. /dev/console is wired up but not observable here, which
+     * is why screen.h exists and why every line worth reading goes to both.
      *
      * exit code 0, not a reboot and not a failure: KeepAlive is absent from
      * the plist, so launchd reaps us and does not respawn. Nothing else on
@@ -1284,26 +1325,13 @@ int main(void) {
          * sleep(3) is real libc here -- the freestanding busy_wait() spin is
          * gone -- so this costs no CPU and cannot be mistaken for a hang.
          *
-         * WHY THE TICK USES THE STATUS ROW AND NOT emit(). This is the one
-         * place in the file that deliberately does NOT send the same text to
-         * both destinations the same way, and the reason is arithmetic: the
-         * screen console is about thirty rows, the tick fires six times a
-         * minute, and an emit() per tick would wrap the console and erase
-         * every boot line within five minutes -- destroying the only thing
-         * this run exists to show a human. So the full line goes to the
-         * console, where scrollback is free, and the screen gets the same
-         * text on its non-scrolling status row, rewritten in place. The
-         * message is still formatted once, into one buffer, and both
-         * destinations get that one buffer. */
-        for (unsigned long tick = 0;; tick++) {
-            char beat[SCREEN_LINE_MAX];
-            snprintf(beat, sizeof(beat), "still alive, not exiting (tick %lu)", tick);
-            fputs(beat, stdout);
-            fputc('\n', stdout);
-            fflush(stdout);
-            screen_status(beat);
-            sleep(10);
-        }
+         * The heartbeat this loop used to carry was originally the console
+         * test that motivated the whole image: a line every ten seconds would
+         * have meant /dev/console is a live diagnostic channel, not just a
+         * wired-up one. IT DID NOT APPEAR, which is the measurement that
+         * produced screen.h. It is now wait_to_be_read(), shared with the
+         * normal ending -- see that function. */
+        for (;;) wait_to_be_read();
     }
 
     do_install();
@@ -1338,6 +1366,10 @@ int main(void) {
     sync();
 
     emit("Installation complete — rebooting device...\n");
+    /* Held open so the line above can actually be read. Everything is
+     * unmounted and sync()'d at this point, so the wait costs nothing but the
+     * wait itself — see wait_to_be_read(). */
+    wait_to_be_read();
     set_auto_boot();
     /* RB_AUTOBOOT (0), a normal reboot — see the bare-0 note above for why
      * the constant is not spelled out. The original binary passed 1

@@ -43,17 +43,31 @@
  * second client in" is not a thing to find out on a device whose only
  * failure signal is a black screen. Lookup-by-ID needs none of it.
  *
- * WHICH SURFACE: the OPAQUE BACKGROUND (surface[2], layer 0), identified by
- * reading pixel (0,0) — the background reads alpha 0xFF, the two
- * progress-layer buffers read 0x00000000. Two reasons it is the right
- * target. The layer above it is transparent, so our text shows through; and
- * the progress buffers are the ones restored_external rewrites on every
- * progress update, whereas the background is redrawn only on display init
- * and HDMI hot-plug. Its swap routine has exactly two callers in
- * restored_external — a progress update and an image blit — and no timer,
- * animation or polling. While it sits in accept() with no host attached,
- * which is the field state, it performs zero swaps and zero pixel writes, so
- * what we store stays up.
+ * WHICH SURFACE: ALL OF THEM. This started out picking only the opaque
+ * background (surface[2], layer 0), on the reasoning that the layer above it
+ * is transparent so our text would show through, and that the background is
+ * the one buffer restored_external does not rewrite on every progress update.
+ * HARDWARE SAID OTHERWISE. On a real AppleTV3,2 at 12H1006 the text was
+ * written successfully and was not visible: it appeared only in the moment the
+ * boot graphics were torn down at the end of the run. The background layer is
+ * composited UNDER the logo/progress layer, and that layer is not transparent
+ * where we were drawing — so the single most defensible-sounding choice of
+ * target was the one choice that could not be seen.
+ *
+ * The fix is to stop choosing. Every plausible BGRA surface gets the same
+ * text, so whichever one is composited on top, or scanned out, or swapped in
+ * next, is carrying it. Three surfaces is three times the blitting of one,
+ * which is nothing: these are a few dozen glyphs per line, at most one line
+ * per log call.
+ *
+ * What we give up by not choosing is that we now also paint the two progress
+ * buffers, which restored_external rewrites on every progress update — our
+ * text can be erased from those. It cannot be erased from all of them at once
+ * by anything this ramdisk does (the background is redrawn only on display
+ * init and HDMI hot-plug; restored_external's swap routine has exactly two
+ * callers, a progress update and an image blit, and no timer, animation or
+ * polling), and being erased from one layer is a strictly better failure than
+ * being invisible on the correct one.
  *
  * ORDERING: this ramdisk's launchd unit graph has no Requires/After/Before,
  * so we cannot assume restored_external has run by the time we start. We
@@ -155,11 +169,17 @@ extern void         CFRelease(const void *cf);
 #define SCREEN_BACKLOG_LINES 48
 #define SCREEN_LINE_MAX      112
 
+/* How many surfaces we are willing to paint at once. restored_external makes
+ * three; the bound exists so a surprise does not turn into an unbounded loop
+ * over another process's objects. */
+#define SCREEN_MAX_TARGETS 8
+
 enum { SCREEN_SEARCHING = 0, SCREEN_ATTACHED = 1, SCREEN_GAVE_UP = -1 };
 
 static int            g_screenState = SCREEN_SEARCHING;
-static IOSurfaceRef   g_screenSurface;
-static fbtext_console g_screenCon;
+static IOSurfaceRef   g_screenSurface[SCREEN_MAX_TARGETS];
+static fbtext_console g_screenCon[SCREEN_MAX_TARGETS];
+static int            g_screenCount;
 static time_t         g_screenDeadline;
 static time_t         g_screenLastTry;
 
@@ -220,54 +240,62 @@ reject:
     return NULL;
 }
 
-/* One full sweep. `requireOpaque` picks the background layer; the relaxed
- * pass is used only once, on the very last attempt, and is announced — a
- * progress buffer is a worse target (restored_external rewrites it on every
- * update, and only one of the two is on screen at a time) but it is a great
- * deal better than nothing on a device with no other output channel. */
-static IOSurfaceRef screen_find(int requireOpaque, fbtext_surface *out)
+/* One full sweep. Collects EVERY plausible BGRA surface rather than choosing
+ * between them — see "WHICH SURFACE" in the header comment for why choosing
+ * was the bug. Returns how many were kept; `refs` and `out` are filled in
+ * parallel and the caller owns each ref. */
+static int screen_find(IOSurfaceRef *refs, fbtext_surface *out, int max)
 {
-    IOSurfaceRef best = NULL;
-    uint32_t bestW = 0;
+    int n = 0;
     IOSurfaceID id;
 
-    for (id = 0; id < SCREEN_MAX_ID; id++) {
+    for (id = 0; id < SCREEN_MAX_ID && n < max; id++) {
         fbtext_surface cand;
         unsigned alpha0 = 0;
         IOSurfaceRef s = screen_probe(id, &cand, &alpha0);
         if (!s) continue;
-        if (requireOpaque && alpha0 != 0xFF) { CFRelease(s); continue; }
-        if (cand.width <= bestW)             { CFRelease(s); continue; }
-        if (best) CFRelease(best);
-        best  = s;
-        bestW = cand.width;
-        *out  = cand;
+        refs[n] = s;
+        out[n]  = cand;
+        n++;
     }
-    return best;
+    return n;
 }
 
 /* ------------------------------------------------------------------------
  * Drawing.
  * ------------------------------------------------------------------------ */
 
-/* Open a write window: take the lock and re-fetch the base address inside
- * it. Returns 0 if the window could not be opened, in which case nothing is
- * drawn and nothing is dereferenced. */
-static int screen_draw_begin(void)
+/* Open a write window on ONE target: take its lock and re-fetch its base
+ * address inside it. Returns 0 if the window could not be opened, in which
+ * case nothing is drawn and nothing is dereferenced. */
+static int screen_draw_begin(int i)
 {
     void *base;
     if (g_screenState != SCREEN_ATTACHED) return 0;
-    if (IOSurfaceLock(g_screenSurface, 0, NULL) != 0) return 0;
-    base = IOSurfaceGetBaseAddress(g_screenSurface);
-    if (!base) { IOSurfaceUnlock(g_screenSurface, 0, NULL); return 0; }
-    g_screenCon.s.base = (unsigned char *)base;
+    if (IOSurfaceLock(g_screenSurface[i], 0, NULL) != 0) return 0;
+    base = IOSurfaceGetBaseAddress(g_screenSurface[i]);
+    if (!base) { IOSurfaceUnlock(g_screenSurface[i], 0, NULL); return 0; }
+    g_screenCon[i].s.base = (unsigned char *)base;
     return 1;
 }
 
-static void screen_draw_end(void)
+static void screen_draw_end(int i)
 {
-    IOSurfaceUnlock(g_screenSurface, 0, NULL);
+    IOSurfaceUnlock(g_screenSurface[i], 0, NULL);
 }
+
+/* Do one drawing operation on every attached surface. The locks are taken and
+ * released one target at a time rather than all at once: we never hold two of
+ * another process's surface locks simultaneously. */
+#define SCREEN_FOR_EACH(stmt)                                   \
+    do {                                                        \
+        int _i;                                                 \
+        for (_i = 0; _i < g_screenCount; _i++) {                \
+            if (!screen_draw_begin(_i)) continue;               \
+            { fbtext_console *con = &g_screenCon[_i]; stmt; }   \
+            screen_draw_end(_i);                                \
+        }                                                       \
+    } while (0)
 
 /* ------------------------------------------------------------------------
  * Attaching.
@@ -277,8 +305,9 @@ static void screen_attach_try(void)
 {
     time_t now = time(NULL);
     int lastChance;
-    fbtext_surface surf;
-    IOSurfaceRef s;
+    fbtext_surface surf[SCREEN_MAX_TARGETS];
+    IOSurfaceRef refs[SCREEN_MAX_TARGETS];
+    int found, i, kept = 0;
 
     if (g_screenState != SCREEN_SEARCHING) return;
 
@@ -286,13 +315,9 @@ static void screen_attach_try(void)
     if (!lastChance && now == g_screenLastTry) return;  /* at most 1/sec */
     g_screenLastTry = now;
 
-    s = screen_find(1, &surf);
-    if (!s && lastChance) {
-        printf("screen: no opaque background surface; trying any BGRA surface\n");
-        s = screen_find(0, &surf);
-    }
+    found = screen_find(refs, surf, SCREEN_MAX_TARGETS);
 
-    if (!s) {
+    if (found == 0) {
         if (lastChance) {
             g_screenState = SCREEN_GAVE_UP;
             printf("screen: no usable display IOSurface after %d s — "
@@ -302,36 +327,40 @@ static void screen_attach_try(void)
         return;
     }
 
-    g_screenSurface = s;
-    if (!fbtext_console_init(&g_screenCon, &surf)) {
-        printf("screen: surface %ux%u is too small for a console — giving up\n",
-               surf.width, surf.height);
-        CFRelease(s);
-        g_screenSurface = NULL;
+    /* Keep the ones a console actually fits in; release the rest. */
+    for (i = 0; i < found; i++) {
+        if (!fbtext_console_init(&g_screenCon[kept], &surf[i])) {
+            printf("screen: IOSurface id=%u is %ux%u, too small for a console — skipped\n",
+                   (unsigned)IOSurfaceGetID(refs[i]), surf[i].width, surf[i].height);
+            CFRelease(refs[i]);
+            continue;
+        }
+        g_screenSurface[kept] = refs[i];
+        kept++;
+    }
+
+    if (kept == 0) {
         g_screenState = SCREEN_GAVE_UP;
+        printf("screen: %d surface(s) found, none large enough for a console — "
+               "giving up\n", found);
         return;
     }
+
+    g_screenCount = kept;
     g_screenState = SCREEN_ATTACHED;
 
-    printf("screen: attached to IOSurface id=%u %ux%u stride=%u, "
-           "%dx%d chars at scale %d\n",
-           (unsigned)IOSurfaceGetID(s), surf.width, surf.height,
-           (unsigned)surf.stride, g_screenCon.cols, g_screenCon.rows,
-           g_screenCon.scale);
+    printf("screen: attached to %d surface(s), %dx%d chars at scale %d\n",
+           kept, g_screenCon[0].cols, g_screenCon[0].rows, g_screenCon[0].scale);
 
     /* Replay everything said before the display existed. This is why the
      * poll does not have to block. */
-    if (screen_draw_begin()) {
-        int i;
-        if (g_screenBacklogDropped) {
-            char note[SCREEN_LINE_MAX];
-            snprintf(note, sizeof(note), "[%d earlier line(s) lost]", g_screenBacklogDropped);
-            fbtext_console_line(&g_screenCon, note);
-        }
-        for (i = 0; i < g_screenBacklogUsed; i++) {
-            fbtext_console_line(&g_screenCon, g_screenBacklog[i]);
-        }
-        screen_draw_end();
+    if (g_screenBacklogDropped) {
+        char note[SCREEN_LINE_MAX];
+        snprintf(note, sizeof(note), "[%d earlier line(s) lost]", g_screenBacklogDropped);
+        SCREEN_FOR_EACH(fbtext_console_line(con, note));
+    }
+    for (i = 0; i < g_screenBacklogUsed; i++) {
+        SCREEN_FOR_EACH(fbtext_console_line(con, g_screenBacklog[i]));
     }
     g_screenBacklogUsed = 0;
 }
@@ -353,10 +382,7 @@ static void screen_emit_line(const char *line)
     if (g_screenState == SCREEN_SEARCHING) screen_attach_try();
 
     if (g_screenState == SCREEN_ATTACHED) {
-        if (screen_draw_begin()) {
-            fbtext_console_line(&g_screenCon, line);
-            screen_draw_end();
-        }
+        SCREEN_FOR_EACH(fbtext_console_line(con, line));
         return;
     }
     if (g_screenState == SCREEN_GAVE_UP) return;
@@ -421,17 +447,16 @@ static void screen_puts(const char *s)
 static void screen_status(const char *s)
 {
     if (g_screenState == SCREEN_SEARCHING) screen_attach_try();
-    if (screen_draw_begin()) {
-        fbtext_console_status(&g_screenCon, s);
-        screen_draw_end();
-    }
+    SCREEN_FOR_EACH(fbtext_console_status(con, s));
 }
 
 /* Switch the console to an alert colour for everything printed from here on.
  * panic() uses it; there is no way back, which matches panic(). */
 static void screen_alert(void)
 {
-    if (g_screenState == SCREEN_ATTACHED) g_screenCon.fg = FBTEXT_RED;
+    int i;
+    if (g_screenState != SCREEN_ATTACHED) return;
+    for (i = 0; i < g_screenCount; i++) g_screenCon[i].fg = FBTEXT_RED;
 }
 
 #endif /* SCREEN_H */

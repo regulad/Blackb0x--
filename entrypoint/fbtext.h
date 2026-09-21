@@ -241,17 +241,22 @@ typedef struct {
 
 /* How far to scale an 8x8 cell up for a display `width` pixels across.
  *
- * Two constraints pull against each other. Ten-foot legibility guidance puts
- * the minimum comfortable glyph height at roughly 1/30 of the screen height;
- * our messages are up to ~60 characters and want columns. Solving for ~52
- * columns gives scale = width/416, which on the 1280x720 output this device
- * actually drives is 3 — a 24-pixel glyph, i.e. 1/30 of the frame height, and
- * ~50 columns after the overscan inset. That is the smallest scale that
- * clears the legibility floor, so it is the one that keeps the most text.
- * 1920 wide lands on 4 and 720 wide clamps to 2, both by the same rule. */
+ * This was derived from ten-foot legibility guidance — minimum comfortable
+ * glyph height about 1/30 of the frame — which gave scale = width/416, i.e. 3
+ * on the 1280x720 this device drives: a 24-pixel glyph and ~50 columns.
+ * SEEN ON A TV, that is too big. The guidance is written for UI a viewer
+ * reads from a sofa; this console is read by someone debugging, who is
+ * looking at the screen deliberately and can walk closer. Optimising for
+ * glanceability spent rows and columns that the log actually needed, and a
+ * wrapped 50-column console throws away the thing the run exists to show.
+ *
+ * So: width/640, clamped to [2, 6]. 1280 wide lands on 2 — a 16-pixel glyph,
+ * ~75 columns and ~40 rows after the overscan inset, which is half again as
+ * much log on screen. 1920 lands on 3 and keeps the same apparent size. The
+ * floor of 2 stays; an 8-pixel glyph on a TV is not readable from anywhere. */
 static int fbtext_scale_for(uint32_t width)
 {
-    int scale = (int)(width / 416u);
+    int scale = (int)(width / 640u);
     if (scale < 2) scale = 2;
     if (scale > 6) scale = 6;
     return scale;

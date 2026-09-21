@@ -520,6 +520,40 @@ static int install_file(const char *src, const char *dst, int uid, int gid, int 
  * back immediately after — that is what preserves the old `n < 0` ->
  * "failed to get directories" path, which a bare NULL check would silently
  * turn into "directory ended early, all fine". */
+/* MERGE FAILURES WERE SILENT, AND THAT IS HOW THIS WENT UNNOTICED.
+ *
+ * merge_tree() recorded a failure by setting `ok = 0` and moving on, so a
+ * run in which every file on one volume was refused looked, from the
+ * outside, exactly like a run in which one file was. The only survivor was a
+ * single summary line at the end saying errors had happened "see the console
+ * stream" — a stream that, until the screen console existed, nothing could
+ * read.
+ *
+ * Counting rather than printing each one is deliberate. If a whole volume is
+ * refusing writes there will be thousands of failures, and thousands of
+ * lines would push the useful part of the log off a screen that holds about
+ * ninety. So: a total, and the FIRST failure in full, with its errno. One
+ * example plus a count is what distinguishes "a file was busy" from "the
+ * volume said no", which is the only distinction that matters here. */
+static unsigned g_mergeFailures;
+static char     g_mergeFirstPath[512];
+static int      g_mergeFirstErrno;
+
+static void note_merge_failure(const char *path) {
+    if (g_mergeFailures == 0) {
+        g_mergeFirstErrno = errno;
+        snprintf(g_mergeFirstPath, sizeof(g_mergeFirstPath), "%s", path);
+    }
+    g_mergeFailures++;
+}
+
+static void report_merge_failures(void) {
+    if (g_mergeFailures == 0) return;
+    emit_err("  %u entr%s failed; first was %s (errno %d, %s)\n",
+             g_mergeFailures, g_mergeFailures == 1 ? "y" : "ies",
+             g_mergeFirstPath, g_mergeFirstErrno, strerror(g_mergeFirstErrno));
+}
+
 static int merge_tree(const char *src, const char *dst) {
     DIR *dir = opendir(src);
     if (dir == NULL) {
@@ -559,10 +593,10 @@ static int merge_tree(const char *src, const char *dst) {
         if (de->d_type == DT_LNK) {
             char target[1024];
             ssize_t tn = readlink(srcPath, target, sizeof(target) - 1);
-            if (tn < 0) { ok = 0; continue; }
+            if (tn < 0) { ok = 0; note_merge_failure(srcPath); continue; }
             target[tn] = '\0';
             unlink(dstPath);
-            if (symlink(target, dstPath) != 0) ok = 0;
+            if (symlink(target, dstPath) != 0) { ok = 0; note_merge_failure(dstPath); }
         } else if (de->d_type == DT_DIR) {
             struct stat dstSt;
             if (stat(dstPath, &dstSt) != 0) {
@@ -577,9 +611,12 @@ static int merge_tree(const char *src, const char *dst) {
             if (merge_tree(srcPath, dstPath) != 0) ok = 0;
         } else {
             struct stat srcSt;
-            if (stat(srcPath, &srcSt) != 0) { ok = 0; continue; }
+            if (stat(srcPath, &srcSt) != 0) { ok = 0; note_merge_failure(srcPath); continue; }
             int mode = (int)(srcSt.st_mode & 07777);
-            if (install_file(srcPath, dstPath, (int)srcSt.st_uid, (int)srcSt.st_gid, mode) != 0) ok = 0;
+            if (install_file(srcPath, dstPath, (int)srcSt.st_uid, (int)srcSt.st_gid, mode) != 0) {
+                ok = 0;
+                note_merge_failure(dstPath);
+            }
         }
     }
 
@@ -770,6 +807,7 @@ static int do_install(void) {
 
     emit("Merging blackb0x payload\n");
     int merged = merge_tree("/blackb0x", MNT);
+    report_merge_failures();
     fixup_etasonuntether_rtbuddyd();
     emit("Finished install\n");
 
@@ -778,11 +816,20 @@ static int do_install(void) {
      * against this volume, and deliberately carrying merge_tree()'s own
      * result — which nothing used to look at at all, so a partial merge was
      * indistinguishable from a clean one in every artifact this left
-     * behind. The details of what failed are on the console stream, where
-     * merge_tree() printed them as they happened. */
-    write_install_record(merged == 0 ? "blackb0x: merged /blackb0x onto the device\n"
-                                     : "blackb0x: merged /blackb0x onto the device WITH ERRORS "
-                                       "(see the console stream for which entries failed)\n");
+     * behind. The failure count and the first failing entry are on the
+     * console just above, via report_merge_failures(); the count goes into
+     * the record too, so the artifact says how bad it was rather than only
+     * that it was bad. */
+    char record[256];
+    if (merged == 0) {
+        snprintf(record, sizeof(record), "blackb0x: merged /blackb0x onto the device\n");
+    } else {
+        snprintf(record, sizeof(record),
+                 "blackb0x: merged /blackb0x onto the device WITH ERRORS "
+                 "(%u entries failed, first %s: errno %d)\n",
+                 g_mergeFailures, g_mergeFirstPath, g_mergeFirstErrno);
+    }
+    write_install_record(record);
 
     return 0;
 }
@@ -1111,6 +1158,102 @@ static void report_volume(const char *label, const char *path) {
          (unsigned long long)fs.f_bavail * fs.f_bsize >> 20);
 }
 
+/* WHICH VOLUME WILL ACCEPT A NEW FILE, AND WHICH WILL NOT.
+ *
+ * The install record failed with EPERM at /var/mobile/Media, so it was moved
+ * to /var/.blackb0x — and failed there too, with the same errno, as root.
+ * That rules out the explanation that was obvious at /var/mobile/Media
+ * (Media is a data-protected location) and replaces it with a much more
+ * serious possibility: that NOTHING can create a file on the data partition
+ * from this ramdisk.
+ *
+ * That would matter far beyond one log. /blackb0x stages a large part of its
+ * payload into /var and /private/var — dpkg's database, apt's lists, this
+ * project's own /private/var/.blackb0x — all of which live on disk0s1s2.
+ * If creates are refused there, the install has been failing quietly for
+ * every one of those files, and the log was simply the first to say so out
+ * loud now that there is a screen to say it on.
+ *
+ * TWO EXPLANATIONS FIT, and they call for opposite responses, which is
+ * exactly why this measures instead of guessing.
+ *
+ *   1. The VOLUME refuses. iOS content protection: on a CP-enabled volume a
+ *      new file needs a per-file key wrapped by a class key from the keybag.
+ *      Nothing here loads one — /usr/libexec/keybagd is referenced by
+ *      launchd's embedded bootstrap but is NOT PRESENT on this ramdisk, and
+ *      the only MobileKeyBag symbols restored_external imports are
+ *      MKBKeyBagCreateSystem and MKBDeviceObliterateClassDKey, i.e. the
+ *      restore-time destructive ones, not "load the existing bag". Reads of
+ *      existing class-D files keep working, which matches what we see. This
+ *      device has no passcode, so the class keys need no user input; the bag
+ *      would just need loading, and loading it is setup this project does
+ *      not currently do.
+ *
+ *   2. The PROCESS is refused. EPERM is also the canonical sandbox denial,
+ *      and an ad-hoc-signed binary that the kernel does not treat as a
+ *      platform binary can end up under a default profile regardless of the
+ *      AMFI boot-args. If that is what is happening, the data partition is
+ *      innocent and no amount of keybag work would help.
+ *
+ * The probes below separate them. A create on the RAMDISK's own root is the
+ * control: it is local memory, not content-protected, and already writable
+ * (ensure_root_writable ran). If even that is refused, the restriction is on
+ * us and hypothesis 2 is the answer. If the ramdisk and the system partition
+ * accept a file and only the data partition refuses, it is the volume, and
+ * mkdir-vs-create then says whether it is specifically per-file keys —
+ * directories need none, so mkdir succeeding where create fails is content
+ * protection all but confirmed.
+ *
+ * Reading the data partition is the fourth control: a volume that lists its
+ * own entries is genuinely mounted, so a create failure on it is a refusal
+ * rather than a consequence of a mount that silently did nothing.
+ *
+ * Every probe cleans up after itself. Nothing here fails the run. */
+static void probe_writability(void) {
+    struct { const char *what; const char *path; int isDir; } probes[] = {
+        { "create on ramdisk root",     "/.blackb0x-probe",                      0 },
+        { "create on system partition", MNT "/.blackb0x-probe",                  0 },
+        { "mkdir  on data partition",   MNT "/private/var/.blackb0x-probe.d",    1 },
+        { "create on data partition",   MNT "/private/var/.blackb0x-probe",      0 },
+        { "create in existing data dir", MNT "/private/var/mobile/.blackb0x-probe", 0 },
+    };
+
+    emit("Probing what each volume will accept...\n");
+    for (unsigned i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        if (probes[i].isDir) {
+            if (mkdir(probes[i].path, 0755) != 0) {
+                emit("  %s: REFUSED (errno %d, %s)\n", probes[i].what, errno, strerror(errno));
+            } else {
+                emit("  %s: ok\n", probes[i].what);
+                rmdir(probes[i].path);
+            }
+            continue;
+        }
+        int fd = open(probes[i].path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0) {
+            emit("  %s: REFUSED (errno %d, %s)\n", probes[i].what, errno, strerror(errno));
+        } else {
+            close(fd);
+            emit("  %s: ok\n", probes[i].what);
+            unlink(probes[i].path);
+        }
+    }
+
+    /* Reading the data partition, to prove the mount itself is sound. A
+     * volume that lists its own entries is mounted; a volume that cannot is
+     * a different bug entirely and would make every create failure above a
+     * consequence rather than a cause. */
+    DIR *d = opendir(MNT "/private/var");
+    if (!d) {
+        emit_err("  read   on data partition: REFUSED (errno %d, %s)\n", errno, strerror(errno));
+    } else {
+        int n = 0;
+        while (readdir(d) != NULL) n++;
+        closedir(d);
+        emit("  read   on data partition: ok, %d entries\n", n);
+    }
+}
+
 static void report_path(const char *path) {
     struct stat st;
     const char *kind;
@@ -1333,6 +1476,11 @@ int main(void) {
      * one, and it has been diagnosed from the outside twice. */
     report_path("/blackb0x");
     report_volume("ramdisk", "/");
+
+    /* Before the merge, not after: if a volume will not take a new file, the
+     * merge is going to fail thousands of times and the reason is worth
+     * knowing in one line rather than inferring from the wreckage. */
+    probe_writability();
 
     /* NO OVERLAY => SAY SO AND EXIT CLEANLY, WITHOUT REBOOTING.
      *

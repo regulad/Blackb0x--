@@ -168,6 +168,28 @@ if [ -f "$POSTINSTALL" ] && grep -q "$PLACEHOLDER" "$POSTINSTALL"; then
         "$POSTINSTALL" > "$POSTINSTALL.tmp"
     mv "$POSTINSTALL.tmp" "$POSTINSTALL"
     chmod 755 "$POSTINSTALL"
+
+    # PARSE THE RESULT. The substitution above splices an arbitrary string
+    # from packages.txt into the middle of a bash array literal --
+    # PACKAGES=(__BLACKB0X_PACKAGES__) -- so a package name carrying a quote,
+    # backtick, $ or parenthesis does not produce a bad package name, it
+    # produces bad shell. The checks above only establish that the list was
+    # non-empty and that the placeholder was there to replace.
+    #
+    # Nothing downstream would catch it. The .deb builds, the bake succeeds,
+    # the ramdisk flashes, and the script dies at first boot on a device with
+    # no console -- the one failure mode this project has spent the most
+    # effort making observable. Nothing on a development machine ever executes
+    # this file either, so a syntax error in it has no other way to surface.
+    #
+    # `bash -n` parses without executing. It is the right tool precisely
+    # because it does not run the script: at package-build time there is no
+    # device, no apt and no /var to run it against.
+    if ! bash -n "$POSTINSTALL"; then
+        echo "$0: templated $POSTINSTALL is not valid bash -- check $PACKAGES_FILE" >&2
+        echo "$0: substituted list was: $PACKAGES" >&2
+        exit 1
+    fi
 fi
 
 # Real dpkg-scanpackages, not a hand-rolled index: apt is strict about the

@@ -771,11 +771,35 @@ static std::string artifactRepo() {
 // is gone (blackb0x patches nothing now), so there is no concurrent work left
 // to hide it behind, and a jailbreak silently turning into a multi-minute
 // root-requiring bake was never a good surprise anyway.
-static bool ensureBakedFirmware(const std::string& deviceModel, const std::string& buildID) {
+// `extraRamdisk`, when non-empty, is the dist/ basename PREFIX of a ramdisk
+// variant this run additionally needs -- i.e. one of the diagnostic images
+// (see diagramdisk:: in Patcher.hpp). It has to be part of the presence test,
+// not just downloaded and hoped for, for a reason that bit immediately:
+//
+// The test below short-circuits on the manifest plus the normal ramdisk. The
+// diagnostic images are DELIBERATELY absent from Manifest-<tuple>.txt, because
+// that index's presence is what means "a complete, jailbreakable suite". So a
+// dist/ populated before the diagnostics existed -- which is every dist/ that
+// predates them -- passes present() and returns early, and the download that
+// would have brought them never runs. The run then fails much later, at
+// Patcher's baked-component load, as a missing file with no explanation of
+// why it is missing or how to get it.
+//
+// Including the variant here makes a stale dist/ re-fetch instead, which is
+// correct: `gh run download` unpacks the whole artifact and CI publishes the
+// diagnostics alongside everything else, so one fetch satisfies both.
+static bool ensureBakedFirmware(const std::string& deviceModel, const std::string& buildID,
+                                const std::string& extraRamdisk = "") {
     const std::string suffix = "-" + deviceModel + "_" + buildID;
     auto present = [&]() {
-        return fs::exists("dist/Manifest" + suffix + ".txt") &&
-               fs::exists("dist/RestoreRamDisk" + suffix + ".dmg");
+        if (!fs::exists("dist/Manifest" + suffix + ".txt") ||
+            !fs::exists("dist/RestoreRamDisk" + suffix + ".dmg")) {
+            return false;
+        }
+        if (!extraRamdisk.empty() && !fs::exists("dist/" + extraRamdisk + suffix + ".dmg")) {
+            return false;
+        }
+        return true;
     };
 
     if (present()) return true;
@@ -919,7 +943,12 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // the fullyStock ones that never reach here, but naming the resolved build
     // keeps this correct rather than accidentally correct.
     bool fullyStock = stockFirmware && stockRecovery;
-    if (!fullyStock && !ensureBakedFirmware(device.deviceModel, manifest->realBuildID)) {
+    // diagRamdiskComponent is passed through so a --diag-ramdisk-* run treats
+    // that image as REQUIRED, not optional. Without it a dist/ baked before
+    // the diagnostics existed satisfies the presence test, no download
+    // happens, and the run dies later at Patcher's component load with a bare
+    // missing-file error.
+    if (!fullyStock && !ensureBakedFirmware(device.deviceModel, manifest->realBuildID, diagRamdiskComponent)) {
         return std::nullopt;
     }
 

@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  THIS DELIBERATELY OVERWRITES THE openssh PACKAGE'S OWN PLIST, at the same
+  path and under the same Label, so there is exactly one sshd job rather than
+  two fighting over port 22. Our package is staged after the debcache merge
+  (stageBlackb0xTree() calls stageDebcache() then stageBlackb0xPackage()), so
+  the later write wins.
+
+  WHY. On the first device boot where the system partition merge had fully
+  landed, sshd did not come up. The package's plist is socket-activated:
+
+      inetdCompatibility  Wait = false
+      Sockets  Listeners  SockServiceName = "ssh"
+      StandardErrorPath   /dev/null
+
+  Three things wrong with that here, and the third is why the first two went
+  unnoticed for so long.
+
+    1. `inetdCompatibility` is a launchd 1.0 facility. This device runs the
+       XPC-era launchd, where it is at best vestigial. A job that is never
+       triggered never fails, so there is nothing in any log to find.
+    2. `SockServiceName = "ssh"` is resolved through /etc/services. We ship no
+       /etc/services and do not control what the stock tvOS image carries, so
+       the port that job binds is not a thing this project can assert. A name
+       lookup that fails takes the whole job with it.
+    3. StandardErrorPath is /dev/null. Whatever sshd had to say about any of
+       this was discarded before it was written. On a device whose only output
+       channel took a week of work to obtain, throwing stderr away is the
+       expensive part of the bug, not a detail.
+
+  So: no socket activation, no name lookup, and both streams go to a real file
+  on the system partition. sshd is started directly and kept alive, which is
+  what the original blackb0x did too -- its disassembled launchd staged its own
+  com.openssh.sshd.plist as a loose top-level file rather than relying on the
+  package's (see misc/README.md's record of what the original installed).
+
+  Program vs ProgramArguments[0] is not a mistake. launchd execs `Program` but
+  passes `ProgramArguments` as argv, so the wrapper runs with $0 = /usr/sbin/sshd
+  and $@ = -D. /usr/libexec/sshd-keygen-wrapper is a /bin/sh script that
+  generates the three host keys into /etc/ssh if they are missing and then
+  `exec /usr/sbin/sshd $@`. That matters twice over: no host keys ship (only
+  moduli, ssh_config and sshd_config do), and /etc is /private/etc on the
+  SYSTEM partition, so the keys it writes land on the volume that accepts
+  writes rather than the one that refuses them. Expect the first start to take
+  a moment while it generates them.
+
+  `-D` rather than `-i`: -i is inetd mode, which expects an already-accepted
+  connection on stdin and is meaningless without the socket activation above.
+  -D is "daemon, but do not detach", which is what a launchd job wants -- a
+  process that forks away would be reaped and restarted forever.
+
+  UsePrivilegeSeparation is `no` in the shipped sshd_config, so this needs
+  neither /var/empty nor anything else on the data partition. That is load
+  bearing right now: /var is not populated until the first-boot postinstall
+  daemon migrates the stage, and a job that needed /var/empty would fail on
+  exactly the boot where someone is trying to SSH in to find out why.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+      <string>com.openssh.sshd</string>
+    <key>Program</key>
+      <string>/usr/libexec/sshd-keygen-wrapper</string>
+    <key>ProgramArguments</key>
+      <array>
+        <string>/usr/sbin/sshd</string>
+        <string>-D</string>
+      </array>
+    <key>RunAtLoad</key>
+      <true/>
+    <key>KeepAlive</key>
+      <true/>
+    <key>SessionCreate</key>
+      <true/>
+    <key>StandardOutPath</key>
+      <string>/usr/share/blackb0x/sshd.out.log</string>
+    <key>StandardErrorPath</key>
+      <string>/usr/share/blackb0x/sshd.err.log</string>
+</dict>
+</plist>

@@ -2125,6 +2125,32 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
     std::string statusOut;
     for (const auto& filename : eligibleFilenames) {
         std::string debPath = fs::absolute(debsRoot + "/" + filename).string();
+
+        // HELD, for the same reason etasonuntether is held: this project
+        // deliberately overrides a file the real package owns, and a later
+        // `apt-get upgrade`/`autoremove` resolving that package for real
+        // would silently put the original back.
+        //
+        // openssh owns /Library/LaunchDaemons/com.openssh.sshd.plist and its
+        // version does not start sshd on this device -- it is socket-
+        // activated through inetdCompatibility and an /etc/services lookup,
+        // neither of which this project can rely on here, and it discards
+        // stderr to /dev/null so the failure leaves no trace. Our package
+        // ships a replacement at the same path (see that plist's own
+        // comment). Without the hold, the first successful `apt-get upgrade`
+        // would restore the version that does not work, on a device whose
+        // owner is most likely using SSH at the time to find out why.
+        //
+        // `hold ok installed` is exactly what `apt-mark hold` writes; see
+        // buildStatusStanzaFromControl(). Matched on the filename's package
+        // stem so a version bump in debcache/ does not quietly un-hold it.
+        const bool hold = filename.rfind("openssh_", 0) == 0;
+        if (hold) {
+            fprintf(stderr,
+                    "bakeRamdisk: holding %s -- this bake overrides its LaunchDaemon plist\n",
+                    filename.c_str());
+        }
+
         // dropRelationshipFields=false: unlike stageManualDpkgInstall()'s
         // two firmware-version-gated callers, these are ordinary bake-time
         // preinstalls with nothing to route around — keep Depends:/
@@ -2132,7 +2158,7 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
         // --unpack/--configure would actually have produced.
         ExtractedDeb extracted = extractDebAndBuildStanza(debPath, "blackb0x-preinstall-pkg-",
                                                             "bake-time preinstall payload for " + filename,
-                                                            /*hold=*/false, /*dropRelationshipFields=*/false);
+                                                            hold, /*dropRelationshipFields=*/false);
         if (!extracted.ok || extracted.stanza.empty()) {
             fprintf(stderr,
                     "bakeRamdisk: FATAL: cannot extract eligible package %s for bake-time preinstall (no "
@@ -3084,6 +3110,13 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
                           "/etc/apt/trusted.gpg.d/awkwardtv.gpg", "/etc/apt/trusted.gpg.d/bigboss.gpg",
                           "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
                           "/usr/share/blackb0x/postinstall.sh", "/var/root/.profile"}) {
+        // DELIBERATELY NOT LISTED: /Library/LaunchDaemons/com.openssh.sshd
+        // .plist, which this package ships and overwrites. It stays owned by
+        // openssh alone. Claiming it here too would leave two packages naming
+        // one path in their .list files, which is a real dpkg conflict rather
+        // than a belt-and-braces measure, and it buys nothing: what protects
+        // the override is openssh being HELD (computePreinstalledPackages()),
+        // so apt never resolves it and never restores the original.
         ownedPaths.push_back(p);
     }
     ok &= stageManualDpkgInstall(blackb0xRoot, extracted.stanza, "xyz.regulad.blackb0x", ownedPaths);

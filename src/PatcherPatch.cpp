@@ -197,6 +197,19 @@ bool Patcher::patchiBSS(const std::string& path) {
     std::error_code ec;
     fs::remove(decPath, ec);
 
+    // POST-REPUBLISH GUARD. Re-runs iBoot's own img3 gate on the bytes we just
+    // wrote (see img3ValidateFile() in Patcher.cpp for the predicate, where it
+    // came from, and why bake-firmware's exit status was never evidence that
+    // the image was usable). Checked on BOTH branches below even though the
+    // Apple TV 3 branch publishes the RAW patched iBSS rather than this
+    // re-wrapped one: the img3 writer is the same either way, so this is a
+    // canary for every other component of the same bake.
+    if (!img3ValidateFile(outPath, "patchiBSS: re-encrypted iBSS")) {
+        fs::remove(patchedPath, ec);
+        fs::remove(outPath, ec);
+        return false;
+    }
+
     if (path.find("j33i") != std::string::npos || path.find("j33ap") != std::string::npos) {
         // Apple TV 3
         fs::remove(outPath, ec);
@@ -395,6 +408,12 @@ bool Patcher::patchiBEC(const std::string& path, const std::string& bootArgs,
                     toOut.c_str());
             return false;
         }
+        // POST-REPUBLISH GUARD -- see img3ValidateFile() in Patcher.cpp. Both
+        // iBECs get it: they are two separate republishes of the same input
+        // differing only in the baked -b string, and nothing guarantees a
+        // header defect lands on both.
+        const std::string stage = std::string("patchiBEC: re-encrypted ") + what + " iBEC";
+        if (!img3ValidateFile(toOut, stage.c_str())) return false;
         printf("patchiBEC: %s image baked with boot-args \"%s\"\n", what, args.c_str());
         return true;
     };
@@ -555,6 +574,21 @@ bool Patcher::patchKernel(const std::string& path, const std::string& productVer
         std::error_code szEc;
         fprintf(stderr, "patchKernel: [size] re-encrypted kernelcache = %llu bytes (outPath)\n",
                 (unsigned long long)fs::file_size(outPath, szEc));
+    }
+
+    // POST-REPUBLISH GUARD. This is the exact image, and the exact stage, that
+    // shipped a stale sigCheckArea and cost a hardware cycle to "Kernelcache
+    // image not valid" -- the kernelcache is the component that SHRANK when
+    // repacked, which is the only reason the defect surfaced here first rather
+    // than on the ramdisk, which carried it too. See img3ValidateFile() in
+    // Patcher.cpp. A failure here is fatal: publishing a kernelcache iBoot
+    // will reject only moves the failure to a DFU cycle on real hardware,
+    // where it presents as an exploit problem rather than a header problem.
+    if (!img3ValidateFile(outPath, "patchKernel: re-encrypted kernelcache")) {
+        std::error_code vEc;
+        fs::remove(decPath, vEc);
+        fs::remove(outPath, vEc);
+        return false;
     }
 
     std::error_code ec;

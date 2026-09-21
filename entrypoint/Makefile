@@ -310,7 +310,7 @@ elif [ "$$xt" = auto ]; then \
 		echo "    * put Xcode_6.4.dmg (AppleTV3,1 / AppleTV3,2) and Xcode_5.1.1.dmg" >&2; \
 		echo "      (AppleTV2,1) in ~/Downloads. Both come from" >&2; \
 		echo "      https://download.developer.apple.com/Developer_Tools/ and need an" >&2; \
-		echo "      authenticated Apple ID — an anonymous fetch returns a 257-byte" >&2; \
+		echo "      authenticated Apple ID — an anonymous fetch returns an HTML" >&2; \
 		echo "      unauthorized page with HTTP 200, so check the payload, not the status." >&2; \
 		echo "    * make XCODE_SEARCH_DIR=<dir>   to look somewhere else" >&2; \
 		echo "    * make XCODE_TOOLCHAIN=<dir>    to name a toolchain outright" >&2; \

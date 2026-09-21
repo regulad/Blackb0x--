@@ -199,10 +199,22 @@ same requirement, not a fallback worth listing separately.)
 unattended.** Verified: an anonymous request to that URL 302s to
 `developer.apple.com/unauthorized/` and returns that page's HTML with a 200,
 which means a naive `curl -f` or a `%{http_code}` check *succeeds* while
-downloading 257 bytes of redirect and then an error page instead of a 2.6 GB
-disk image. Any script that fetches this must verify the payload (size and
-content type), never the status code. CI cannot fetch it at all without
-credentials.
+downloading an error page instead of a multi-gigabyte disk image. Any script
+that fetches this must verify the payload, never the status code. CI cannot
+fetch it at all without credentials.
+
+Two refinements, both measured, because the obvious checks do not work:
+
+- **Do not size-check against a fixed number.** An earlier revision of this
+  file said the unauthorized page was 257 bytes. It is now ~83 KB. It is a
+  normal web page and Apple may change it again, so any threshold written down
+  here is a latent false pass. Check the content type, or that the payload
+  begins like a DMG, not that it is "bigger than N".
+- **Do not probe the URL to test whether a version exists.** A deliberately
+  invented, nonexistent path returns the same unauthorized page, so an
+  anonymous probe discriminates nothing at all — a real version and a fictional
+  one are indistinguishable without credentials. Use Apple's release index to
+  establish what exists.
 
 So availability is not the argument against using an SDK — it is obtainable,
 officially, today. The arguments are the two above it: an SDK does not mitigate
@@ -277,11 +289,14 @@ Apple still serves both, officially, today. **An authenticated Apple ID
 session is required, so neither can be fetched unattended.** An anonymous
 request 302s to `developer.apple.com/unauthorized/` and returns that page's
 HTML **with a 200**, so a naive `curl -f` or a `%{http_code}` check *succeeds*
-while writing 257 bytes of error page instead of a multi-gigabyte disk image.
+while writing an error page instead of a multi-gigabyte disk image. Note the
+page is ~83 KB, not the 257 bytes an earlier revision of this file claimed, and
+it may change again — so do not write a size threshold down anywhere.
 
 **Verify the payload, not the status code**, and not a published hash either:
 
-- Check the size and that `file` calls it a disk image, not HTML.
+- Check that `file` calls it a disk image rather than HTML. (Size alone is a
+  weak test for the reason above; the type is the honest one.)
 - Check the Apple signature chain: `codesign -dvvv` on the mounted
   `Xcode.app` should report Apple's own authority chain.
 - Do **not** gate on a published SHA-1. Xcode 6.4's matches its published

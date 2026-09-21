@@ -72,6 +72,31 @@
 bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildID);
 
 // ---------------------------------------------------------------------------
+// IMG3 output guard -- re-runs iBoot's own validation predicate on what we wrote
+// ---------------------------------------------------------------------------
+//
+// img3ValidateFile() returns true only if `path` is an IMG3 that the real
+// bootloader will accept as well-formed; on failure it prints a full
+// diagnosis (file, predicate, actual vs expected) to stderr and returns
+// false, and the caller MUST fail the bake. img3FileHasMagic() is the cheap
+// 4-byte sniff, for callers that must tell "not an IMG3 at all" (a raw
+// payload) apart from "a malformed IMG3".
+//
+// The predicate, its provenance and why it exists are documented in full at
+// the definition in Patcher.cpp -- read that before changing either.
+//
+// Deliberately defined in Patcher.cpp, the crypto-free half of the split
+// described at the top of this header: it is pure <cstdio>/<cstdint> (20
+// header bytes plus a tag walk), links no xpwn and no GPL decrypt code, and
+// so is available to the authoring TUs (PatcherPatch.cpp, Img3Crypt.cpp) and
+// to the blackb0x jailbreak binary alike without putting a single new symbol
+// on blackb0x's link line. Putting it in an authoring-only TU instead would
+// have made the one check that decides whether an image can boot invisible to
+// the binary that actually sends images to the device.
+bool img3ValidateFile(const std::string& path, const char* context);
+bool img3FileHasMagic(const std::string& path);
+
+// ---------------------------------------------------------------------------
 // Boot-args. BAKED INTO iBEC, not set at runtime.
 // ---------------------------------------------------------------------------
 //

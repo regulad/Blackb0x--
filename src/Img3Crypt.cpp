@@ -31,6 +31,13 @@
 //
 #include "Img3Crypt.hpp"
 
+// img3ValidateFile()/img3FileHasMagic(): the post-republish guard. It lives in
+// Patcher.cpp -- the crypto-free TU compiled into BOTH binaries -- precisely
+// so that including it here adds nothing to anyone's link line; it is pure
+// <cstdio>/<cstdint> and pulls in no xpwn. See its definition for the
+// predicate and its provenance.
+#include "Patcher.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -156,4 +163,37 @@ void decrypt(char* input_path, char* ouput_path, char* ip_key, char* ip_iv, char
     free(inData);
     if (key) free(key);
     if (iv) free(iv);
+
+    // -----------------------------------------------------------------------
+    // POST-REPUBLISH GUARD
+    // -----------------------------------------------------------------------
+    // Every IMG3 this project publishes is written by the code above, so this
+    // is the one choke point that covers all of them -- PatcherPatch.cpp's
+    // patchiBSS()/patchiBEC()/patchKernel() and BakeRamdisk.cpp's ramdisk
+    // re-encrypt alike. Each of those also asserts explicitly on its own
+    // output (a guard is worth having twice; the caller can name the stage and
+    // stop the bake with its own message), but this one catches any FUTURE
+    // re-encrypt site for free, which matters because the field that shipped
+    // broken -- sigCheckArea, stale from the template -- was wrong on the
+    // RestoreRamDisk too and went unnoticed only because that image grew
+    // instead of shrinking. A guard scoped to kernelcaches would have missed
+    // it.
+    //
+    // The sniff first: decrypt()'s output is an IMG3 only on the re-wrap paths
+    // (a template was given). A plain decrypt writes a raw payload -- a
+    // kernelcache, a DMG, a raw iBSS -- and there is nothing here to check.
+    //
+    // On failure the output file is DELETED, not left in place. img3Reject()
+    // has already said everything on stderr; removing the file means every
+    // existing caller's exists()/file_size()/stat check turns this into a hard
+    // bake failure even where the caller predates this guard, and -- more to
+    // the point -- an image iBoot is known to reject can never survive into
+    // dist/ to be discovered on hardware later.
+    if (img3FileHasMagic(ouput_path)) {
+        if (!img3ValidateFile(ouput_path, "Img3Crypt::decrypt() re-encrypt output")) {
+            fprintf(stderr, "Img3Crypt: deleting the malformed image at %s so it cannot be published\n",
+                    ouput_path);
+            remove(ouput_path);
+        }
+    }
 }

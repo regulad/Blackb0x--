@@ -347,6 +347,36 @@ struct JailbreakTarget {
     const char* deviceModel;
     const char* buildID;
 };
+// OWNER'S POLICY, and it constrains what may be put in this table: the target
+// is EITHER each device's newest build OR 10B329a. Nothing in between.
+//
+// The reasoning is that intermediate builds buy nothing and cost real work.
+// Every distinct ProductVersion drags its own matched iPhoneOS SDK with it
+// (entrypoint links against the target firmware's own libSystem now -- see
+// entrypoint/Makefile's DEVICE -> XCODE_VERSION -> IOS_MIN chain), so each
+// extra target means another multi-gigabyte Xcode and another set of
+// verification runs. Splitting the difference to dodge a bug is also how you
+// end up debugging a configuration nobody has ever booted.
+//
+// The two sanctioned positions:
+//
+//   NEWEST (current)  AppleTV3,x -> 12H1006 (8.4.7), AppleTV2,1 -> 11D258
+//                     (7.1.2). Needs iPhoneOS 8.4 (Xcode 6.4) and 7.1 (Xcode
+//                     5.1.1); both are already downloaded. 8.4.x is also the
+//                     only line with a real untether.
+//
+//   FALLBACK          10B329a on ALL THREE devices -- it is 6.1.3 on every one
+//                     of them (confirmed per tuple against
+//                     misc/firmware_versions.txt, not assumed), so it collapses
+//                     to ONE SDK: iPhoneOS 6.1, from Xcode 4.6. That Xcode is
+//                     NOT currently downloaded; it is ~1.61 GiB and available
+//                     credential-free, the archive.org copy being bit-identical
+//                     to Apple's own (published SHA-1 matches). Falling back
+//                     also drops to the tethered persistence branch, since
+//                     6.1.3 is not 8.4.x.
+//
+// If you are here because a target is misbehaving, fix the bug or take the
+// fallback wholesale. Do not add a fourth row.
 const JailbreakTarget kJailbreakTargets[] = {
     // A1469 (Apple TV 3 rev A, the checkm8 target). 12H1006 is tvOS 8.4.7,
     // the last build Apple ever shipped it. Unencrypted boot chain.

@@ -31,4 +31,10 @@
 // decrypt() returns void and reports failure only by printing to stderr and
 // leaving a zero-byte output file (which the callers' emptiness checks catch)
 // -- see Img3Crypt.cpp for why.
+//
+// It also validates its own output: if the file it wrote is an IMG3 that
+// fails iBoot's well-formedness gate (img3ValidateFile(), Patcher.cpp), it
+// prints a full diagnosis and DELETES the output, so a malformed image can
+// never be published. Callers must still check the output exists and is
+// non-empty -- that check is now load-bearing for two failure modes, not one.
 void decrypt(char* input_path, char* output_path, char* ip_key, char* ip_iv, char* decrypt, char* template_path);

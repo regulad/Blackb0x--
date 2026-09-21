@@ -14,6 +14,8 @@
 // bake-firmware's already-encrypted dist/ output verbatim and does no
 // decryption at all. See PatcherPatch.cpp's header and docs/HISTORY.md.
 
+#include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +25,281 @@
 #include <vector>
 
 namespace fs = std::filesystem;
+
+// ---------------------------------------------------------------------------
+// img3ValidateFile() -- iBoot's own "is this image well-formed" gate, re-run
+// against every IMG3 this project writes
+// ---------------------------------------------------------------------------
+//
+// WHAT THIS IS. The five checks below are not a plausible-looking invariant
+// invented here. They are iBoot's, recovered by disassembling a real
+// AppleTV3,2 12H1006 iBEC: the gate at 0x9ff18288 runs, in this order,
+//
+//     len          >= 20                 (the root header must fit)
+//     magic        == '3gmI'
+//     sizeNoPack   <= len - 20           (the body fits in the file)
+//     sigCheckArea <= sizeNoPack         (the signed region fits in the body)
+//     sizeNoPack + 20 <= fullSize        (the header agrees with the body)
+//
+// and returns error 0x16 ("malformed") the moment one fails -- BEFORE any
+// signature, ticket or KBAG logic runs. That ordering is the whole reason
+// this matters: no iBoot32Patcher patch defeats a check that happens before
+// the checks iBoot32Patcher patches, and the device says nothing more useful
+// than a generic "<Component> image not valid".
+//
+// The 20-byte root header is
+//     char magic[4]; uint32 fullSize; uint32 sizeNoPack;
+//     uint32 sigCheckArea; char ident[4];
+// little-endian on disk, which is why the magic reads as '3gmI' and the
+// ident of a kernelcache reads as 'lnrk'. xpwn spells sigCheckArea
+// `shshOffset` and sizeNoPack `dataSize` (third_party/xpwn includes/xpwn/img3.h).
+//
+// THE SIXTH CHECK is ours, not iBoot's: walk the tag chain from offset 20 and
+// require it to terminate EXACTLY at 20 + sizeNoPack. A chain that overruns
+// or underruns means the root header and the body disagree about where the
+// body ends -- precisely the class of defect this guard exists for, caught
+// one layer earlier than iBoot would catch it.
+//
+// WHY IT EXISTS. A repacked 12H1006 kernelcache was rejected on hardware with
+// "Kernelcache image not valid". Cause: xpwn's writeImg3Root() only recomputed
+// sigCheckArea inside the branch that fires when an SHSH element is written,
+// so an UNSIGNED image (TYPE DATA SEPO, no SHSH) kept the value cloned from
+// the stock template -- which, once our payload came out 112 bytes smaller,
+// pointed past the end of our own file. Fixed in third_party/xpwn, but the
+// fix is not the point:
+//
+// THIS WAS THE THIRD DEFECT OF IDENTICAL CHARACTER in that one file in a
+// week (the DATA element's 16-alignment on the write side, then the same on
+// the read side, then this). Every one of them produced an artifact that was
+// internally self-consistent, that every check the pipeline made accepted,
+// and that was wrong. Checking bake-firmware's EXIT STATUS caught none of
+// them -- the bake genuinely succeeded; it succeeded at writing a bad file.
+// Each was found only by hexdumping the output after a failed hardware run,
+// at the cost of a DFU cycle apiece. An assertion that re-reads the bytes we
+// just wrote and re-runs the consumer's own predicate on them is the only
+// check in this pipeline that could have failed instead.
+//
+// So: cheap (20 bytes plus a tag walk, no dependencies), applied to EVERY
+// IMG3 republished anywhere in this project -- not just kernelcaches. The
+// RestoreRamDisk carried the identical stale field and survived only because
+// it happened to grow rather than shrink.
+
+namespace {
+
+uint32_t le32At(const unsigned char* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// The 4 bytes exactly as they sit in the file. Used for the magic, which is
+// the one field whose on-disk byte ORDER is what the check is about --
+// reversing it for readability there would print "expected '3gmI', got
+// '3gmI'".
+std::string fourCCRaw(const unsigned char* p) {
+    std::string s;
+    for (int i = 0; i < 4; ++i) {
+        unsigned char c = p[i];
+        s += (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+    }
+    return s;
+}
+
+// A 4-byte on-disk tag/ident printed the way people write it ('krnl', not
+// the 'lnrk' the little-endian bytes spell out).
+std::string fourCC(const unsigned char* p) {
+    std::string s;
+    for (int i = 3; i >= 0; --i) {
+        unsigned char c = p[i];
+        s += (c >= 0x20 && c < 0x7f) ? (char)c : '?';
+    }
+    return s;
+}
+
+// The one failure path. Loud on purpose: a warning buried in a bake log is a
+// silent death deferred to the next hardware run, which is exactly how the
+// three bugs above got as far as they did. Everything the next person needs
+// -- which file, which predicate, the actual value, the expected value, and
+// where the predicate came from -- is here, so nobody has to go back to a
+// disassembler to interpret it.
+bool img3Reject(const std::string& path, const char* context, const char* predicate, const char* actual,
+                const char* expected) {
+    fprintf(stderr,
+            "\n"
+            "*** IMG3 VALIDATION FAILED -- refusing to publish this image ***\n"
+            "    file:      %s\n"
+            "    stage:     %s\n"
+            "    predicate: %s\n"
+            "    actual:    %s\n"
+            "    expected:  %s\n"
+            "\n"
+            "    This is iBoot's OWN img3 gate, recovered by disassembling a real\n"
+            "    AppleTV3,2 12H1006 iBEC (the check at 0x9ff18288). iBoot returns error\n"
+            "    0x16 (malformed) here, before any signature, ticket or KBAG logic runs,\n"
+            "    so no iBoot32Patcher patch can rescue this image and the device would\n"
+            "    report only a generic \"image not valid\". The bake \"succeeding\" is not\n"
+            "    evidence of anything -- see img3ValidateFile() in src/Patcher.cpp.\n"
+            "\n",
+            path.c_str(), context, predicate, actual, expected);
+    return false;
+}
+
+} // namespace
+
+bool img3FileHasMagic(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    unsigned char magic[4] = {0, 0, 0, 0};
+    const bool read4 = fread(magic, 1, sizeof(magic), f) == sizeof(magic);
+    fclose(f);
+    return read4 && memcmp(magic, "3gmI", 4) == 0;
+}
+
+bool img3ValidateFile(const std::string& path, const char* context) {
+    if (!context) context = "(unspecified)";
+
+    char actual[256];
+    char expected[256];
+
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) {
+        snprintf(actual, sizeof(actual), "cannot open the file (%s)", strerror(errno));
+        return img3Reject(path, context, "the image exists and is readable", actual,
+                          "a file written by this step");
+    }
+
+    if (fseeko(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        snprintf(actual, sizeof(actual), "cannot seek the file (%s)", strerror(errno));
+        return img3Reject(path, context, "the image is a seekable regular file", actual, "a regular file");
+    }
+    const off_t lenOff = ftello(f);
+    if (lenOff < 0) {
+        fclose(f);
+        return img3Reject(path, context, "the image has a knowable length", "ftello() failed",
+                          "a regular file");
+    }
+    const uint64_t len = (uint64_t)lenOff;
+
+    // 1. len >= 20
+    if (len < 20) {
+        fclose(f);
+        snprintf(actual, sizeof(actual), "len = %llu bytes", (unsigned long long)len);
+        snprintf(expected, sizeof(expected), "len >= 20 (the img3 root header alone is 20 bytes)");
+        return img3Reject(path, context, "len >= 20", actual, expected);
+    }
+
+    unsigned char hdr[20];
+    if (fseeko(f, 0, SEEK_SET) != 0 || fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
+        fclose(f);
+        return img3Reject(path, context, "the 20-byte root header is readable", "short read", "20 bytes");
+    }
+
+    // 2. magic == '3gmI'
+    if (memcmp(hdr, "3gmI", 4) != 0) {
+        fclose(f);
+        snprintf(actual, sizeof(actual), "the first 4 bytes are '%s' (%02x %02x %02x %02x)",
+                 fourCCRaw(hdr).c_str(), hdr[0], hdr[1], hdr[2], hdr[3]);
+        snprintf(expected, sizeof(expected), "'3gmI' (33 67 6d 49) -- the file is not an IMG3 at all");
+        return img3Reject(path, context, "magic == '3gmI'", actual, expected);
+    }
+
+    const uint32_t fullSize = le32At(hdr + 4);
+    const uint32_t sizeNoPack = le32At(hdr + 8);
+    const uint32_t sigCheckArea = le32At(hdr + 12);
+    const std::string ident = fourCC(hdr + 16);
+
+    // 3. sizeNoPack <= len - 20
+    if ((uint64_t)sizeNoPack > len - 20) {
+        fclose(f);
+        snprintf(actual, sizeof(actual), "sizeNoPack = %u (0x%x)", sizeNoPack, sizeNoPack);
+        snprintf(expected, sizeof(expected), "<= len - 20 = %llu (0x%llx), len = %llu",
+                 (unsigned long long)(len - 20), (unsigned long long)(len - 20), (unsigned long long)len);
+        return img3Reject(path, context, "sizeNoPack <= len - 20", actual, expected);
+    }
+
+    // 4. sigCheckArea <= sizeNoPack -- the one that shipped. xpwn calls this
+    //    field shshOffset; it was left holding the stock template's value on
+    //    every unsigned image we repacked smaller than Apple's.
+    if (sigCheckArea > sizeNoPack) {
+        fclose(f);
+        snprintf(actual, sizeof(actual), "sigCheckArea = %u (0x%x) -- %llu bytes past the end of the body",
+                 sigCheckArea, sigCheckArea, (unsigned long long)((uint64_t)sigCheckArea - sizeNoPack));
+        snprintf(expected, sizeof(expected), "<= sizeNoPack = %u (0x%x); Apple ships unsigned img3s with the two equal",
+                 sizeNoPack, sizeNoPack);
+        return img3Reject(path, context, "sigCheckArea <= sizeNoPack", actual, expected);
+    }
+
+    // 5. sizeNoPack + 20 <= fullSize
+    if ((uint64_t)sizeNoPack + 20 > (uint64_t)fullSize) {
+        fclose(f);
+        snprintf(actual, sizeof(actual), "fullSize = %u (0x%x)", fullSize, fullSize);
+        snprintf(expected, sizeof(expected), ">= sizeNoPack + 20 = %llu (0x%llx)",
+                 (unsigned long long)((uint64_t)sizeNoPack + 20), (unsigned long long)((uint64_t)sizeNoPack + 20));
+        return img3Reject(path, context, "sizeNoPack + 20 <= fullSize", actual, expected);
+    }
+
+    // 6. OURS, not iBoot's: the tag chain must terminate exactly at the end of
+    //    the body the root header declares. Each element is a 12-byte header
+    //    (magic, total size, data size) followed by its data and any padding,
+    //    with the total size covering all three.
+    const uint64_t bodyEnd = 20 + (uint64_t)sizeNoPack;
+    uint64_t pos = 20;
+    std::string chain;
+    while (pos < bodyEnd) {
+        if (pos + 12 > len) {
+            fclose(f);
+            snprintf(actual, sizeof(actual), "a tag header at offset %llu runs past the end of the file (len = %llu)",
+                     (unsigned long long)pos, (unsigned long long)len);
+            snprintf(expected, sizeof(expected), "every tag header to lie inside the file; chain so far: %s",
+                     chain.empty() ? "(none)" : chain.c_str());
+            return img3Reject(path, context, "the tag chain stays inside the file", actual, expected);
+        }
+        unsigned char tag[12];
+        if (fseeko(f, (off_t)pos, SEEK_SET) != 0 || fread(tag, 1, sizeof(tag), f) != sizeof(tag)) {
+            fclose(f);
+            snprintf(actual, sizeof(actual), "short read of the tag header at offset %llu",
+                     (unsigned long long)pos);
+            return img3Reject(path, context, "every tag header is readable", actual, "12 readable bytes");
+        }
+        const std::string tagName = fourCC(tag);
+        const uint32_t tagTotal = le32At(tag + 4);
+        const uint32_t tagData = le32At(tag + 8);
+        if (!chain.empty()) chain += " ";
+        chain += tagName;
+
+        if (tagTotal < 12 || (uint64_t)tagTotal < 12 + (uint64_t)tagData) {
+            fclose(f);
+            snprintf(actual, sizeof(actual), "tag '%s' at offset %llu has size = %u but dataSize = %u",
+                     tagName.c_str(), (unsigned long long)pos, tagTotal, tagData);
+            snprintf(expected, sizeof(expected), "size >= 12 + dataSize (12-byte tag header + payload + padding)");
+            return img3Reject(path, context, "each tag's size covers its own header and data", actual, expected);
+        }
+        if (pos + (uint64_t)tagTotal > len) {
+            fclose(f);
+            snprintf(actual, sizeof(actual), "tag '%s' at offset %llu claims %u bytes, ending at %llu",
+                     tagName.c_str(), (unsigned long long)pos, tagTotal,
+                     (unsigned long long)(pos + tagTotal));
+            snprintf(expected, sizeof(expected), "to end at or before len = %llu", (unsigned long long)len);
+            return img3Reject(path, context, "the tag chain stays inside the file", actual, expected);
+        }
+        pos += tagTotal;
+    }
+    fclose(f);
+
+    if (pos != bodyEnd) {
+        snprintf(actual, sizeof(actual), "the tag chain ends at %llu (%s by %llu bytes); chain: %s",
+                 (unsigned long long)pos, (pos > bodyEnd) ? "overruns" : "underruns",
+                 (unsigned long long)(pos > bodyEnd ? pos - bodyEnd : bodyEnd - pos), chain.c_str());
+        snprintf(expected, sizeof(expected), "to end at 20 + sizeNoPack = %llu (sizeNoPack = %u)",
+                 (unsigned long long)bodyEnd, sizeNoPack);
+        return img3Reject(path, context, "the tag chain terminates exactly at 20 + sizeNoPack (ours, not iBoot's)",
+                          actual, expected);
+    }
+
+    printf("img3: %s OK (%s: ident '%s', len %llu, fullSize %u, sizeNoPack %u, sigCheckArea %u, tags: %s)\n",
+           fs::path(path).filename().string().c_str(), context, ident.c_str(), (unsigned long long)len, fullSize,
+           sizeNoPack, sigCheckArea, chain.c_str());
+    return true;
+}
 
 // See Patcher.hpp's own comment on why this is a free function, not a
 // Patcher method -- patchRamdisk() below is just its first caller.

@@ -182,8 +182,21 @@ IPHONEOS_SDK ?=
 # and __stack_chk_guard are both exported by both ramdisks, so it is not a
 # requirement — it just keeps the undefined-symbol closure as small as it can
 # be, which is the thing that has to hold at dyld load time.
+# THE BUILD STAMP IS NOT THE DIAGNOSTIC SWITCH THE NOTE BELOW FORBIDS. It gates
+# nothing and compiles the same code either way; it exists so that a line read
+# off a television can be matched to the commit that produced it. Every
+# hardware run so far has had to be correlated with a commit by memory, and
+# being one build behind has already cost a round of wrong conclusions.
+#
+# `git -C` so this is the entrypoint tree's commit no matter where make was
+# invoked from, `|| echo unknown` so a tarball with no .git still builds, and
+# the -dirty suffix because a stamp that cannot tell you it was built from
+# uncommitted edits is worse than none.
+BLACKB0X_COMMIT := $(shell git -C $(CURDIR) rev-parse HEAD 2>/dev/null || echo unknown)$(shell git -C $(CURDIR) diff --quiet HEAD -- 2>/dev/null || echo -dirty)
+
 CFLAGS := -arch armv7 -marm -fno-stack-protector -Wall -Wextra -O2 \
-          -miphoneos-version-min=$(IOS_MIN)
+          -miphoneos-version-min=$(IOS_MIN) \
+          -DBLACKB0X_COMMIT='"$(BLACKB0X_COMMIT)"'
 
 # -nostdlib is REQUIRED on the link: an SDK root has no crt1.o, so without it
 # ld fails with "library not found for -lSystem". It costs nothing — the

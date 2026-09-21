@@ -1331,6 +1331,48 @@ static void report_device_install(void) {
 }
 
 
+/* Defined below, next to the volume probes they belong with; declared here
+ * because the grouping function is placed with the header it prints rather
+ * than after everything it happens to call. */
+static void probe_writability(void);
+
+/* Stamped in by the Makefile from `git rev-parse HEAD`, with -dirty appended
+ * when the tree had uncommitted edits. The fallback exists so a build from a
+ * tree with no .git still compiles; it should never be what ships. */
+#ifndef BLACKB0X_COMMIT
+#define BLACKB0X_COMMIT "unknown"
+#endif
+
+/* EVERYTHING THAT IS NOT THE INSTALL ITSELF, UNDER ONE HEADER.
+ *
+ * These lines used to be interleaved with the install's own progress, which
+ * made a photograph of the television hard to read and — worse — hard to
+ * attribute. A run says what it found, but until now it did not say WHICH
+ * BUILD found it, and correlating a screenful of output with a commit by
+ * memory has already produced at least one wrong conclusion drawn from an
+ * older image than the one being discussed.
+ *
+ * So: one header carrying the commit this binary was built from, and every
+ * diagnostic underneath it. Install progress stays outside the block, because
+ * that is the part a user who is not debugging actually wants to see.
+ *
+ * Grouped here rather than at each mount because they must be readable as one
+ * block, and every one of them needs all three mounts anyway. */
+static void report_diagnostics(void) {
+    emit("DIAGNOSTIC INFO (%s):\n", BLACKB0X_COMMIT);
+    report_volume("data", MNT "/private/var");
+    report_path(MNT "/var/.blackb0x/install-done");
+    report_path(MNT "/var/mobile");
+    report_path(BLACKB0X_STATE_DIR);
+    report_path(BLACKB0X_STATE_DIR "/var");
+    report_path(MNT "/dev/disk0s1s1");
+    report_path("/blackb0x");
+    report_volume("ramdisk", "/");
+    probe_writability();
+    report_device_logs();
+    report_device_install();
+}
+
 /* WHICH VOLUME WILL ACCEPT A NEW FILE, AND WHICH WILL NOT.
  *
  * The install record failed with EPERM at /var/mobile/Media, so it was moved
@@ -1615,13 +1657,6 @@ int main(void) {
         return -1;
     }
     emit("User Filesystem mounted\n");
-    report_volume("data", MNT "/private/var");
-    report_path(MNT "/var/.blackb0x/install-done");
-    report_path(MNT "/var/mobile");
-    /* The system-partition side: where the record goes and where the staged
-     * /var payload will land. Both are on the volume that accepts writes. */
-    report_path(BLACKB0X_STATE_DIR);
-    report_path(BLACKB0X_STATE_DIR "/var");
 
     emit("Mounting devices...\n");
     if (mount("devfs", MNT "/dev", 0, NULL) != 0) {
@@ -1645,25 +1680,10 @@ int main(void) {
         return -1;
     }
     emit("Devices mounted\n");
-    report_path(MNT "/dev/disk0s1s1");
 
-    /* What we are about to install, before we try. A missing or empty
-     * overlay is the difference between the install path and the diagnostic
-     * one, and it has been diagnosed from the outside twice. */
-    report_path("/blackb0x");
-    report_volume("ramdisk", "/");
-
-    /* Before the merge, not after: if a volume will not take a new file, the
-     * merge is going to fail thousands of times and the reason is worth
-     * knowing in one line rather than inferring from the wreckage. */
-    probe_writability();
-
-    /* And before anything this run does can overwrite them, print what the
-     * PREVIOUS booted session left behind, then what that session actually
-     * had installed to work with. This is the only channel that exists for
-     * either — see report_device_logs() and report_device_install(). */
-    report_device_logs();
-    report_device_install();
+    /* Everything diagnostic, in one block, before the merge can overwrite any
+     * of what it reports. See report_diagnostics(). */
+    report_diagnostics();
 
     /* NO OVERLAY => SAY SO AND EXIT CLEANLY, WITHOUT REBOOTING.
      *

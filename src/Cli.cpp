@@ -814,12 +814,57 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
         fflush(stdout);
         std::error_code mkEc;
         fs::create_directories("dist", mkEc);
+
+        // Download into a SCRATCH directory and move the files over, rather
+        // than unpacking straight into dist/.
+        //
+        // `gh run download` has no --clobber/--force and REFUSES to run when
+        // any file it would write already exists -- it fails with "already
+        // exists" naming whichever component it hit first. Unpacking directly
+        // into dist/ therefore only works on a genuinely empty dist/, which is
+        // exactly the case that stopped being the common one when the presence
+        // test started requiring the diagnostic ramdisks: a dist/ from before
+        // they existed now correctly fails present(), reaches this download,
+        // and then collides with its own older files. The user's only recourse
+        // was `rm -rf dist`, which is not something this tool should make
+        // anyone do.
+        //
+        // Staging and moving is also simply more correct: the move is
+        // overwrite-by-default, so a re-fetch refreshes a partial or stale
+        // dist/ in place instead of demanding it be empty first.
+        const fs::path scratch = fs::path("dist") / ".fetch-tmp";
+        fs::remove_all(scratch, mkEc);
+        fs::create_directories(scratch, mkEc);
+
         // `gh run download` with no run id takes the most recent run that has
         // an artifact by this name, which is what the monthly refresh
         // produces. It unpacks the artifact's contents directly into -D, and
         // the artifact is the flat dist/ layout already, so no rearranging.
-        if (runForeground({"gh", "run", "download", "--repo", artifactRepo(), "-n", artifact, "-D", "dist"}) &&
-            present()) {
+        bool fetched = runForeground(
+            {"gh", "run", "download", "--repo", artifactRepo(), "-n", artifact, "-D", scratch.string()});
+
+        if (fetched) {
+            std::error_code moveEc;
+            for (const auto& entry : fs::directory_iterator(scratch, moveEc)) {
+                if (moveEc || !entry.is_regular_file()) continue;
+                const fs::path dest = fs::path("dist") / entry.path().filename();
+                // rename() first: same filesystem, atomic, cheap. It fails
+                // across devices, so fall back to a copy that overwrites.
+                std::error_code renameEc;
+                fs::rename(entry.path(), dest, renameEc);
+                if (renameEc) {
+                    std::error_code copyEc;
+                    fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing, copyEc);
+                    if (copyEc) {
+                        fprintf(stderr, "Could not place %s into dist/: %s\n",
+                                entry.path().filename().string().c_str(), copyEc.message().c_str());
+                    }
+                }
+            }
+        }
+        fs::remove_all(scratch, mkEc);
+
+        if (fetched && present()) {
             printf("Downloaded a complete suite for %s %s.\n", deviceModel.c_str(), buildID.c_str());
             return true;
         }

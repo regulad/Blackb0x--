@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs /usr/share/blackb0x/loaddaemons.sh once per boot. That script loads
+  every plist in /Library/LaunchDaemons and runs every script in /etc/rc.d,
+  because this build's launchd does neither -- see the script's own header for
+  the evidence, read off the real decrypted 12H1006 root filesystem.
+
+  IT LIVES IN /System/Library/LaunchDaemons AND THAT IS THE ENTIRE POINT.
+  That is the one directory the device's launchd actually scans (the binary
+  contains that string and does not contain /Library/LaunchDaemons at all), so
+  this is the only place a unit can sit and be certain to run. Putting it in
+  /Library would be circular: it would need itself to have already run.
+
+  WHY A GENERAL LOADER RATHER THAN MOVING ONE PLIST. sshd not starting was the
+  symptom, and the first fix was to ship openssh's plist into /System as well.
+  That worked for sshd and for nothing else. Five of the seven
+  LaunchDaemon-shipping packages in debcache/ -- cydia included -- install into
+  /Library/LaunchDaemons, and every one of them was equally dead on a tether
+  boot. Fixing the loader fixes the class; fixing the plist fixed one member
+  of it and would have had to be repeated for every package added later.
+
+  It also removes a divergence rather than adding one. The earlier attempt
+  overrode openssh's own plist to drop its socket activation, on the theory
+  that inetdCompatibility was vestigial here and that SockServiceName "ssh"
+  could not be resolved. Both turned out to be false: this launchd's binary
+  contains inetdCompatibility, SockServiceName, Sockets and "inetd-compatible
+  service with no sockets", and stock /etc/services is 677,972 bytes and
+  carries `ssh 22/tcp`. openssh's plist was never broken -- it was never
+  loaded. With that override gone, so are the `Replaces: openssh` and the hold
+  that existed only to protect it.
+
+  EXACTLY ONE ATTEMPT PER BOOT, and the keys that guarantee it are worth
+  spelling out because two of them are doing different jobs.
+
+    RunAtLoad        start it when launchd loads the directory.
+    KeepAlive false  do not respawn it when it exits, for any reason.
+    LaunchOnlyOnce   refuse to start it a second time within this boot, even
+                     if something explicitly asks -- a `launchctl start`, or
+                     this unit being loaded again by our own loop or by the
+                     untether's, both of which walk directories and load what
+                     they find.
+
+  KeepAlive alone would not cover the last case; LaunchOnlyOnce is the key
+  that makes a second *request* a no-op rather than a second run. It is
+  understood by this launchd -- the string is present in /sbin/launchd, along
+  with RunAtLoad, KeepAlive, ThrottleInterval and AbandonProcessGroup --
+  though no stock plist on the image uses it.
+
+  WHAT THE SINGLE ATTEMPT IS PROTECTING AGAINST: a boot where AMFI is still
+  enforcing. Everything this script touches is unsigned -- /bin/sh itself is
+  from the `bash` package -- so on such a boot the job cannot even exec, and
+  the correct behaviour is to fail once and stop rather than to keep trying
+  against a kernel that will keep refusing.
+
+  The case that looks like a loss is not one. If AMFI is enforcing when this
+  runs and the untether makes it permissive later in the same boot, we have
+  spent our one attempt for nothing -- but the untether's own loop does this
+  same work immediately after it wins, so the daemons still get loaded. There
+  is no boot on which giving up early costs anything.
+
+  AbandonProcessGroup is set for the same reason `orphan_commander` exists in
+  this ecosystem at all: the whole point of this job is to start things that
+  outlive it, and launchd would otherwise take the process group down when the
+  script exits.
+
+  It can take a while -- /etc/rc.d/daemonload waits on syslogd -- and nothing
+  waits on it, so that is fine. Both streams go to a real file on the system
+  partition, because the whole reason this bug survived so long is that the
+  one job that should have reported it sent stderr to /dev/null.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+      <string>xyz.regulad.blackb0x.loaddaemons</string>
+    <key>ProgramArguments</key>
+      <array>
+        <string>/bin/sh</string>
+        <string>/usr/share/blackb0x/loaddaemons.sh</string>
+      </array>
+    <key>RunAtLoad</key>
+      <true/>
+    <key>KeepAlive</key>
+      <false/>
+    <key>LaunchOnlyOnce</key>
+      <true/>
+    <key>AbandonProcessGroup</key>
+      <true/>
+    <key>UserName</key>
+      <string>root</string>
+    <key>StandardOutPath</key>
+      <string>/usr/share/blackb0x/loaddaemons.out.log</string>
+    <key>StandardErrorPath</key>
+      <string>/usr/share/blackb0x/loaddaemons.err.log</string>
+</dict>
+</plist>

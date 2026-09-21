@@ -345,9 +345,19 @@ listing that also holds unrelated payloads.
   AGENTS.md's "Install-time design" for what installs/runs it). No
   `com.openssh.sshd.plist` here anymore — the current design deliberately doesn't
   bootstrap an early sshd; the real `openssh` package's own LaunchDaemon
-  plist is the only one that ever starts sshd now, once `postinstall.sh`
-  installs it. The original disassembled binary did stage one — see "What
-  entrypoint installs" below for that historical record.
+  plist is the only one that ever starts sshd. The original disassembled
+  binary did stage one — see "What entrypoint installs" below for that
+  historical record.
+
+  Note that `openssh` is **bake-time preinstalled**, not installed by
+  `postinstall.sh`, so its plist is on the device from the first boot. It
+  ships to `/Library/LaunchDaemons`, which **this platform's launchd does not
+  scan** — verified against the decrypted stock root filesystem, where that
+  directory does not even exist. What loads it is
+  `xyz.regulad.blackb0x.loaddaemons`, a unit in `/System/Library/LaunchDaemons`
+  running `/usr/share/blackb0x/loaddaemons.sh`, which does on every boot what
+  the untether does only after a successful exploit. See `docs/HISTORY.md`,
+  "sshd never started because launchd does not scan `/Library/LaunchDaemons`".
 - `apt/joshtv.gpg.key` — **renamed from `pubkey.key`**: confirmed via
   `gpg --show-keys` to be JoshTV's own signing key (`uid: JoshTV
   <jtv@JoshTV.net>`) — the old name gave no hint which repo it signed for.

@@ -485,24 +485,25 @@ inline constexpr const char* kIBECTetherComponent = "iBECTether";
 } // namespace bootargs
 
 // ---------------------------------------------------------------------------
-// The two DIAGNOSTIC ramdisks -- dist/ component names
+// The DIAGNOSTIC ramdisks -- dist/ component names
 // ---------------------------------------------------------------------------
 //
 // Header-only and shared, exactly like `bootargs` above, because three
 // otherwise-disjoint binaries all have to agree on these spellings: the baker
 // writes them (BakeFirmware.cpp, gated behind --diagnostic-ramdisks), and
 // blackb0x reads them (Cli.cpp's takeBaked()-style lookup, selected by
-// --diag-ramdisk-repack / --diag-ramdisk-binary). A literal string in each
-// place would be three places to get wrong, and the failure mode is a flag
-// that silently finds nothing.
+// --diag-ramdisk-repack / --diag-ramdisk-binary / --diag-ramdisk-overlay). A
+// literal string in each place would be three places to get wrong, and the
+// failure mode is a flag that silently finds nothing.
 //
 // The names deliberately extend the real component name rather than replacing
 // it, so dist/ sorts them next to the image they are being compared against
 // and a plain `ls dist/ | grep RestoreRamDisk` shows the whole bisect:
 //
-//     dist/RestoreRamDisk-<device>_<build>.dmg            the real bake
-//     dist/RestoreRamDiskDiagRepack-<device>_<build>.dmg  opened + re-sealed
-//     dist/RestoreRamDiskDiagBinary-<device>_<build>.dmg  entrypoint, no overlay
+//     dist/RestoreRamDisk-<device>_<build>.dmg             the real bake
+//     dist/RestoreRamDiskDiagRepack-<device>_<build>.dmg   opened + re-sealed
+//     dist/RestoreRamDiskDiagBinary-<device>_<build>.dmg   entrypoint, no overlay
+//     dist/RestoreRamDiskDiagOverlay-<device>_<build>.dmg  overlay, no entrypoint
 //
 // What each one isolates, and the hardware observation that motivated them,
 // are in BakeRamdisk.hpp's RamdiskVariant. They are NOT listed in the
@@ -514,6 +515,7 @@ namespace diagramdisk {
 
 inline constexpr const char* kRepackComponent = "RestoreRamDiskDiagRepack";
 inline constexpr const char* kBinaryComponent = "RestoreRamDiskDiagBinary";
+inline constexpr const char* kOverlayComponent = "RestoreRamDiskDiagOverlay";
 
 } // namespace diagramdisk
 
@@ -612,12 +614,13 @@ public:
     // booted. The stockRecovery parameter is now vestigial.
     bool useStockRamdisk(const std::string& path, bool stockRecovery = false);
 
-    // --diag-ramdisk-repack / --diag-ramdisk-binary (Cli.hpp's CliOptions):
-    // sends one of the two DIAGNOSTIC ramdisks bake-firmware produces under
-    // --diagnostic-ramdisks, instead of patchRamdisk()'s usual
-    // dist/RestoreRamDisk-<tuple>.dmg lookup. `component` is one of
-    // diagramdisk::kRepackComponent / kBinaryComponent above; what each
-    // isolates is documented there and in BakeRamdisk.hpp's RamdiskVariant.
+    // --diag-ramdisk-repack / --diag-ramdisk-binary / --diag-ramdisk-overlay
+    // (Cli.hpp's CliOptions): sends one of the DIAGNOSTIC ramdisks
+    // bake-firmware produces under --diagnostic-ramdisks, instead of
+    // patchRamdisk()'s usual dist/RestoreRamDisk-<tuple>.dmg lookup.
+    // `component` is one of diagramdisk::kRepackComponent / kBinaryComponent /
+    // kOverlayComponent above; what each isolates is documented there and in
+    // BakeRamdisk.hpp's RamdiskVariant.
     //
     // Same shape as patchRamdisk(): this takes no path, because there is
     // nothing to download -- the image is a baked dist/ entry keyed off

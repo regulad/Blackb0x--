@@ -15,10 +15,10 @@
 #include <string>
 
 // ---------------------------------------------------------------------------
-// WHICH RAMDISK THIS BAKE PRODUCES -- the three-way boot bisect
+// WHICH RAMDISK THIS BAKE PRODUCES -- the boot bisect
 // ---------------------------------------------------------------------------
 //
-// There are three ways to assemble an image out of one pristine Apple
+// There are four ways to assemble an image out of one pristine Apple
 // RestoreRamdisk, and they exist to take apart ONE failure observed on real
 // AppleTV3,2 hardware:
 //
@@ -34,7 +34,7 @@
 // the kernel had mounted our image and run launchd AT ALL, the logo would
 // appear whether or not our own binary was ever accepted. No logo means the
 // failure is BEFORE launchd: the kernel is not successfully rooting off our
-// image. Two candidate causes, and today nothing distinguishes them:
+// image. Two candidate causes:
 //
 //   * SIZE. Stock 12H1006 is ~16.6 MB raw; ours is ~44.3 MB. The 64 MiB
 //     ceiling enforced at the end of bakeRamdisk() came from a real device
@@ -46,9 +46,8 @@
 //     detach -> resize to minimum -> re-seal is a lot of steps, any one of
 //     which could produce an image that no longer mounts.
 //
-// So two extra images are baked alongside the real one, and the four points
-// together identify which. Each is a normal dist/ entry, sent by its own
-// blackb0x flag (see CliOptions in Cli.hpp):
+// So extra images are baked alongside the real one. Each is a normal dist/
+// entry, sent by its own blackb0x flag (see CliOptions in Cli.hpp):
 //
 //   * DiagRepack -- THE PRISTINE RAMDISK, OPENED AND RE-SEALED WITH NOTHING
 //     ADDED. Same decrypt, same attach, same resize-up/resize-to-minimum
@@ -61,14 +60,47 @@
 //     stock instead of ~28 MB over. This separates the overlay's SIZE from
 //     the install mechanism: if this boots and Full does not, size is the
 //     answer; if neither boots but DiagRepack does, the install mechanism is.
+//   * DiagOverlay -- THE MIRROR OF DiagBinary, and the newest of the three.
+//     The FULL /blackb0x overlay and our /mnt, and NO entrypoint binary and
+//     NO LaunchDaemon plist, so nothing on the image ever tries to launch our
+//     code. See "What the hardware actually said" below for why this cut is
+//     the one that matters now.
 //
-// Both diagnostic images go through the same 64 MiB ceiling and the same IMG3
-// validation guard (img3ValidateFile(), Patcher.cpp) as everything else --
-// they are ordinary bake output that happens to be missing content, not a
+// WHAT THE HARDWARE ACTUALLY SAID -- real AppleTV3,2, 12H1006, all four
+// images sent with blackb0x:
+//
+//     stock        Apple logo, stays
+//     DiagRepack   Apple logo + progress bar, stays
+//     DiagBinary   logo, then REBOOTS into iBoot Recovery (irecovery -q)
+//     Full         NO LOGO AT ALL
+//
+// DiagRepack booting clears the rebuild machinery outright: decrypt, resize,
+// attach, detach, resize-to-minimum and re-seal all produce a mountable,
+// bootable image. The bottom two rows are DIFFERENT failures, and that is the
+// point. Full dies before launchd ever draws anything. DiagBinary gets all the
+// way to launchd, gets a logo, and only THEN reboots -- and the shipped
+// DiagBinary binary was verified to contain entrypoint's current "no overlay
+// to copy, dying peacefully" early exit, so that reboot is NOT our own code
+// calling reboot(2). Something else reboots when our job is merely present.
+//
+// DiagOverlay is what separates those two. It carries the ~26 MB of bulk with
+// none of the job:
+//
+//   * If it BOOTS AND STAYS (logo, no reboot): the overlay and its size are
+//     fine, and the entire problem is our job being spawned -- code signing,
+//     or something the binary does. Full's "no logo" would then be caused by
+//     the job, not the bulk.
+//   * If it DOES NOT BOOT: the overlay or the size genuinely stops the kernel
+//     rooting off the image, independent of our binary, and the two failures
+//     have different causes that happen to coexist.
+//
+// Every diagnostic image goes through the same 64 MiB ceiling and the same
+// IMG3 validation guard (img3ValidateFile(), Patcher.cpp) as everything else
+// -- they are ordinary bake output that happens to be missing content, not a
 // side path with its own rules.
 //
 // Producing them is gated behind bake-firmware's --diagnostic-ramdisks
-// (BakeFirmware.cpp), because two extra bakes cost real time on every run.
+// (BakeFirmware.cpp), because the extra bakes cost real time on every run.
 enum class RamdiskVariant {
     // The real thing: entrypoint + plist + /mnt + the whole /blackb0x overlay.
     Full,
@@ -76,6 +108,8 @@ enum class RamdiskVariant {
     DiagRepack,
     // entrypoint + plist + /mnt, no overlay.
     DiagBinary,
+    // /mnt + the whole /blackb0x overlay, no entrypoint and no plist.
+    DiagOverlay,
 };
 
 // `path` is the downloaded, still-encrypted RestoreRamdisk; `key`/`iv` are
@@ -103,12 +137,13 @@ enum class RamdiskVariant {
 // with DEBUG_RAMDISK_LIMIT_MIB=-1 — that is a real success (`true` is
 // returned) with something worth surfacing in a batch summary. See the limit's
 // own comment in BakeRamdisk.cpp for the knob and why 64 MiB is not arbitrary.
-// `variant` selects which of the three images this call produces (see
+// `variant` selects which of the four images this call produces (see
 // RamdiskVariant above); it defaults to the real one, so the diagnostics are
 // always an explicit request and never something a caller gets by accident.
-// `entrypointBinaryPath` is unused for RamdiskVariant::DiagRepack, which
-// installs nothing -- it is still required, so one caller can loop over all
-// three variants without special-casing the arguments.
+// `entrypointBinaryPath` is unused for RamdiskVariant::DiagRepack and
+// ::DiagOverlay, neither of which installs our binary -- it is still
+// required, so one caller can loop over every variant without special-casing
+// the arguments.
 bool bakeRamdisk(const std::string& path, const std::string& key, const std::string& iv,
                   const std::string& productVersion, const std::string& outputPath,
                   const std::string& entrypointBinaryPath, bool& outSizeWarning,

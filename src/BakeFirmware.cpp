@@ -619,12 +619,12 @@ static TargetResult bakeBootchainForked(const std::string& device, const std::st
 // network call with no caching of its own. Without this, every tuple for the
 // same model would re-fetch and get the identical answer.
 //
-// `diagnostics` adds the two DIAGNOSTIC images to what this target produces
+// `diagnostics` adds the three DIAGNOSTIC images to what this target produces
 // (bake-firmware's --diagnostic-ramdisks). They are baked from the same
 // downloaded, decrypted source by the same bakeRamdisk() call with a different
 // RamdiskVariant -- see BakeRamdisk.hpp for what each isolates and for the
-// hardware observation that makes the three-way comparison worth its cost.
-// Off by default because it triples this target's ramdisk work.
+// hardware observations that make the comparison worth its cost.
+// Off by default because it quadruples this target's ramdisk work.
 static RamdiskOutcome bakeRamdiskForTarget(const std::string& device, const std::string& buildID,
                                             const std::string& entrypointBinaryPath, bool force,
                                             bool diagnostics,
@@ -652,6 +652,14 @@ static RamdiskOutcome bakeRamdiskForTarget(const std::string& device, const std:
         planned.push_back({RamdiskVariant::DiagBinary,
                            "dist/" + std::string(diagramdisk::kBinaryComponent) + tupleSuffix,
                            "diag binary"});
+        // Last of the four, and the most expensive of the diagnostics: it
+        // stages the whole /blackb0x overlay, so it pays the same debcache
+        // copy and afsctool pass the real bake does. Ordered after the cheap
+        // ones deliberately -- a run that dies partway still leaves the real
+        // image plus the two images that cost almost nothing to produce.
+        planned.push_back({RamdiskVariant::DiagOverlay,
+                           "dist/" + std::string(diagramdisk::kOverlayComponent) + tupleSuffix,
+                           "diag overlay"});
     }
 
     // Existence is the whole check -- see --force in this file's header for
@@ -835,7 +843,7 @@ static void usage() {
             "                     [--only bootchain|ramdisk] [--bootchain-out <dir>]\n"
             "                     [--force] [--stop-early] [--diagnostic-ramdisks]\n"
             "\n"
-            "  --diagnostic-ramdisks  Also bake the two DIAGNOSTIC ramdisks alongside the\n"
+            "  --diagnostic-ramdisks  Also bake the three DIAGNOSTIC ramdisks alongside the\n"
             "                         real one, for the boot bisect described in\n"
             "                         src/BakeRamdisk.hpp's RamdiskVariant:\n"
             "                           RestoreRamDiskDiagRepack-<tuple>.dmg -- Apple's\n"
@@ -846,9 +854,16 @@ static void usage() {
             "                             its LaunchDaemon plist and /mnt, but no /blackb0x\n"
             "                             overlay. Isolates the overlay's SIZE from the\n"
             "                             install mechanism.\n"
-            "                         Off by default: it triples the ramdisk work, which is\n"
-            "                         the slow half of a bake. blackb0x sends them with\n"
-            "                         --diag-ramdisk-repack / --diag-ramdisk-binary.\n");
+            "                           RestoreRamDiskDiagOverlay-<tuple>.dmg -- the mirror\n"
+            "                             of the one above: the whole /blackb0x overlay and\n"
+            "                             /mnt, but NO entrypoint and NO plist, so nothing\n"
+            "                             ever launches our code. Isolates the overlay's\n"
+            "                             bulk from our job being spawned at all. Within a\n"
+            "                             few tens of KB of the real image.\n"
+            "                         Off by default: it quadruples the ramdisk work, which\n"
+            "                         is the slow half of a bake. blackb0x sends them with\n"
+            "                         --diag-ramdisk-repack / --diag-ramdisk-binary /\n"
+            "                         --diag-ramdisk-overlay.\n");
 }
 
 int main(int argc, char** argv) {
@@ -868,8 +883,8 @@ int main(int argc, char** argv) {
             stopEarly = true;
         } else if (strcmp(argv[i], "--diagnostic-ramdisks") == 0) {
             // See usage() above and BakeRamdisk.hpp's RamdiskVariant. Takes no
-            // value: the two images answer one question between them and there
-            // has never been a reason to ask for only half of it.
+            // value: the images answer one question between them and there has
+            // never been a reason to ask for only part of it.
             diagnosticRamdisks = true;
         } else if (strcmp(argv[i], "--device") == 0) {
             if (i + 1 >= argc) {
@@ -954,8 +969,9 @@ int main(int argc, char** argv) {
                             : doBootchain           ? "bootchain only"
                                                     : "ramdisk only");
     if (diagnosticRamdisks && doRamdisk) {
-        printf("--diagnostic-ramdisks: three ramdisks per tuple (real, repack-only, entrypoint-only).\n"
-               "  This roughly triples the ramdisk half's runtime. See BakeRamdisk.hpp's RamdiskVariant.\n");
+        printf("--diagnostic-ramdisks: four ramdisks per tuple (real, repack-only, entrypoint-only,\n"
+               "  overlay-only). This roughly quadruples the ramdisk half's runtime. See\n"
+               "  BakeRamdisk.hpp's RamdiskVariant.\n");
     } else if (diagnosticRamdisks) {
         // Not an error: --only bootchain is the fast patch-iteration loop and
         // combining the two is a harmless leftover in a shell history. Saying
@@ -1201,8 +1217,11 @@ int main(int argc, char** argv) {
         if (diagnosticRamdisks) {
             printf("Diagnostic ramdisks: dist/%s-<device>_<buildID>.dmg (repack only, nothing added)\n"
                    "                     dist/%s-<device>_<buildID>.dmg (entrypoint, no /blackb0x)\n"
-                   "  Send them with blackb0x --diag-ramdisk-repack / --diag-ramdisk-binary.\n",
-                   diagramdisk::kRepackComponent, diagramdisk::kBinaryComponent);
+                   "                     dist/%s-<device>_<buildID>.dmg (/blackb0x, no entrypoint)\n"
+                   "  Send them with blackb0x --diag-ramdisk-repack / --diag-ramdisk-binary /\n"
+                   "  --diag-ramdisk-overlay.\n",
+                   diagramdisk::kRepackComponent, diagramdisk::kBinaryComponent,
+                   diagramdisk::kOverlayComponent);
         }
     }
 

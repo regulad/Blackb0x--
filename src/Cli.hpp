@@ -63,7 +63,8 @@ struct CliOptions {
     //
     // Requires a suite baked with `bake-firmware --diagnostic-ramdisks`; CI
     // always passes it, so a downloaded artifact has them. Mutually exclusive
-    // with --diag-ramdisk-binary, --stock-ramdisk and the other ramdisk-path
+    // with --diag-ramdisk-binary, --diag-ramdisk-overlay, --stock-ramdisk and
+    // the other ramdisk-path
     // diagnostics (parseCliOptions() refuses the combination) -- each names a
     // different image for the same slot, and silently letting one win would
     // make the bisect report the wrong answer. NOT a jailbreak: this image has
@@ -92,6 +93,47 @@ struct CliOptions {
     // a perfect boot installs nothing -- a device that reaches the Apple logo
     // and reboots is this flag SUCCEEDING.
     bool diagRamdiskBinary = false;
+    // DIAGNOSTIC: send dist/RestoreRamDiskDiagOverlay-<tuple>.dmg -- the FULL
+    // /blackb0x overlay and our /mnt mountpoint, and NO entrypoint binary and
+    // NO LaunchDaemon plist. The exact mirror of --diag-ramdisk-binary: that
+    // one is our job without the bulk, this one is the bulk without our job.
+    // Nothing on this image can ever try to launch our code, because there is
+    // no code on it and nothing referencing any. It comes out within a few
+    // tens of KB of the real bake (it skips only the ~52 KB binary and its
+    // ~700-byte plist), which is what makes the comparison against the real
+    // image meaningful rather than approximate.
+    //
+    // WHY IT EXISTS. Real AppleTV3,2, 12H1006, all four images sent with
+    // blackb0x:
+    //
+    //     stock        Apple logo, stays
+    //     --diag-ramdisk-repack   Apple logo + progress bar, stays
+    //     --diag-ramdisk-binary   logo, then REBOOTS into iBoot Recovery
+    //                             (confirmed with irecovery -q)
+    //     the real bake           NO LOGO AT ALL
+    //
+    // The bottom two are DIFFERENT failures. The real bake dies before launchd
+    // ever draws anything. The binary image gets all the way to launchd, gets a
+    // logo, and only then reboots -- and the shipped --diag-ramdisk-binary
+    // image was verified to carry entrypoint's current "no overlay to copy,
+    // dying peacefully" early exit, so that reboot is NOT our code calling
+    // reboot(2). Something else reboots when our job is merely present.
+    //
+    // WHAT IT ISOLATES: whether the ~26 MB of overlay, or the spawning of our
+    // job, is what kills the real bake. There is no third reading:
+    //   * BOOTS AND STAYS (logo, no reboot) -> the overlay and its size are
+    //     both fine, and the entire problem is our job being spawned: code
+    //     signing, or something the binary itself does. The real bake's "no
+    //     logo" would then be caused by the job, not the bulk.
+    //   * DOES NOT BOOT -> the overlay or the size genuinely stops the kernel
+    //     rooting off the image, independent of our binary, and the two
+    //     failures above have different causes that happen to coexist.
+    //
+    // Same requirements and same exclusivity as --diag-ramdisk-repack above.
+    // NOT a jailbreak: there is no entrypoint on this image at all, so nothing
+    // ever reads /blackb0x and nothing is ever installed -- a device that
+    // reaches the Apple logo and SITS THERE is this flag succeeding.
+    bool diagRamdiskOverlay = false;
     // Sends the stock iBSS/iBEC exactly as downloaded from Apple instead
     // of blackb0x's own patched versions -- checkm8/the pwntool still runs
     // first (SecureROM's own signature check still needs bypassing to

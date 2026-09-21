@@ -527,10 +527,10 @@ bool Patcher::useStockRamdisk(const std::string& path, bool /*stockRecovery*/) {
 }
 
 // See Patcher.hpp's own comment, and BakeRamdisk.hpp's RamdiskVariant for what
-// each of the two images actually isolates. Sent exactly like the real baked
-// ramdisk -- still encrypted, still img3-wrapped, straight out of dist/ -- so
-// the ONLY difference between this and a normal jailbreak run is which of the
-// three images the kernel is handed. That is what makes the comparison mean
+// each of the diagnostic images actually isolates. Sent exactly like the real
+// baked ramdisk -- still encrypted, still img3-wrapped, straight out of dist/
+// -- so the ONLY difference between this and a normal jailbreak run is which
+// image the kernel is handed. That is what makes the comparison mean
 // something: everything else in the chain (checkm8, iBSS, iBEC, boot-args,
 // kernelcache, DeviceTree, RestoreLogo) is bit-for-bit the same run.
 bool Patcher::useDiagnosticRamdisk(const std::string& component) {
@@ -545,7 +545,7 @@ bool Patcher::useDiagnosticRamdisk(const std::string& component) {
         // which says anything about the diagnostics.
         fprintf(stderr,
                 "blackb0x: PANIC: no diagnostic ramdisk for %s %s (%s doesn't exist).\n"
-                "The diagnostic images are NOT baked by default -- they cost two extra ramdisk\n"
+                "The diagnostic images are NOT baked by default -- they cost three extra ramdisk\n"
                 "bakes per tuple. Produce them with:\n"
                 "  sudo ./build/bake-firmware --only ramdisk --diagnostic-ramdisks \\\n"
                 "                             --device %s --build %s\n"

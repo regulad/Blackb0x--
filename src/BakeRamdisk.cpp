@@ -3213,7 +3213,7 @@ static bool verifyEntrypointRuntimeClosure(const std::string& mountpoint,
 // and does not apply to Apple's own hdiutil -- which is a large part of why
 // this project is macOS-only.
 //
-// THE TWO DIAGNOSTIC VARIANTS RUN THROUGH THIS EXACT FUNCTION, and that is
+// THE DIAGNOSTIC VARIANTS RUN THROUGH THIS EXACT FUNCTION, and that is
 // the entire point of them -- see RamdiskVariant in BakeRamdisk.hpp for the
 // hardware evidence that motivated the bisect. They are not a parallel
 // implementation and must never become one: the same decrypt, the same
@@ -3221,8 +3221,10 @@ static bool verifyEntrypointRuntimeClosure(const std::string& mountpoint,
 // `hdiutil attach -owners on` with -imagekey diskimage-class=CRawDiskImage,
 // the same detach, the same `resize -size min`, the same re-encrypt through
 // decrypt() with the original as IMG3 template, the same img3ValidateFile()
-// guard and the same 64 MiB ceiling. Only three blocks below are skipped, and
-// each says so by name. If a future change to this function forgets to apply
+// guard and the same 64 MiB ceiling. Only a handful of blocks below are
+// skipped, and each says so by name (the overlay staging, the overlay copy,
+// the entrypoint install, the closure verification and /mnt). If a future
+// change to this function forgets to apply
 // to the diagnostics, the diagnostics stop answering the question they exist
 // to answer -- so prefer a `if (variant == ...)` around the few lines that
 // differ over any arrangement that forks the flow.
@@ -3232,18 +3234,27 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
                   RamdiskVariant variant) {
     outSizeWarning = false;
 
-    // The two things a variant actually changes, named once here so every
+    // The three things a variant actually changes, named once here so every
     // site below reads as a statement about what is on the image rather than
     // as an enum comparison.
     //
-    //   Full        stageOverlay=1  installOurBinary=1
-    //   DiagBinary  stageOverlay=0  installOurBinary=1
-    //   DiagRepack  stageOverlay=0  installOurBinary=0
-    const bool stageOverlay = (variant == RamdiskVariant::Full);
-    const bool installOurBinary = (variant != RamdiskVariant::DiagRepack);
-    const char* variantName = variant == RamdiskVariant::Full         ? "full"
-                              : variant == RamdiskVariant::DiagRepack ? "diagnostic: repack only"
-                                                                      : "diagnostic: entrypoint, no overlay";
+    //   Full         stageOverlay=1  installOurBinary=1  createMountpoint=1
+    //   DiagBinary   stageOverlay=0  installOurBinary=1  createMountpoint=1
+    //   DiagOverlay  stageOverlay=1  installOurBinary=0  createMountpoint=1
+    //   DiagRepack   stageOverlay=0  installOurBinary=0  createMountpoint=0
+    //
+    // /mnt used to ride along with installOurBinary, which was right while the
+    // only image without our binary was the one with nothing on it at all.
+    // DiagOverlay stages the whole overlay WITHOUT our job, so it needs its own
+    // flag: it must match the real bake byte for byte in everything except the
+    // binary and the plist, and Apple's tree has no /mnt of its own.
+    const bool stageOverlay = (variant == RamdiskVariant::Full || variant == RamdiskVariant::DiagOverlay);
+    const bool installOurBinary = (variant == RamdiskVariant::Full || variant == RamdiskVariant::DiagBinary);
+    const bool createMountpoint = (variant != RamdiskVariant::DiagRepack);
+    const char* variantName = variant == RamdiskVariant::Full          ? "full"
+                              : variant == RamdiskVariant::DiagRepack  ? "diagnostic: repack only"
+                              : variant == RamdiskVariant::DiagBinary  ? "diagnostic: entrypoint, no overlay"
+                                                                       : "diagnostic: overlay, no entrypoint";
 
     // Resolved here, at the very top, even though it is not used until the
     // finished image is measured at the end of this function. A bake takes
@@ -3502,14 +3513,15 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // ---------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // STAGE /blackb0x -- THE ONLY THING THE DIAGNOSTIC VARIANTS SKIP HERE.
+    // STAGE /blackb0x -- SKIPPED BY DiagRepack AND DiagBinary.
     // ------------------------------------------------------------------
-    // DiagRepack and DiagBinary both leave payloadSize at 0 and never create
-    // a staging directory, so nothing is compressed, nothing is measured and
-    // nothing is copied onto the volume later. Everything else in this
-    // function still runs, unchanged, on all three variants -- see
-    // RamdiskVariant in BakeRamdisk.hpp for why that identity is the whole
-    // value of the diagnostics.
+    // Those two leave payloadSize at 0 and never create a staging directory,
+    // so nothing is compressed, nothing is measured and nothing is copied onto
+    // the volume later. DiagOverlay runs this block in full, exactly as the
+    // real bake does -- carrying the overlay with none of our job is the whole
+    // content of that variant. Everything else in this function still runs,
+    // unchanged, on all four variants -- see RamdiskVariant in BakeRamdisk.hpp
+    // for why that identity is the whole value of the diagnostics.
     std::string blackb0xStagingDir;
     uint64_t payloadSize = 0;
     if (stageOverlay) {
@@ -3600,7 +3612,10 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // image is the pristine volume opened and re-sealed, so the only growth it
     // asks for is the margin below (and `resize -size min` gives that back
     // before the re-encrypt). DiagBinary counts it exactly as the real bake
-    // does -- it installs exactly the same two files.
+    // does -- it installs exactly the same two files. Zero for DiagOverlay too,
+    // which writes neither of them; that image therefore comes out ~52 KB under
+    // the real bake, and "the full bake minus our job, and nothing else" is
+    // precisely what makes that comparison mean something.
     uint64_t entrypointUnitSize = 0;
     if (installOurBinary) {
         std::error_code epEc;
@@ -3660,9 +3675,17 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // SKIPPED ENTIRELY FOR RamdiskVariant::DiagRepack, and that is what makes
     // that image mean something: it leaves the mounted volume byte-identical
     // to what Apple shipped, so a DiagRepack that will not boot indicts the
-    // decrypt/resize/attach/detach/re-seal machinery and nothing else. Both
-    // the entrypoint install and the /mnt mountpoint below are part of "what
-    // we add", so they move together.
+    // decrypt/resize/attach/detach/re-seal machinery and nothing else.
+    //
+    // SKIPPED FOR DiagOverlay TOO, and there for the opposite reason: that
+    // image carries the entire overlay but nothing that could ever start our
+    // code, so NOTHING ON IT LAUNCHES. Real hardware reaches launchd and then
+    // reboots on DiagBinary, and the shipped binary was verified to hold the
+    // "no overlay to copy, dying peacefully" early exit -- so the reboot is
+    // not our code calling reboot(2), and an image with the bulk but no job is
+    // the only way to tell the bulk and the job apart. /mnt still gets created
+    // below (see createMountpoint): it is part of the overlay's footprint, not
+    // part of the job.
     if (installOurBinary && !installEntrypoint(mount.mountpoint, entrypointBinaryPath)) {
         return false;
     }
@@ -3673,10 +3696,14 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // moment; see createBlackb0xMountpoint() for the full argument and for
     // why none of Apple's own /mnt1../mnt4 is borrowed any more.
     //
-    // DiagBinary creates it, deliberately: that variant isolates the OVERLAY's
-    // size, so everything else the install mechanism puts on the volume has to
-    // be present or it is measuring the wrong difference.
-    if (installOurBinary && !createBlackb0xMountpoint(mount.mountpoint)) {
+    // BOTH DiagBinary AND DiagOverlay create it, deliberately, which is why
+    // this is gated on createMountpoint rather than on installOurBinary. Each
+    // of those variants removes exactly ONE thing from the real bake -- the
+    // overlay, or the job -- and /mnt is neither. Leaving it out of DiagOverlay
+    // would make that image differ from the full bake in two ways at once and
+    // the comparison would stop being attributable. Only DiagRepack skips it,
+    // because DiagRepack adds nothing at all.
+    if (createMountpoint && !createBlackb0xMountpoint(mount.mountpoint)) {
         return false;
     }
 
@@ -3693,14 +3720,15 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // dist/RestoreRamDisk-<device>_<buildID>.dmg, so the stem already carries
     // exactly the device and build this bake is for.
     //
-    // Not run for DiagRepack: there is no binary on that image to verify. It
-    // IS run for DiagBinary, which installs the same binary the real bake
-    // does, so that variant still gets the full closure proof.
+    // Not run for DiagRepack or DiagOverlay: there is no binary on either
+    // image to verify. It IS run for DiagBinary, which installs the same binary
+    // the real bake does, so that variant still gets the full closure proof.
     if (installOurBinary) {
         std::string label = fs::path(outputPath).stem().string();
         // Every variant's filename starts with "RestoreRamDisk"; the diagnostic
         // ones just carry a suffix on the component name (DiagRepack /
-        // DiagBinary -- see Patcher.hpp's `diagramdisk` namespace). Trimming
+        // DiagBinary / DiagOverlay -- see Patcher.hpp's `diagramdisk`
+        // namespace). Trimming
         // the common prefix alone leaves the variant visible in the label,
         // which is what a three-image bake log needs.
         const std::string prefix = "RestoreRamDisk";
@@ -3726,11 +3754,12 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // which is what preserves ITS compression, hard links and ownership for
     // free.
     //
-    // Nothing to copy on either diagnostic variant -- neither staged a tree.
+    // Nothing to copy on DiagRepack or DiagBinary -- neither staged a tree.
     // DiagBinary's whole point is that /blackb0x is absent, so this must stay
     // skipped rather than copying an empty directory: an empty /blackb0x would
     // make entrypoint's merge_tree() a no-op on a real boot and quietly turn
-    // the size probe into a second, weaker install probe.
+    // the size probe into a second, weaker install probe. DiagOverlay copies
+    // the real tree, unchanged -- it is the variant that keeps the bulk.
     if (stageOverlay) {
         if (!runCommand({"ditto", blackb0xStagingDir + "/blackb0x", mount.mountpoint + "/blackb0x"})) {
             fprintf(stderr, "bakeRamdisk: failed to copy staged /blackb0x onto the ramdisk\n");

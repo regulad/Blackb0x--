@@ -93,6 +93,19 @@ void printCliUsage(const char* argv0) {
     printf("                            --diag-ramdisk-repack boots, the install\n");
     printf("                            mechanism is. Same bake requirement as above.\n");
     printf("                            NOT a jailbreak -- there is nothing to install.\n");
+    printf("  --diag-ramdisk-overlay    DIAGNOSTIC: the mirror of the flag above -- send the\n");
+    printf("                            ramdisk carrying the FULL /blackb0x overlay and\n");
+    printf("                            /mnt, but NO entrypoint binary and NO LaunchDaemon\n");
+    printf("                            plist, so nothing on it ever tries to launch our\n");
+    printf("                            code. Within a few tens of KB of the real image.\n");
+    printf("                            ISOLATES THE OVERLAY'S BULK from our job being\n");
+    printf("                            spawned at all: if this boots and stays, the overlay\n");
+    printf("                            is fine and the problem is entirely our job (code\n");
+    printf("                            signing, or what the binary does); if it does not\n");
+    printf("                            boot, the overlay or its size is what stops the\n");
+    printf("                            kernel rooting off the image. Same bake requirement\n");
+    printf("                            as above. NOT a jailbreak -- with no entrypoint on\n");
+    printf("                            the image nothing ever reads /blackb0x.\n");
     printf("  --stock-recovery          DIAGNOSTIC: send the stock iBSS/iBEC exactly\n");
     printf("                            as downloaded from Apple (still runs checkm8\n");
     printf("                            first -- SecureROM's own signature check still\n");
@@ -204,6 +217,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
             options.diagRamdiskRepack = true;
         } else if (arg == "--diag-ramdisk-binary") {
             options.diagRamdiskBinary = true;
+        } else if (arg == "--diag-ramdisk-overlay") {
+            options.diagRamdiskOverlay = true;
         } else if (arg == "--stock-recovery") {
             options.stockRecovery = true;
         } else if (arg == "--stock-firmware") {
@@ -256,9 +271,22 @@ CliOptions parseCliOptions(int argc, char** argv) {
     // name what the user actually typed; see CliOptions' own comments for what
     // each image isolates.
     {
-        std::vector<std::string> ramdiskChoices;
-        if (options.diagRamdiskRepack) ramdiskChoices.push_back("--diag-ramdisk-repack");
-        if (options.diagRamdiskBinary) ramdiskChoices.push_back("--diag-ramdisk-binary");
+        // The diagnostic images alone, kept separately from the stock ones
+        // below: the two checks after the exclusivity test are about the
+        // diagnostics specifically and each has to be able to NAME what the
+        // user typed. A ternary did that while there were only two of them;
+        // with three it would silently misreport the third.
+        std::vector<std::string> diagRamdiskChoices;
+        if (options.diagRamdiskRepack) diagRamdiskChoices.push_back("--diag-ramdisk-repack");
+        if (options.diagRamdiskBinary) diagRamdiskChoices.push_back("--diag-ramdisk-binary");
+        if (options.diagRamdiskOverlay) diagRamdiskChoices.push_back("--diag-ramdisk-overlay");
+        auto joinChoices = [](const std::vector<std::string>& choices) {
+            std::string joined;
+            for (size_t i = 0; i < choices.size(); i++) joined += (i ? ", " : "") + choices[i];
+            return joined;
+        };
+
+        std::vector<std::string> ramdiskChoices = diagRamdiskChoices;
         // --stock-ramdisk and --stock-firmware are ONE claim between them, not
         // two: --stock-firmware stocks the ramdisk as well (see
         // downloadAndPatchComponents()'s `stockRamdisk || stockFirmware`), so
@@ -271,8 +299,7 @@ CliOptions parseCliOptions(int argc, char** argv) {
                                                            : "--stock-ramdisk");
         }
         if (ramdiskChoices.size() > 1) {
-            std::string joined;
-            for (size_t i = 0; i < ramdiskChoices.size(); i++) joined += (i ? ", " : "") + ramdiskChoices[i];
+            std::string joined = joinChoices(ramdiskChoices);
             fprintf(stderr,
                     "These flags each choose a DIFFERENT RestoreRamdisk and cannot be combined: %s.\n"
                     "Pick one per run -- the whole point of the diagnostic images is that everything\n"
@@ -287,10 +314,10 @@ CliOptions parseCliOptions(int argc, char** argv) {
         // --stock-* combination below is. Only the diagnostic images are
         // checked here; the --stock-* side of the same problem has its own
         // check a few lines down and keeps its own wording.
-        if (options.tetherBoot && (options.diagRamdiskRepack || options.diagRamdiskBinary)) {
+        if (options.tetherBoot && !diagRamdiskChoices.empty()) {
             fprintf(stderr,
                     "--tether-boot sends no Ramdisk at all, so it cannot be combined with %s.\n",
-                    options.diagRamdiskRepack ? "--diag-ramdisk-repack" : "--diag-ramdisk-binary");
+                    joinChoices(diagRamdiskChoices).c_str());
             printCliUsage(argv[0]);
             exit(2);
         }
@@ -299,8 +326,7 @@ CliOptions parseCliOptions(int argc, char** argv) {
         // check above already refuses alongside a diagnostic image). Named
         // here anyway, because reaching that error through "--stock-firmware
         // is required" would point at the wrong flag.
-        if ((options.diagRamdiskRepack || options.diagRamdiskBinary) &&
-            (options.stockRecovery || options.stockSecurerom)) {
+        if (!diagRamdiskChoices.empty() && (options.stockRecovery || options.stockSecurerom)) {
             fprintf(stderr,
                     "The --diag-ramdisk-* images are blackb0x's own baked output and can never satisfy the "
                     "real APTicket verification --stock-recovery/--stock-securerom leave in force.\n");
@@ -1677,6 +1703,8 @@ int runCli(const CliOptions& options) {
         stockFlags.push_back("--diag-ramdisk-repack (pristine ramdisk, repacked, nothing added)");
     if (options.diagRamdiskBinary)
         stockFlags.push_back("--diag-ramdisk-binary (entrypoint + plist + /mnt, no /blackb0x overlay)");
+    if (options.diagRamdiskOverlay)
+        stockFlags.push_back("--diag-ramdisk-overlay (/blackb0x overlay + /mnt, no entrypoint, no plist)");
     if (!options.sendOnly.empty())
         stockFlags.push_back("--send-only " + options.sendOnly + " (send that stage, then exit for inspection)");
     if (!stockFlags.empty()) {
@@ -1726,7 +1754,8 @@ int runCli(const CliOptions& options) {
     // are: a diagnostic run must stay on the build this project baked a suite
     // for, not follow an already-jailbroken device's own installed build.
     if (device.jailbroken && !options.stockFirmware && !options.stockRecovery && !options.stockSecurerom &&
-        !options.stockRamdisk && !options.diagRamdiskRepack && !options.diagRamdiskBinary)
+        !options.stockRamdisk && !options.diagRamdiskRepack && !options.diagRamdiskBinary &&
+        !options.diagRamdiskOverlay)
         buildToRequest = device.buildID;
     printf("Targeting %s %s for this run.\n", device.deviceModel.c_str(), buildToRequest.c_str());
     // Both --stock-securerom (real SecureROM, no checkm8) AND --stock-recovery
@@ -1798,13 +1827,14 @@ int runCli(const CliOptions& options) {
         // only build there is.
     }
 
-    // Empty unless one of the two diagnostic images was asked for; they are
+    // Empty unless one of the diagnostic images was asked for; they are
     // mutually exclusive (parseCliOptions()), so one string is the whole
     // channel. The names live in Patcher.hpp's `diagramdisk` namespace,
     // shared with the baker that writes them.
-    const std::string diagRamdiskComponent = options.diagRamdiskRepack  ? diagramdisk::kRepackComponent
-                                             : options.diagRamdiskBinary ? diagramdisk::kBinaryComponent
-                                                                         : "";
+    const std::string diagRamdiskComponent = options.diagRamdiskRepack    ? diagramdisk::kRepackComponent
+                                             : options.diagRamdiskBinary  ? diagramdisk::kBinaryComponent
+                                             : options.diagRamdiskOverlay ? diagramdisk::kOverlayComponent
+                                                                          : "";
 
     auto components = downloadAndPatchComponents(patcher, device, buildToRequest,
                                                    options.stockRamdisk,

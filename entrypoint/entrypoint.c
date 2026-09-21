@@ -1142,7 +1142,41 @@ int main(void) {
         unmount(MNT "/private/var", 0);
         unmount(MNT, 0);
         sync();
-        return 0;
+
+        /* SLEEP FOREVER INSTEAD OF RETURNING. This is a live hypothesis test,
+         * not defensive coding.
+         *
+         * The previous revision returned 0 here, and on hardware the device
+         * STILL rebooted into iBoot Recovery after showing the Apple logo --
+         * even though the shipped binary was verified to contain this very
+         * early-exit, so nothing here called reboot(2). Something else reboots
+         * when our job is present, and the DiagRepack image (identical except
+         * that it carries no job at all) does not reboot.
+         *
+         * The hypothesis: this launchd treats a job EXITING as a reason to
+         * reboot. That is not as strange as it sounds here -- this is a
+         * restore ramdisk, and launchd's embedded bootstrap plist carries Boot
+         * tasks with RequireSuccess semantics; a restore environment that
+         * reboots once its work is done is a coherent design. Nothing has been
+         * decoded to confirm it, which is exactly why this is worth one run.
+         *
+         * So: do not exit. Stay resident and let a human look at the screen.
+         * If the device now sits at the logo indefinitely, exiting was the
+         * trigger and we have learned something real about the environment we
+         * are a guest in. If it reboots anyway, the trigger is something this
+         * process DOES rather than the fact of its exiting, and the next
+         * suspect is our mount/unmount of the NAND.
+         *
+         * The heartbeat doubles as the console test that motivated this whole
+         * image: a line every ten seconds means /dev/console is a live
+         * diagnostic channel, not just a wired-up one. sleep(3) is real libc
+         * here -- the freestanding busy_wait() spin is gone -- so this costs
+         * no CPU and cannot be mistaken for a hang. */
+        for (unsigned long tick = 0;; tick++) {
+            printf("still alive, not exiting (tick %lu)\n", tick);
+            fflush(stdout);
+            sleep(10);
+        }
     }
 
     do_install();

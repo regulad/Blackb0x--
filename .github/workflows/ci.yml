@@ -919,8 +919,9 @@ jobs:
       # hard-fails (it will not substitute the system compiler). Which is the
       # correct behaviour, and the reason these two names have to be here.
       #
-      # --diagnostic-ramdisks IS PASSED ON EVERY RUN, EVEN THOUGH THE TWO EXTRA
-      # IMAGES ARE PURE DIAGNOSTICS AND COST THIS LEG TWO MORE RAMDISK BAKES.
+      # --diagnostic-ramdisks IS PASSED ON EVERY RUN, EVEN THOUGH THE THREE
+      # EXTRA IMAGES ARE PURE DIAGNOSTICS AND COST THIS LEG THREE MORE RAMDISK
+      # BAKES.
       # That is not thoroughness; it is the only way the owner can obtain them
       # at all. Baking a ramdisk needs root, Theos, apt, afsctool and the
       # pinned Xcode, and takes ~30 minutes -- exactly the set of requirements
@@ -929,8 +930,8 @@ jobs:
       # the images are unavailable precisely when a device is sitting in DFU
       # waiting to be bisected. So they ride along in the firmware-<device>
       # artifact, and blackb0x's --diag-ramdisk-repack / --diag-ramdisk-binary
-      # find them already there. What each isolates, and the hardware
-      # observation that made the bisect necessary, are in
+      # / --diag-ramdisk-overlay find them already there. What each isolates,
+      # and the hardware observations that made the bisect necessary, are in
       # src/BakeRamdisk.hpp's RamdiskVariant.
       - name: Bake
         run: |
@@ -962,16 +963,17 @@ jobs:
           echo "ramdisk is $size bytes ($((size / 1048576)) MiB)"
           test "$size" -le $((64 * 1024 * 1024))
 
-          # The two diagnostic images (--diagnostic-ramdisks, passed above).
+          # The three diagnostic images (--diagnostic-ramdisks, passed above).
           # Asserted for the same reason as everything else here: a flag that
           # silently produced nothing would be discovered by a human with a
           # device in DFU, which is the most expensive place to find out. They
-          # are held to the same 64 MiB ceiling -- both are SMALLER than the
-          # real ramdisk by construction (one adds nothing, one adds a few
-          # hundred KB), so a diagnostic image at or over the ceiling means
-          # the bake did something nobody predicted and the bisect it feeds
-          # would be meaningless.
-          for c in RestoreRamDiskDiagRepack RestoreRamDiskDiagBinary; do
+          # are held to the same 64 MiB ceiling -- every one of them is SMALLER
+          # than the real ramdisk by construction (one adds nothing, one adds a
+          # few hundred KB, and DiagOverlay is the real image minus the ~52 KB
+          # binary and its plist), so a diagnostic image at or over the ceiling
+          # means the bake did something nobody predicted and the bisect it
+          # feeds would be meaningless.
+          for c in RestoreRamDiskDiagRepack RestoreRamDiskDiagBinary RestoreRamDiskDiagOverlay; do
             test -s "dist/${c}${suffix}.dmg"
             dsize=$(stat -f%z "dist/${c}${suffix}.dmg")
             echo "$c is $dsize bytes ($((dsize / 1048576)) MiB)"

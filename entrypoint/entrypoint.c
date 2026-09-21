@@ -1293,7 +1293,43 @@ static void report_device_install(void) {
     report_path(MNT "/Library/LaunchDaemons/com.openssh.sshd.plist");
     report_path(MNT "/usr/sbin/sshd");
     report_path(MNT "/etc/rc.d/daemonload");
+    /* THE LAUNCHD JOB CACHE. Reported, deliberately not touched.
+     *
+     * launchd does not find its daemons by reading /System/Library/
+     * LaunchDaemons. It reads a prebuilt index, and its own error strings say
+     * so -- "Configuration error: No service cache.", "Configuration error:
+     * No daemons in cache.", "Configuration error: No tree state entry in
+     * cache.", beside __xpcd_cache and the path below. The keys around them
+     * (LaunchDaemons, SystemLibraryTreeState, _serviceBundles, _infoPlist,
+     * _executablePath) are that index's shape. The `Bootstrap > Paths` entry
+     * in launchd's embedded plist, which names that directory and nothing
+     * else, is the INPUT the index is built from rather than a directory
+     * walked on every boot.
+     *
+     * Independently confirmed: alephsecurity's xnu-qemu-arm64 notes, doing
+     * this same thing on iOS 12, say "to get the launchd load the programs we
+     * had added before, instead of looking at the instructions in
+     * xpcd_cache.dylib, we need to patch the binary file" -- and they patch a
+     * branch in launchd rather than removing the cache.
+     *
+     * WHICH IS WHY THIS ONLY LOOKS. Deleting the cache is the obvious move and
+     * it is not obviously safe: "No daemons in cache" reads like a dead end
+     * rather than a fallback, and a device that boots with no daemons at all
+     * is a much worse place to be than one that boots without sshd. Nothing on
+     * the stock image rebuilds it either -- there is no /usr/libexec/xpcd, and
+     * no on-disk binary but launchd itself contains the string xpcd_cache --
+     * so there is no evidence a deletion would ever be repaired.
+     *
+     * The one fact that settles what to do next is whether this file exists on
+     * the device at all, and that has never been checked. If it is ABSENT,
+     * launchd cannot be reading it, the cache theory is dead, and our plist is
+     * being ignored for some other reason. If it is PRESENT, it was built
+     * before our plist existed and the question becomes how to get it rebuilt
+     * -- safely. */
+    report_path(MNT "/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib");
+    report_path(MNT "/System/Library/Caches/com.apple.xpcd");
 }
+
 
 /* WHICH VOLUME WILL ACCEPT A NEW FILE, AND WHICH WILL NOT.
  *

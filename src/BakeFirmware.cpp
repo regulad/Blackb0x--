@@ -936,6 +936,19 @@ int main(int argc, char** argv) {
         // no reason to pay for the cross-compile again per target. Skipped
         // entirely under --only bootchain, which is most of why that flag is
         // worth having.
+        //
+        // THIS IS THE LINE THAT MOVES when entrypoint.c goes dynamic. Once it
+        // links an SDK, one shared binary stops being correct: AppleTV3,1 and
+        // AppleTV3,2 need iPhoneOS8.4 (Xcode 6.4), AppleTV2,1 needs
+        // iPhoneOS7.1 (Xcode 5.1.1), and a cross-version pairing measured 787
+        // phantom symbols — the class that links clean and dies at load. The
+        // build then belongs inside the per-target loop below, with
+        // `DEVICE=<model>` set in the child's environment (setenv() is enough;
+        // runCommand() is execvp() and make reads the environment).
+        // entrypoint/Makefile already carries and honours that mapping, so the
+        // work is here, not there. Until then one build is right, because a
+        // freestanding binary links no SDK at all — see
+        // buildEntrypointBinary()'s comment in BakeRamdisk.cpp.
         entrypointBinaryPath = buildEntrypointBinary();
         if (entrypointBinaryPath.empty()) {
             fprintf(stderr, "%s: failed to build entrypoint/ — see stderr above\n", kProg);

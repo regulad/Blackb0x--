@@ -79,7 +79,13 @@ in `ld -v`'s supported-arch line, so plain `-arch armv6` produces exactly
 the artifact needed. Verified on Apple clang 21 / ld-1267 against this
 directory's real `entrypoint.c`: Mach-O `armv6`, `LC_UNIXTHREAD`, zero
 `LC_LOAD_DYLIB`, `_entry` as the thread-state PC, `ldid`-signed as
-`com.apple.launchd`. The only remaining requirement is `ldid`.
+`com.apple.launchd`.
+
+**That last sentence used to read "the only remaining requirement is `ldid`",
+and it no longer does.** The stock toolchain still works — it is
+`XCODE_TOOLCHAIN=system` now — but it is not what this builds with by
+default, because of the mechanism the next section measures. A pinned
+era-appropriate Xcode is a real prerequisite again; see "Pinned toolchain".
 
 ### What actually holds this up: `ld-classic`, not the SDK
 
@@ -119,11 +125,14 @@ The mitigations that actually address it, in increasing order of effort:
 1. **Commit the built `entrypoint`** (13 KB). A reproducible build is better,
    but a checked-in artifact means a dead toolchain cannot stop a release.
 2. **Vendor `ld-classic`** — one 3.5 MB binary — or pin a whole Xcode.
+   **This is what shipped.** See "Pinned toolchain" below; it is the default
+   now, not an option.
 3. **Keep `make CC=arm-apple-darwin11-clang` documented and working.**
    `cctools-port` is a *source* port of `ld64`/`as`, so it is immune to Apple
    removing anything from its own toolchain. This is the half of the deleted
    cross-toolchain dependency that genuinely bought insulation, which is why
-   the `Makefile`'s `CC` override is kept rather than ripped out.
+   the `Makefile`'s `CC` override is kept rather than ripped out. It now lives
+   behind `XCODE_TOOLCHAIN=system`, since `CC` is only consulted on that path.
 
 Correction to this section's own history, for accuracy: it says the old
 iPhoneOS 6.1 SDK came from "a 1.7GB archive.org copy of Xcode 4.6", implying
@@ -156,6 +165,132 @@ describe a *different* build from the one the binary will actually run on. See
 point, and for why linking against dylibs extracted from the target ramdisk has
 a structurally zero delta instead.
 
+## Pinned toolchain
+
+This is how `entrypoint` builds. It is the default and the documented path,
+not an option for enthusiasts — the section above is the justification, and
+the short form is that the stock toolchain's 32-bit ARM support is a silent
+delegation to a frozen binary Apple has called deprecated since Xcode 15.
+A pinned Xcode's own `ld64` carries `armv6`/`armv7`/`armv7s` as first-class
+**native** architectures in one binary, with no delegation at all:
+
+```
+$ .../Xcode_6.4/.../usr/bin/ld -v
+@(#)PROGRAM:ld  PROJECT:ld64-242.2
+configured to support archs: armv6 armv7 armv7s arm64 i386 x86_64 ...
+```
+
+No `will use ld-classic for:` line. That is the entire point.
+
+### Which Xcode, and for which device
+
+| Xcode | SDK | `ld64` | Device | Target build |
+|---|---|---|---|---|
+| **6.4** | iPhoneOS8.4 | 242.2 | AppleTV3,1 / AppleTV3,2 | 12H1006 |
+| **5.1.1** | iPhoneOS7.1 | 236.4 | AppleTV2,1 | 11D258 |
+
+Both run on an Apple Silicon host under Rosetta 2 — verified, they are
+x86_64 binaries and Rosetta handles them without complaint.
+
+**Today the SDK column does not matter**, because this build is
+`-ffreestanding -nostdlib` and links no SDK at all; either Xcode produces an
+equivalent artifact. **It will matter shortly.** The conversion of
+`entrypoint.c` to a dynamically linked binary (queued behind a pending
+hardware run) does link an SDK, and the pairing is not interchangeable: an
+8.4 SDK measured against a 7.1.2 device advertises **787 symbols the device
+does not export** — the class that links clean and dies at load, which on this
+hardware is a silent death with no console. So the mapping is real in the
+`Makefile` now (`XCODE_FOR_AppleTV2,1` and friends) rather than left as a
+comment, and `src/BakeRamdisk.cpp` carries a bake-time symbol-closure check
+that turns that failure class into a loud bake failure.
+
+### Getting them
+
+```
+https://download.developer.apple.com/Developer_Tools/Xcode_6.4/Xcode_6.4.dmg
+https://download.developer.apple.com/Developer_Tools/xcode_5.1.1/xcode_5.1.1.dmg
+```
+
+Apple still serves both, officially, today. **An authenticated Apple ID
+session is required, so neither can be fetched unattended.** An anonymous
+request 302s to `developer.apple.com/unauthorized/` and returns that page's
+HTML **with a 200**, so a naive `curl -f` or a `%{http_code}` check *succeeds*
+while writing 257 bytes of error page instead of a multi-gigabyte disk image.
+
+**Verify the payload, not the status code**, and not a published hash either:
+
+- Check the size and that `file` calls it a disk image, not HTML.
+- Check the Apple signature chain: `codesign -dvvv` on the mounted
+  `Xcode.app` should report Apple's own authority chain.
+- Do **not** gate on a published SHA-1. Xcode 6.4's matches its published
+  value, but **5.1.1's does not** — Apple re-signed and re-served some DMGs in
+  2019, so the archived hashes for those are stale. The signature chain is the
+  check that still means something.
+
+### The interface
+
+Everything below is settable from the **environment** as well as the command
+line, which is the whole plumbing story — see "Building entrypoint itself".
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `XCODE_TOOLCHAIN` | `auto` | `auto`, a path, or `system` (see below) |
+| `XCODE_SEARCH_DIR` | `~/Downloads` | where `auto` looks |
+| `XCODE_VERSION` | `6.4` | which Xcode `auto` looks for |
+| `DEVICE` | *(unset)* | picks `XCODE_VERSION` from the table above |
+| `LDID` | `ldid` | ad-hoc signer |
+| `CC` | `clang` | consulted **only** under `XCODE_TOOLCHAIN=system` |
+
+`XCODE_TOOLCHAIN` has three states:
+
+- **`auto`** (the default) — discover a pinned Xcode under
+  `$XCODE_SEARCH_DIR`. It accepts an already-extracted tree
+  (`Xcode_6.4.app`, `Xcode_6.4`, `xcode_6.4`), an already-mounted volume
+  (`/Volumes/Xcode_6.4`, `/Volumes/Xcode`), or a whole `.dmg`
+  (`Xcode_6.4.dmg`, `xcode_6.4.dmg`), which it attaches `-nobrowse -readonly`
+  for the build and detaches afterwards. Version is confirmed against the
+  bundle's own `version.plist` where there is one, so an unrelated
+  `/Volumes/Xcode` holding a current Xcode is rejected rather than used.
+
+- **a path** — used verbatim. `$XCODE_SEARCH_DIR` discovery is **completely
+  bypassed**, so a CI runner never goes looking in a home directory that will
+  not exist there. Three shapes resolve, and they are checked in this order:
+
+  | Shape | Probe |
+  |---|---|
+  | bare extracted toolchain root (also an unpacked `.xctoolchain`) | `<path>/usr/bin/clang` |
+  | an `Xcode.app` bundle | `<path>/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang` |
+  | a directory *containing* `Xcode.app` (a mounted DMG's volume root) | `<path>/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang` |
+
+  The bare root is the shape CI is expected to use — it is a few tens of MB
+  rather than a 2.6 GB app bundle.
+
+- **`system`** — explicit opt-out: build with `$(CC)` off `$PATH`, the way
+  this used to build by default. A deliberate escape hatch.
+
+**There is no silent fallback, ever.** If a pinned toolchain is asked for and
+cannot be resolved, the build fails and prints the path (or search directory)
+it tried, every shape it looked for, and how to fix it. Falling back to the
+system compiler on a bad path would mean a green build that quietly used the
+wrong toolchain — worse than a red one, and the exact failure the pin exists
+to prevent. `system` is the only way to reach the stock compiler, and you have
+to type it.
+
+The build knows **nothing about how the toolchain got there**: no Git LFS, no
+split parts, no reassembly, no fetching, no cache. It takes an Xcode that is
+already in one piece — a directory or a whole `.dmg` — and builds. Assembling
+one from parts is a CI concern and lives in CI.
+
+### Examples
+
+```sh
+make -C entrypoint clean all                       # ~/Downloads, Xcode 6.4
+make -C entrypoint clean all DEVICE=AppleTV2,1     # ~/Downloads, Xcode 5.1.1
+make -C entrypoint clean all XCODE_TOOLCHAIN=/opt/xcode-6.4-toolchain
+make -C entrypoint clean all XCODE_SEARCH_DIR=/mnt/toolchains
+make -C entrypoint clean all XCODE_TOOLCHAIN=system   # stock compiler, on purpose
+```
+
 Theos was tried first and dropped — its `tool.mk` template assumes exactly
 the opposite of what this binary needs (dynamic linking against `libSystem`,
 `LC_MAIN`, a normal `main(argc,argv,envp)` fed by crt startup glue), and its
@@ -168,20 +303,33 @@ gets spliced directly into a ramdisk rather than installed via dpkg.
 brew install ldid
 ```
 
-That is the whole list. The `Makefile` needs `clang` and `ld` (Xcode Command
-Line Tools, which the rest of this project already requires) plus `ldid` for
-ad-hoc signing. `ldid-procursus` also provides an `ldid` and works here; the
-two formulae conflict, so pick one.
+…plus **`Xcode_6.4.dmg` and `Xcode_5.1.1.dmg` in `~/Downloads`**. Those two
+are a real prerequisite, not a nicety: the build uses a pinned toolchain by
+default and fails rather than falling back to the system compiler. See
+"Pinned toolchain" above for which device each serves, where to get them, and
+how to point the build somewhere other than `~/Downloads`
+(`XCODE_TOOLCHAIN=<dir>` or `XCODE_SEARCH_DIR=<dir>`).
 
-Nothing is vendored and no SDK is needed. If you want to build with a
-cctools-port cross-toolchain anyway, `make CC=arm-apple-darwin11-clang`
-still works — it is simply no longer the documented path.
+`ldid-procursus` also provides an `ldid` and works here; the two formulae
+conflict, so pick one.
+
+Nothing is vendored and **no SDK is needed** — this binary is freestanding,
+so only the pinned Xcode's compiler and linker are used, never its headers or
+link stubs. (That changes when `entrypoint.c` goes dynamic; the pin is already
+sized for it.)
+
+If you deliberately want the stock Xcode Command Line Tools instead, that is
+`make XCODE_TOOLCHAIN=system` — it still produces a correct artifact, it just
+routes through `ld-classic`. A cctools-port cross-toolchain still works too:
+`make XCODE_TOOLCHAIN=system CC=arm-apple-darwin11-clang`.
 
 This was three steps until recently: `ldid`, an iPhoneOS 6.1 SDK, and a
-cctools-port toolchain built against it. The last two are gone for the
-reasons in the section above. `entrypoint/assets/README.md` still documents
-how to produce `iPhoneOS6.1.sdk.tar.xz`, but nothing in the build reads it
-any more — keep it for the record, not as a prerequisite.
+cctools-port toolchain built against it. The SDK is still not needed, and the
+cctools-port toolchain is optional — but the pinned Xcode above replaced
+"nothing at all" as the toolchain requirement, deliberately.
+`entrypoint/assets/README.md` still documents how to produce
+`iPhoneOS6.1.sdk.tar.xz`, but nothing in the build reads it any more — keep it
+for the record, not as a prerequisite.
 
 ## What actually runs as PID 1
 
@@ -267,13 +415,32 @@ patched kernel. The binary stays.
 
 `bakeRamdisk()` (`src/BakeRamdisk.cpp`, see `buildEntrypointBinary()`) runs
 `make clean all` in this directory automatically on every bake, using the
-one-time setup above (`ldid`, plus the Xcode Command Line Tools the rest of
-the project already needs) — there's nothing to check in, since the
-build is cached in-process (see `buildEntrypointBinary()` — identical for
-every firmware target, so it only actually runs once per `bake-firmware`
-invocation, not once per firmware) and spliced directly into
+one-time setup above (`ldid`, plus the pinned Xcode) — there's nothing to
+check in, since the build is cached in-process (see `buildEntrypointBinary()`
+— identical for every firmware target, so it only actually runs once per
+`bake-firmware` invocation, not once per firmware) and spliced directly into
 `/sbin/launchd` on the mounted volume (`spliceFileContentInPlace()`),
 preserving that file's existing permissions from the pristine Apple ramdisk.
+
+**How the toolchain choice reaches the `Makefile`: the environment, and
+nothing else.** `runCommand()` is `fork()`/`execvp()`, which inherits
+`environ`, and make imports the environment as make variables — and every
+toolchain knob in the `Makefile` is `?=`. So
+
+```sh
+XCODE_TOOLCHAIN=/opt/xcode-6.4-toolchain sudo -E ./build/bake-firmware ...
+```
+
+reaches the build untouched. There is deliberately **no `bake-firmware`
+flag** for this: it would only re-spell an interface that already works, and
+would then have to be threaded through every caller. A CI step sets one
+environment variable and needs no other setup.
+
+`buildEntrypointBinary()` runs once for the whole invocation, so it does not
+set `DEVICE` today — correct, because a freestanding binary links no SDK and
+every target gets an equivalent artifact. When `entrypoint.c` goes dynamic
+that call moves inside `BakeFirmware.cpp`'s per-firmware loop and starts
+setting `DEVICE=<model>`; the `Makefile` already honours it.
 
 For standalone development/testing without going through a full bake, it is
 just the Makefile:
@@ -288,19 +455,53 @@ binary replaces `/sbin/launchd`'s content, so it's signed under launchd's
 own well-known identifier rather than ldid's default (the binary's own
 filename).
 
+### The bake-time symbol-closure check
+
+Every bake, with the real ramdisk mounted, `verifyEntrypointRuntimeClosure()`
+(`src/BakeRamdisk.cpp`) proves the binary just spliced over PID 1 can actually
+load on *that* volume: every `LC_LOAD_DYLIB` and the `LC_LOAD_DYLINKER` target
+must exist on the ramdisk, and every undefined symbol must be exported by
+something under `/usr/lib` or `/usr/lib/system`. A miss fails the bake with
+the symbol names listed.
+
+It is a **no-op today** — freestanding means zero undefined symbols, zero
+`LC_LOAD_DYLIB`, no `LC_LOAD_DYLINKER` — and that is why it landed now rather
+than alongside the dynamic conversion: it gets exercised by the existing bakes
+on all three devices while it still cannot fail. It is not in CI because the
+bake has something CI does not: the exact libraries that device will boot,
+per device and per build, with no stored snapshot to drift.
+
 ## Status
 
 Done: `entrypoint.c` reverse-engineered and verified
 disassembly-for-disassembly against the original `sbin/launchd` (six real
-bugs found and fixed along the way — see `docs/HISTORY.md`), and building
-with the stock macOS toolchain (Apple clang 21 / ld-1267, real build, real
-artifact checks — see "One-time setup" above). Wired into `bakeRamdisk()`:
-every bake builds this (cached in-process — see "Building entrypoint itself"
-above) and splices it into `/sbin/launchd` in place of the real pristine
-binary there.
+bugs found and fixed along the way — see `docs/HISTORY.md`). Wired into
+`bakeRamdisk()`: every bake builds this (cached in-process — see "Building
+entrypoint itself" above) and splices it into `/sbin/launchd` in place of the
+real pristine binary there.
+
+Building now goes through the **pinned toolchain** by default. Verified on
+this host against the real `entrypoint.c`, with both pinned Xcodes and with
+the stock one, all three producing the same invariants — `Mach-O executable
+arm_v6`, `LC_UNIXTHREAD` with `_entry` as the thread-state PC, zero
+`LC_LOAD_DYLIB`, zero `LC_LOAD_DYLINKER`, `ldid`-signed `com.apple.launchd`:
+
+| Toolchain | `ld` | size |
+|---|---|---|
+| Xcode 6.4 (`DEVICE=AppleTV3,x`) | `ld64-242.2`, native armv6 | 13,184 |
+| Xcode 5.1.1 (`DEVICE=AppleTV2,1`) | `ld64-236.4`, native armv6 | 13,152 |
+| stock (`XCODE_TOOLCHAIN=system`) | `ld-1267` → `ld-classic` `ld64-957.1` | 13,200 |
+
+They are functionally equivalent but not byte-identical, which is worth
+knowing when attributing a behaviour change.
+
+**Nothing here has been booted on a device.** The pin is a supply-chain hedge
+against Apple removing `ld-classic`; it fixes nothing that is currently
+broken, and it changes no behaviour that has ever been observed on hardware.
 
 The SDK and cross-toolchain this section used to list as prerequisites are
-no longer needed at all; see "What was here before, and why it is gone".
+still not needed; see "What was here before, and why it is gone". The pinned
+Xcode is a different requirement, added deliberately — see "Pinned toolchain".
 
 This went through a detour and back. For a while it spliced into
 `/etc/rc.boot` instead of `/sbin/launchd`, on the theory that `rc.boot` was

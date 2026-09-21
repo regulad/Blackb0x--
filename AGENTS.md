@@ -413,13 +413,51 @@ the build shells out to it any more.)
   something that boots on 8.4.x and fails on 6.1.x, silently, and only on hardware.
 - `ldid` on `$PATH` (`brew install ldid`) — `bake-firmware`'s ramdisk half
   builds `entrypoint/` on every bake (once per run, not per firmware) and
-  ad-hoc-signs it. The compiler and linker are the Xcode Command Line Tools'
-  own: Apple's `clang` keeps the ARM backend and Apple's `ld` still lists
-  `armv6` in `ld -v`, so `-arch armv6` is enough. This used to additionally
-  demand a `cctools-port` build of `arm-apple-darwin11-clang` against a real
-  iPhoneOS 6.1 SDK pulled from a 1.7GB archive.org Xcode 4.6 image; that
-  entire chain existed to give a *Linux* host Apple's `ld64`/`as` and is
-  gone. See `entrypoint/README.md`.
+  ad-hoc-signs it.
+- **A pinned Xcode, for `entrypoint/`. Not the stock toolchain.** Apple's
+  current `ld` has no native 32-bit ARM support and silently delegates
+  armv6/armv7/armv7s to `ld-classic`, a frozen `ld64-957.1` fork deprecated
+  since Xcode 15; an era-appropriate Xcode's own `ld64` carries those archs
+  natively. Full justification in **`entrypoint/README.md`'s "Pinned
+  toolchain"** — don't duplicate it here. Operationally:
+  - `Xcode_6.4.dmg` (AppleTV3,1 / AppleTV3,2, iPhoneOS8.4 SDK, `ld64-242.2`)
+    and `Xcode_5.1.1.dmg` (AppleTV2,1, iPhoneOS7.1 SDK, `ld64-236.4`) in
+    **`~/Downloads`** is the default and needs no configuration. Whole DMGs
+    are fine; the build attaches them `-nobrowse -readonly` and detaches
+    after, and never detaches a volume it did not attach.
+  - `XCODE_TOOLCHAIN=<dir>` names one outright and **bypasses `~/Downloads`
+    discovery entirely** (for CI, which has no such directory). It takes
+    either an `Xcode.app` bundle or a bare extracted toolchain root — any
+    directory with `usr/bin/clang`. `XCODE_SEARCH_DIR=<dir>` moves the
+    default search instead. `DEVICE=<model>` picks the Xcode by device.
+  - Everything is read from the **environment** by `entrypoint/Makefile`
+    (`?=` throughout; `runCommand()` is `execvp()`, which inherits
+    `environ`). There is deliberately no `bake-firmware` flag for it, and
+    adding one would just re-spell a working interface.
+  - **It never falls back to the system compiler.** A bad path or an empty
+    search directory is a hard failure. `XCODE_TOOLCHAIN=system` is the
+    explicit opt-out and the only way to reach the stock compiler (it is also
+    the only path that consults `CC`, so `make XCODE_TOOLCHAIN=system
+    CC=arm-apple-darwin11-clang` is how a cctools-port toolchain is used now).
+  - The build knows nothing about how the toolchain arrived — no LFS, no split
+    parts, no reassembly, no fetching. It takes an Xcode already in one piece.
+  - This is a **supply-chain hedge, not a fix**: nothing here has been booted
+    on a device, and the pinned and stock toolchains produce functionally
+    equivalent but not byte-identical binaries.
+  - Every bake also runs `verifyEntrypointRuntimeClosure()`
+    (`BakeRamdisk.cpp`) against the mounted ramdisk: every `LC_LOAD_DYLIB`
+    and the `LC_LOAD_DYLINKER` target must exist there and every undefined
+    symbol must be exported by something under `/usr/lib` or
+    `/usr/lib/system`, or the bake fails. A **no-op while `entrypoint` is
+    freestanding**, and landed early on purpose so it is exercised by the
+    three-device bakes before the dynamic conversion can need it. Do not
+    special-case the freestanding path away.
+  - This bullet used to say the Xcode Command Line Tools were enough, and
+    before that it demanded a `cctools-port` build of
+    `arm-apple-darwin11-clang` against an iPhoneOS 6.1 SDK from a 1.7GB
+    archive.org Xcode 4.6 image. That chain existed to give a *Linux* host
+    Apple's `ld64`/`as` and is still gone; the pin is a different requirement
+    with a different reason.
 - Theos (`$THEOS`, default `~/theos`) and `dpkg-scanpackages` (`brew install dpkg`)
   — `package/build.sh` builds the `xyz.regulad.blackb0x` `.deb` with Theos's
   `dm.pl` on every bake.
@@ -712,6 +750,17 @@ code under sudo), one runner per device, and publishes `dist/` as artifacts so
 end users never need root or the authoring toolchain.
 
 Artifacts refresh on the 23rd of every month.
+
+**Open, and needed before the next CI run: the pinned `entrypoint/`
+toolchain.** `.github/workflows/ci.yml` has not been updated for it, and any
+job that builds `entrypoint/` (the `build` job's freestanding-armv6 assertion,
+and every `bake` job) now fails on a runner, loudly, with "no pinned Xcode 6.4
+found" — a runner has no `~/Downloads` full of DMGs. The fix is a CI-only
+pre-step that puts an Xcode on disk in one piece and exports
+`XCODE_TOOLCHAIN=<dir>`; nothing in this repo needs to change for it, since
+that variable is the whole interface. That step is deliberately out of scope
+here: the baker takes a toolchain already assembled and knows nothing about
+how it got there.
 
 ## External references
 

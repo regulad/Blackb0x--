@@ -57,9 +57,333 @@ jobs:
           ctest --test-dir build --output-on-failure
           python3 scripts/test_build_deb_cache_experimental_no_container.py
 
+      # ----------------------------------------------------------------------
+      # Pinned Xcode toolchain for entrypoint/
+      # ----------------------------------------------------------------------
+      # entrypoint/Makefile builds with a PINNED, era-appropriate Xcode and
+      # DELIBERATELY DOES NOT FALL BACK to the system compiler -- an
+      # unresolvable pin is a hard error, because a build that silently used
+      # the wrong compiler is the exact failure the pin exists to prevent. Its
+      # default discovery looks in ~/Downloads, which no runner has. So every
+      # job that builds entrypoint/ has to hand it a toolchain outright, and
+      # this block is how. Without it the "Check the built artifacts" step
+      # below fails at `make -C entrypoint`, by design and not by accident.
+      #
+      # The interface is two environment variables and nothing else -- no flag,
+      # no file edit. `XCODE_TOOLCHAIN=<dir>` is used verbatim and bypasses
+      # ~/Downloads discovery entirely; `DEVICE=<model>` picks which Xcode the
+      # Makefile expects. Both are `?=` in the Makefile and BakeRamdisk.cpp
+      # invokes make through fork()/execvp(), which inherits `environ`, so
+      # exporting them is enough -- with one exception, noted at the bake job's
+      # Bake step, where `sudo` drops the environment.
+      #
+      # WHY THE WHOLE Xcode AND NOT JUST AN SDK: Apple's current `ld` never
+      # implemented 32-bit ARM. It detects armv6/armv7/armv7s and silently
+      # delegates to `ld-classic`, a frozen ld64-957.1 fork deprecated since
+      # Xcode 15; an SDK is headers plus link stubs and contains no linker at
+      # all, so pinning one would hedge nothing. Full account in
+      # entrypoint/README.md's "Pinned toolchain".
+      #
+      # The bake job repeats these five steps with `${{ matrix.device }}` in
+      # place of the fixed device below. GitHub Actions supports neither YAML
+      # anchors nor step-level reuse inside a single workflow file, so the
+      # duplication is unavoidable short of a composite action; the reasoning
+      # is written out once, here.
+
+      # AppleTV3,2 -> Xcode 6.4, which is also entrypoint/Makefile's own
+      # default XCODE_VERSION, so this job builds exactly what a developer
+      # running `make -C entrypoint` by hand would get. It also shares a cache
+      # entry with two of the three bake legs, which both map to 6.4.
+      #
+      # The version is READ OUT OF THE MAKEFILE, not spelled here, for the same
+      # reason no build ID appears in this workflow (see the bake job): the
+      # device -> Xcode mapping is a decision that lives in
+      # entrypoint/Makefile's XCODE_FOR_* lines, and a copy here would be a
+      # second place to edit and a silent way to provision 6.4 while the
+      # Makefile asks for 5.1.1. If those lines change shape this fails loudly
+      # and by name.
+      - name: Resolve which pinned Xcode entrypoint/ needs
+        id: xcode
+        env:
+          DEVICE: AppleTV3,2
+        run: |
+          set -eu
+          version=$(sed -n "s/^XCODE_FOR_${DEVICE}[[:space:]]*:=[[:space:]]*//p" \
+                    entrypoint/Makefile | head -n 1 | tr -d '[:space:]')
+          if [ -z "$version" ]; then
+            echo "could not read XCODE_FOR_${DEVICE} out of entrypoint/Makefile --" \
+                 "has the per-device toolchain mapping moved or changed shape?" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
+          echo "entrypoint/Makefile maps $DEVICE to Xcode $version"
+
+      # Every binary in these toolchains is x86_64 with no arm64 slice --
+      # Xcode 6.4 predates Apple Silicon by five years. macos-15 is an Apple
+      # Silicon runner (macos-15-intel is the separate x86_64 label), so clang
+      # and ld only run here under Rosetta 2, and Rosetta is NOT preinstalled.
+      # Both architectures are handled rather than assumed, so moving this
+      # workflow to an Intel label later is a no-op instead of a mystery.
+      # `arch -x86_64 /usr/bin/true` is the real probe: it answers "can this
+      # host execute an x86_64 binary", which is the actual question, rather
+      # than looking for a receipt somewhere that says it should be able to.
+      - name: Install Rosetta 2 if this runner needs it
+        run: |
+          set -eu
+          arch=$(uname -m)
+          echo "runner architecture: $arch"
+          if [ "$arch" != arm64 ]; then
+            echo "x86_64 host -- the pinned toolchain runs natively, no Rosetta needed"
+            exit 0
+          fi
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "Rosetta 2 already present"
+            exit 0
+          fi
+          sudo softwareupdate --install-rosetta --agree-to-license
+          # Not decoration: softwareupdate can report success and still leave
+          # nothing able to run, and the next thing that would notice is a
+          # clang invocation deep inside a bake.
+          arch -x86_64 /usr/bin/true
+
+      # CI cannot download these images from Apple. The developer.apple.com
+      # asset needs an authenticated Apple ID session, and the failure mode is
+      # a trap: an anonymous request 302s to the unauthorized page and returns
+      # ~257 bytes of HTML with HTTP 200, so `curl -f` *succeeds* while writing
+      # an error page where a 2.6 GB disk image should be. Hence the private
+      # mirror, which stores each DMG as 1 GiB Git LFS parts (GitHub LFS caps
+      # a single object at 2 GB).
+      #
+      # GIT_LFS_SKIP_SMUDGE=1 clones the POINTERS ONLY -- 212 KB, no LFS
+      # bandwidth spent. That is the whole trick behind the cache key below:
+      # each pointer file literally contains its object's sha256 OID and size,
+      # so the runner can decide whether its cached image is still valid before
+      # downloading a single byte of DMG.
+      #
+      # secrets.PAT, not secrets.GITHUB_TOKEN: the default token is scoped to
+      # this repository and cannot read another one, and in practice cannot do
+      # LFS on one either. It is passed through the environment rather than
+      # interpolated into the script text, and nothing here runs under `set -x`.
+      #
+      # The clone lands inside the workspace because hashFiles() resolves its
+      # pattern relative to GITHUB_WORKSPACE and matches nothing outside it --
+      # a pointer tree in $RUNNER_TEMP would silently hash to the empty string
+      # and produce a stable, wrong, permanently-hit cache key.
+      - name: Check out the Xcode mirror's LFS pointers
+        env:
+          XCODE_MIRROR_TOKEN: ${{ secrets.PAT }}
+          XCODE_VERSION: ${{ steps.xcode.outputs.version }}
+        run: |
+          set -eu
+          if [ -z "${XCODE_MIRROR_TOKEN:-}" ]; then
+            echo "secrets.PAT is empty. entrypoint/ cannot be built without a pinned" \
+                 "Xcode, and regulad/xcode is private, so there is nothing to fall" \
+                 "back to. Set the PAT repository secret to a token with read access" \
+                 "to regulad/xcode." >&2
+            exit 1
+          fi
+          rm -rf xcode-mirror
+          GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 \
+            "https://x-access-token:${XCODE_MIRROR_TOKEN}@github.com/regulad/xcode.git" \
+            xcode-mirror
+          # Assert the pointers are really pointers before hashFiles() is asked
+          # to key a multi-gigabyte cache on them. A glob that did not expand
+          # leaves the literal pattern here and grep fails on it, which is the
+          # loud failure we want.
+          for p in xcode-mirror/parts/"$XCODE_VERSION"/*.part??; do
+            grep -q '^oid sha256:' "$p" || {
+              echo "$p is not a Git LFS pointer -- the mirror's layout changed," \
+                   "or this clone resolved LFS objects when it should not have." >&2
+              exit 1
+            }
+          done
+          echo "pointers for Xcode $XCODE_VERSION:"
+          cat xcode-mirror/parts/"$XCODE_VERSION"/*.part??
+
+      # THE WHOLE DMG IS CACHED, NOT THE ~85 MiB SUBSET THE BUILD ACTUALLY
+      # USES. Caching the subset would pin the entry to today's extraction
+      # list: the first time a job needs a file that was not on it, the entry
+      # is useless and the runner pays a full multi-gigabyte LFS re-fetch. The
+      # image is the stable artifact; the extraction list is a per-run detail,
+      # and changing it should be a different `cp` out of a cache entry already
+      # on disk.
+      #
+      # The key is the pointer hash, so it changes exactly when the underlying
+      # LFS objects change and never otherwise. It is keyed on the Xcode
+      # VERSION rather than the device, so the two AppleTV3,x bake legs share
+      # one entry; steady state is two entries (~4.7 GiB) inside the 10 GB
+      # per-repository budget. runner.os is in there because a cache is
+      # restored across runner images and this one is only ever consumed by a
+      # macOS `hdiutil`.
+      #
+      # restore/save rather than the combined action, purely for disk: an
+      # explicit save lets the DMG be deleted immediately after extraction on
+      # BOTH paths, instead of having to survive to the end of the job so the
+      # combined action's post step can pick it up. A bake leg goes on to
+      # download an IPSW and build a ramdisk, and 2.6 GB of dead weight through
+      # all of that is worth one extra step to avoid.
+      - name: Restore the cached Xcode disk image
+        id: xcode-dmg
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/xcode-dmg
+          key: xcode-dmg-${{ runner.os }}-${{ steps.xcode.outputs.version }}-${{ hashFiles(format('xcode-mirror/parts/{0}/*', steps.xcode.outputs.version)) }}
+
+      # --fetch --consume is the mirror's documented CI mode and is what keeps
+      # this inside a runner's disk budget: it LFS-pulls each part immediately
+      # before merging it and deletes it immediately after, so peak usage is
+      # the output image plus one 1 GiB part rather than both copies at once.
+      # Only this leg's version is ever fetched; nothing needs both images.
+      #
+      # reassemble.sh verifies the merged image's byte size and sha256 against
+      # its manifest and DELETES the output on any mismatch, missing part or
+      # failed append, so there is no way to end up with a plausible-looking
+      # half-merged DMG. It also refuses to concatenate unresolved pointer text
+      # into an image.
+      - name: Reassemble the Xcode disk image
+        if: steps.xcode-dmg.outputs.cache-hit != 'true'
+        working-directory: xcode-mirror
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/xcode-dmg"
+          ./reassemble.sh --fetch --consume --out "$RUNNER_TEMP/xcode-dmg" \
+            '${{ steps.xcode.outputs.version }}'
+
+      # Saved before extraction, so the image can be deleted the moment it has
+      # been mined. The three bake legs run in parallel and two of them key on
+      # the same 6.4 pointers, so on a cold cache both will reassemble and both
+      # will try to save; the loser gets a "cache already exists" WARNING, not
+      # a failure, and the entry is correct either way. Deduplicating that
+      # would mean a separate serialising job for a cost paid once per Xcode
+      # release, which is to say roughly never.
+      - name: Save the Xcode disk image to the cache
+        if: steps.xcode-dmg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/xcode-dmg
+          key: ${{ steps.xcode-dmg.outputs.cache-primary-key }}
+
+      # The minimum that builds, rooted at Xcode.app/Contents/Developer:
+      # clang, ld, clang's resource directory, and the SDK's usr/include,
+      # usr/lib and SDKSettings.plist. ~85 MiB for 6.4, ~184 MiB for 5.1.1.
+      #
+      # `as` is deliberately NOT copied -- clang uses its integrated assembler
+      # for this build, confirmed with `clang -###`. Nor is libLTO.dylib, which
+      # ld references lazily and only wants for -flto.
+      #
+      # The SDK is not needed TODAY: entrypoint is freestanding (-ffreestanding
+      # -nostdlib) and links no SDK at all, so clang + ld is the entire
+      # requirement. It is taken anyway because the dynamic-linking conversion
+      # queued behind the pending hardware test does link one, and the pairing
+      # is not interchangeable -- a cross-version pairing measured 787 phantom
+      # symbols. Copying it now means that conversion needs no change here.
+      #
+      # Laid out as a bare toolchain root (usr/bin/clang at the top) because
+      # that is the first shape XCODE_TOOLCHAIN probes for, and handing over a
+      # 100 MiB directory beats handing over a 2.6 GB mounted app bundle.
+      - name: Extract the pinned toolchain
+        env:
+          DEVICE: ${{ steps.xcode.outputs.device }}
+        run: |
+          set -eu
+          # Globbed, not named: the two images do not agree on capitalisation
+          # (Xcode_6.4.dmg vs xcode_5.1.1.dmg) and the real names are the
+          # mirror manifest's to own, not this workflow's to restate. Exactly
+          # one image is ever present here.
+          dmg=''
+          for c in "$RUNNER_TEMP"/xcode-dmg/*.dmg; do
+            [ -f "$c" ] || continue
+            dmg="$c"
+            break
+          done
+          if [ -z "$dmg" ]; then
+            echo "no Xcode disk image in $RUNNER_TEMP/xcode-dmg -- the cache restore" \
+                 "reported a hit but produced nothing, or reassembly was skipped." >&2
+            exit 1
+          fi
+
+          mnt="$RUNNER_TEMP/xcode-mnt"
+          tc="$RUNNER_TEMP/xcode-toolchain"
+          rm -rf "$mnt" "$tc"
+          mkdir -p "$mnt"
+
+          # Whatever is attached gets detached, on success, failure or signal.
+          detach() {
+            hdiutil detach -quiet "$mnt" >/dev/null 2>&1 \
+              || hdiutil detach -quiet -force "$mnt" >/dev/null 2>&1 \
+              || echo "warning: could not detach $mnt" >&2
+          }
+          trap detach EXIT INT TERM
+          # `yes | PAGER=cat` answers the image's embedded software licence
+          # agreement, which hdiutil otherwise waits on forever with no tty.
+          yes | PAGER=cat hdiutil attach -quiet -nobrowse -readonly -noverify \
+            -noautoopen -mountpoint "$mnt" "$dmg"
+
+          dev="$mnt/Xcode.app/Contents/Developer"
+          xct="$dev/Toolchains/XcodeDefault.xctoolchain"
+          [ -x "$xct/usr/bin/clang" ] || {
+            echo "$dmg does not contain XcodeDefault.xctoolchain/usr/bin/clang" >&2
+            exit 1
+          }
+
+          mkdir -p "$tc/usr/bin" "$tc/usr/lib/clang" "$tc/SDKs"
+          cp "$xct/usr/bin/clang" "$xct/usr/bin/ld" "$tc/usr/bin/"
+          cp -R "$xct/usr/lib/clang/"* "$tc/usr/lib/clang/"
+
+          # WHICH SDK NAME IS THE REAL DIRECTORY AND WHICH IS THE SYMLINK IS
+          # NOT THE SAME IN BOTH IMAGES. Xcode 6.4 ships iPhoneOS.sdk as the
+          # real tree with iPhoneOS8.4.sdk pointing at it; Xcode 5.1.1 is the
+          # other way round. Copying the name rather than resolving it yields a
+          # dangling link in one of the two cases, which would only surface
+          # once something actually tried to use the SDK. So: find the entry
+          # that is a directory and NOT a symlink, copy that, and recreate the
+          # alias relatively.
+          sdks="$dev/Platforms/iPhoneOS.platform/Developer/SDKs"
+          real=''
+          for c in "$sdks"/iPhoneOS*.sdk; do
+            [ -d "$c" ] && [ ! -L "$c" ] || continue
+            real="$c"
+            break
+          done
+          [ -n "$real" ] || {
+            echo "no real iPhoneOS SDK directory under $sdks" >&2
+            exit 1
+          }
+          name=$(basename "$real")
+          mkdir -p "$tc/SDKs/$name/usr"
+          cp -R "$real/usr/include" "$tc/SDKs/$name/usr/include"
+          cp -R "$real/usr/lib" "$tc/SDKs/$name/usr/lib"
+          cp "$real/SDKSettings.plist" "$tc/SDKs/$name/"
+          ln -s "$name" "$tc/SDKs/iPhoneOS.sdk"
+
+          detach
+          trap - EXIT INT TERM
+
+          # The image is 2.6 GB and has already been mined and cached. Nothing
+          # downstream reads it again.
+          rm -rf "$RUNNER_TEMP/xcode-dmg"
+
+          # Prove the toolchain RUNS on this host -- this is where a missing
+          # Rosetta, a truncated copy or a stale extraction list surfaces,
+          # rather than halfway through a build. ld printing its PROJECT:ld64-
+          # banner is also the evidence that the pin did what it exists to do:
+          # a native 32-bit-ARM linker, not a delegation to ld-classic.
+          "$tc/usr/bin/clang" --version
+          "$tc/usr/bin/ld" -v 2>&1 | head -1
+          du -sh "$tc"
+
+          echo "XCODE_TOOLCHAIN=$tc" >> "$GITHUB_ENV"
+          echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
+
       # Guards the invariants that actually broke during the macOS port, so a
       # regression shows up here rather than on a device. See the commit that
       # introduced them.
+      #
+      # `make -C entrypoint` below picks up XCODE_TOOLCHAIN and DEVICE from the
+      # job environment (both are `?=` in entrypoint/Makefile, and make imports
+      # the environment as make variables), so the pinned toolchain provisioned
+      # above is used with no flag and no file edit.
       - name: Check the built artifacts
         run: |
           set -eux
@@ -209,12 +533,202 @@ jobs:
           echo "build=$build" >> "$GITHUB_OUTPUT"
           echo "src/Cli.cpp targets ${{ matrix.device }} at $build"
 
+      # ----------------------------------------------------------------------
+      # Pinned Xcode toolchain for entrypoint/
+      # ----------------------------------------------------------------------
+      # bake-firmware's ramdisk half calls buildEntrypointBinary(), which runs
+      # `make -C entrypoint`, which builds with a pinned Xcode and hard-fails
+      # rather than falling back to the system compiler. The full reasoning --
+      # why a whole Xcode and not an SDK, why the pointer-only clone, why the
+      # DMG rather than the extracted subset is what gets cached, why Rosetta
+      # -- is written out once at the identical block in the `build` job above.
+      # Only the differences are noted here.
+      #
+      # The difference that matters: this leg's device comes from the matrix,
+      # so each of the three legs provisions exactly the one Xcode its device
+      # maps to and never both. AppleTV3,1 and AppleTV3,2 both map to 6.4 and
+      # therefore share a cache entry; AppleTV2,1 maps to 5.1.1 and has its own.
+      - name: Resolve which pinned Xcode entrypoint/ needs
+        id: xcode
+        env:
+          DEVICE: ${{ matrix.device }}
+        run: |
+          set -eu
+          version=$(sed -n "s/^XCODE_FOR_${DEVICE}[[:space:]]*:=[[:space:]]*//p" \
+                    entrypoint/Makefile | head -n 1 | tr -d '[:space:]')
+          if [ -z "$version" ]; then
+            echo "could not read XCODE_FOR_${DEVICE} out of entrypoint/Makefile --" \
+                 "has the per-device toolchain mapping moved or changed shape?" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "device=$DEVICE" >> "$GITHUB_OUTPUT"
+          echo "entrypoint/Makefile maps $DEVICE to Xcode $version"
+
+      - name: Install Rosetta 2 if this runner needs it
+        run: |
+          set -eu
+          arch=$(uname -m)
+          echo "runner architecture: $arch"
+          if [ "$arch" != arm64 ]; then
+            echo "x86_64 host -- the pinned toolchain runs natively, no Rosetta needed"
+            exit 0
+          fi
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "Rosetta 2 already present"
+            exit 0
+          fi
+          sudo softwareupdate --install-rosetta --agree-to-license
+          arch -x86_64 /usr/bin/true
+
+      - name: Check out the Xcode mirror's LFS pointers
+        env:
+          XCODE_MIRROR_TOKEN: ${{ secrets.PAT }}
+          XCODE_VERSION: ${{ steps.xcode.outputs.version }}
+        run: |
+          set -eu
+          if [ -z "${XCODE_MIRROR_TOKEN:-}" ]; then
+            echo "secrets.PAT is empty. entrypoint/ cannot be built without a pinned" \
+                 "Xcode, and regulad/xcode is private, so there is nothing to fall" \
+                 "back to. Set the PAT repository secret to a token with read access" \
+                 "to regulad/xcode." >&2
+            exit 1
+          fi
+          rm -rf xcode-mirror
+          GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 \
+            "https://x-access-token:${XCODE_MIRROR_TOKEN}@github.com/regulad/xcode.git" \
+            xcode-mirror
+          for p in xcode-mirror/parts/"$XCODE_VERSION"/*.part??; do
+            grep -q '^oid sha256:' "$p" || {
+              echo "$p is not a Git LFS pointer -- the mirror's layout changed," \
+                   "or this clone resolved LFS objects when it should not have." >&2
+              exit 1
+            }
+          done
+          echo "pointers for Xcode $XCODE_VERSION:"
+          cat xcode-mirror/parts/"$XCODE_VERSION"/*.part??
+
+      - name: Restore the cached Xcode disk image
+        id: xcode-dmg
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/xcode-dmg
+          key: xcode-dmg-${{ runner.os }}-${{ steps.xcode.outputs.version }}-${{ hashFiles(format('xcode-mirror/parts/{0}/*', steps.xcode.outputs.version)) }}
+
+      - name: Reassemble the Xcode disk image
+        if: steps.xcode-dmg.outputs.cache-hit != 'true'
+        working-directory: xcode-mirror
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/xcode-dmg"
+          ./reassemble.sh --fetch --consume --out "$RUNNER_TEMP/xcode-dmg" \
+            '${{ steps.xcode.outputs.version }}'
+
+      - name: Save the Xcode disk image to the cache
+        if: steps.xcode-dmg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/xcode-dmg
+          key: ${{ steps.xcode-dmg.outputs.cache-primary-key }}
+
+      - name: Extract the pinned toolchain
+        env:
+          DEVICE: ${{ steps.xcode.outputs.device }}
+        run: |
+          set -eu
+          # Globbed, not named: the two images do not agree on capitalisation
+          # (Xcode_6.4.dmg vs xcode_5.1.1.dmg) and the real names are the
+          # mirror manifest's to own, not this workflow's to restate. Exactly
+          # one image is ever present here.
+          dmg=''
+          for c in "$RUNNER_TEMP"/xcode-dmg/*.dmg; do
+            [ -f "$c" ] || continue
+            dmg="$c"
+            break
+          done
+          if [ -z "$dmg" ]; then
+            echo "no Xcode disk image in $RUNNER_TEMP/xcode-dmg -- the cache restore" \
+                 "reported a hit but produced nothing, or reassembly was skipped." >&2
+            exit 1
+          fi
+
+          mnt="$RUNNER_TEMP/xcode-mnt"
+          tc="$RUNNER_TEMP/xcode-toolchain"
+          rm -rf "$mnt" "$tc"
+          mkdir -p "$mnt"
+
+          detach() {
+            hdiutil detach -quiet "$mnt" >/dev/null 2>&1 \
+              || hdiutil detach -quiet -force "$mnt" >/dev/null 2>&1 \
+              || echo "warning: could not detach $mnt" >&2
+          }
+          trap detach EXIT INT TERM
+          yes | PAGER=cat hdiutil attach -quiet -nobrowse -readonly -noverify \
+            -noautoopen -mountpoint "$mnt" "$dmg"
+
+          dev="$mnt/Xcode.app/Contents/Developer"
+          xct="$dev/Toolchains/XcodeDefault.xctoolchain"
+          [ -x "$xct/usr/bin/clang" ] || {
+            echo "$dmg does not contain XcodeDefault.xctoolchain/usr/bin/clang" >&2
+            exit 1
+          }
+
+          mkdir -p "$tc/usr/bin" "$tc/usr/lib/clang" "$tc/SDKs"
+          cp "$xct/usr/bin/clang" "$xct/usr/bin/ld" "$tc/usr/bin/"
+          cp -R "$xct/usr/lib/clang/"* "$tc/usr/lib/clang/"
+
+          # Resolve rather than assume: 6.4 ships iPhoneOS.sdk real with
+          # iPhoneOS8.4.sdk as the symlink, 5.1.1 is the other way round, and
+          # copying the wrong name leaves a dangling link. See the build job.
+          sdks="$dev/Platforms/iPhoneOS.platform/Developer/SDKs"
+          real=''
+          for c in "$sdks"/iPhoneOS*.sdk; do
+            [ -d "$c" ] && [ ! -L "$c" ] || continue
+            real="$c"
+            break
+          done
+          [ -n "$real" ] || {
+            echo "no real iPhoneOS SDK directory under $sdks" >&2
+            exit 1
+          }
+          name=$(basename "$real")
+          mkdir -p "$tc/SDKs/$name/usr"
+          cp -R "$real/usr/include" "$tc/SDKs/$name/usr/include"
+          cp -R "$real/usr/lib" "$tc/SDKs/$name/usr/lib"
+          cp "$real/SDKSettings.plist" "$tc/SDKs/$name/"
+          ln -s "$name" "$tc/SDKs/iPhoneOS.sdk"
+
+          detach
+          trap - EXIT INT TERM
+
+          # Already mined and cached, and this leg still has an IPSW download
+          # and a ramdisk bake ahead of it. 2.6 GB is worth reclaiming.
+          rm -rf "$RUNNER_TEMP/xcode-dmg"
+
+          "$tc/usr/bin/clang" --version
+          "$tc/usr/bin/ld" -v 2>&1 | head -1
+          du -sh "$tc"
+
+          echo "XCODE_TOOLCHAIN=$tc" >> "$GITHUB_ENV"
+          echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
+
       # sudo env: bake-firmware requires root, and sudo does not preserve PATH,
       # so Homebrew's ldid/afsctool/dpkg-scanpackages would vanish. THEOS is
       # passed explicitly for the same reason.
+      #
+      # XCODE_TOOLCHAIN and DEVICE are on that list for exactly the same
+      # reason, and it is the one place the "just export it" interface does not
+      # hold. buildEntrypointBinary() reaches entrypoint/Makefile through
+      # fork()/execvp(), which inherits `environ` -- but this process's environ
+      # is sudo's, not the job's, and sudo dropped both variables before
+      # bake-firmware ever started. Without them make falls back to `auto`,
+      # goes looking in a ~/Downloads that does not exist on a runner, and
+      # hard-fails (it will not substitute the system compiler). Which is the
+      # correct behaviour, and the reason these two names have to be here.
       - name: Bake
         run: |
           sudo env "PATH=$PATH" "THEOS=$HOME/theos" \
+                   "XCODE_TOOLCHAIN=$XCODE_TOOLCHAIN" "DEVICE=$DEVICE" \
             ./build/bake-firmware --device '${{ matrix.device }}' \
                                   --build '${{ steps.target.outputs.build }}'
 

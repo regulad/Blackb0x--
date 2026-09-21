@@ -129,7 +129,16 @@ static bool runCommand(const std::vector<std::string>& argv, const std::string& 
 // Same argv/no-shell contract as runCommand(), but captures stdout instead
 // of just a pass/fail exit code — needed for `du -sb`/`blkid` below, which
 // this program needs the actual text output of, not just success/failure.
-static std::string runCommandCapture(const std::vector<std::string>& argv) {
+//
+// `outOk`, when given, reports whether the child actually exited 0. Every
+// original caller here treats "" as failure and does not need it, but the
+// symbol-closure check does: `nm -u` on a freestanding binary legitimately
+// prints NOTHING and exits 0, so an empty capture there is a real answer
+// ("no undefined symbols") and must not be confused with nm having failed.
+// Confusing the two would turn the check into a silent pass, which is the
+// one outcome it exists to prevent.
+static std::string runCommandCapture(const std::vector<std::string>& argv, bool* outOk = nullptr) {
+    if (outOk) *outOk = false;
     int pipefd[2];
     if (pipe(pipefd) != 0) return "";
     std::vector<char*> cargv;
@@ -159,6 +168,7 @@ static std::string runCommandCapture(const std::vector<std::string>& argv) {
     int status = 0;
     waitpid(pid, &status, 0);
     if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) return "";
+    if (outOk) *outOk = true;
     return output;
 }
 
@@ -267,25 +277,45 @@ struct MountGuard {
 
 // Builds entrypoint/'s freestanding ARMv6 replacement for /sbin/launchd,
 // rather than shipping a precompiled binary — see entrypoint/README.md for
-// why. The only thing that has to be on $PATH beyond the Xcode Command Line
-// Tools this project already requires is `ldid`, for ad-hoc signing.
+// why. Beyond `ldid` (ad-hoc signing), this needs a PINNED, era-appropriate
+// Xcode: entrypoint/Makefile no longer defaults to the stock toolchain,
+// because Apple's current `ld` has no native 32-bit ARM support and silently
+// delegates armv6/armv7/armv7s to the frozen, deprecated `ld-classic`. See
+// entrypoint/README.md's "Pinned toolchain" and "What actually holds this up:
+// `ld-classic`, not the SDK".
+//
+// **Nothing is passed on the command line here, deliberately.** runCommand()
+// is fork()/execvp(), which inherits `environ`, and make imports the
+// environment as make variables — and every knob in entrypoint/Makefile's
+// toolchain section is `?=`. So `XCODE_TOOLCHAIN=/path bake-firmware ...`
+// (or XCODE_SEARCH_DIR=, XCODE_VERSION=, DEVICE=) reaches the Makefile
+// untouched, with no C++ change and no bake-firmware flag to keep in sync.
+// A CI step sets one environment variable and nothing else. Adding a
+// --toolchain flag here would only re-spell an interface that already works
+// and would then have to be threaded through every caller.
 //
 // This used to run inside a podman container, which existed solely to give
 // a LINUX host a port of Apple's own ld64/as (cctools-port). On macOS those
-// are the native tools, so the container had nothing left to provide.
-//
-// It also used to require a cctools-port cross-compiler named
-// arm-apple-darwin11-clang, bootstrapped against a real iPhoneOS 6.1 SDK.
-// That is gone too, and for the same reason: Apple's own clang has the ARM
-// backend and Apple's own ld still lists armv6 as a supported arch, so
-// entrypoint/Makefile just passes -arch armv6 to the system compiler.
-// Verified end to end on Apple clang 21 / ld-1267 — the resulting Mach-O is
-// armv6, LC_UNIXTHREAD, zero LC_LOAD_DYLIB, signed com.apple.launchd.
+// are the native tools, so the container had nothing left to provide. It
+// also used to require a cctools-port cross-compiler named
+// arm-apple-darwin11-clang, bootstrapped against a real iPhoneOS 6.1 SDK;
+// that is a different thing from the pin above and is still not required.
 //
 // The binary is identical for every firmware target (no per-firmware
 // customization at all), so BakeFirmware.cpp's main() calls this exactly
 // once, before its per-firmware loop, and hands the resulting path to every
 // bakeRamdisk() call.
+//
+// **That is exactly what has to change when entrypoint goes dynamic.** The
+// SDK then stops being irrelevant: iPhoneOS8.4 for AppleTV3,1/AppleTV3,2 and
+// iPhoneOS7.1 for AppleTV2,1, and a cross-version pairing measured 787
+// phantom symbols — the class that links clean and dies at load. At that
+// point this call moves INSIDE BakeFirmware.cpp's per-firmware loop and sets
+// DEVICE=<model> in the child's environment; entrypoint/Makefile already
+// carries the device -> Xcode mapping (XCODE_FOR_<model>) and already honours
+// it, so that is a caller change rather than a redesign. Until then, one
+// shared build is correct, because a freestanding binary links no SDK at all.
+//
 // Not this function's own job to guard against being called more than
 // once; it just builds, every time it's asked to.
 std::string buildEntrypointBinary() {
@@ -300,9 +330,12 @@ std::string buildEntrypointBinary() {
     bool ok = runCommand({"make", "clean", "all"}, entrypointDir);
     if (!ok) {
         fprintf(stderr,
-                "bakeRamdisk: failed to build entrypoint/ — if this is the first run, see "
-                "entrypoint/README.md's one-time setup step (`brew install ldid`; the compiler "
-                "and linker come from the Xcode Command Line Tools)\n");
+                "bakeRamdisk: failed to build entrypoint/ — see the make output above. If this\n"
+                "  is the first run: `brew install ldid`, and put Xcode_6.4.dmg and\n"
+                "  Xcode_5.1.1.dmg in ~/Downloads (the build uses a pinned toolchain and will\n"
+                "  not silently fall back to the system compiler). Point it elsewhere with\n"
+                "  XCODE_TOOLCHAIN=<dir> or XCODE_SEARCH_DIR=<dir> in the environment. See\n"
+                "  entrypoint/README.md's \"Pinned toolchain\".\n");
         return "";
     }
     if (!fs::exists(outputPath)) {
@@ -2296,6 +2329,223 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
     return ok;
 }
 
+// ---------------------------------------------------------------------------
+// Symbol-closure check for the spliced entrypoint
+// ---------------------------------------------------------------------------
+// Runs against the REAL mounted ramdisk, per device and per build, which is
+// the whole reason it lives in the bake rather than in CI: the bake already
+// has the exact libraries that device will boot attached at `mountpoint`, so
+// there is no stored symbol snapshot to drift out of date.
+//
+// WHY IT EXISTS. entrypoint is freestanding today, and is queued to be
+// converted to a dynamically linked binary against the target firmware's own
+// libraries. The dominant new failure mode there is a symbol that LINKS
+// cleanly and fails to BIND at load: on this hardware that is a silent death
+// with no console and no display output — the exact class of bug this project
+// has just spent weeks escaping. It is not theoretical. An 8.4 SDK paired
+// against a 7.1.2 device was measured advertising 787 symbols the device does
+// not export, and every one of them would have linked. This turns that whole
+// class into a loud bake-time failure with names attached.
+//
+// IT IS A NO-OP TODAY, AND THAT IS THE POINT. A freestanding entrypoint has
+// zero undefined symbols, zero LC_LOAD_DYLIB and no LC_LOAD_DYLINKER, so the
+// check passes trivially and costs one `otool -l` plus one `nm -u`. Landing
+// it before the conversion is what gets it exercised by the existing bakes on
+// all three devices while it still cannot fail, rather than debugging the
+// guardrail and the thing it guards at the same time. Do not "simplify" the
+// freestanding case away — there is deliberately no special case for it; the
+// empty sets just make every loop below run zero times.
+//
+// Two implementation notes that are load-bearing:
+//
+//  * The defined set is collected with `nm -g -U` — external symbols, NOT
+//    undefined — and that spelling matters because it keeps N_INDR indirect
+//    symbols (nm type `I`). On 8.4, memcpy/memset/memcmp/strcmp/strncmp are
+//    indirect aliases of the `_platform_*` implementations; a naive `nm -g`
+//    scan that only kept `T` would miss all five and fail a perfectly good
+//    binary.
+//  * A missing dylib is the same class of failure as a missing symbol and is
+//    much cheaper to detect, so the structural load commands are checked
+//    first and reported separately.
+//
+// Known, accepted narrowness: weakly-referenced undefined symbols are legal
+// to leave unbound at load, and this treats them like any other. That is the
+// fail-loud direction, it is correct for everything entrypoint is likely to
+// reference, and it is cheap to relax (parse `nm -m` for "weak") if a real
+// case ever turns up.
+static bool verifyEntrypointRuntimeClosure(const std::string& mountpoint,
+                                            const std::string& entrypointBinaryPath,
+                                            const std::string& label) {
+    auto trim = [](const std::string& s) {
+        size_t b = s.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) return std::string();
+        size_t e = s.find_last_not_of(" \t\r\n");
+        return s.substr(b, e - b + 1);
+    };
+
+    // --- structural dependencies, straight out of the load commands --------
+    bool otoolOk = false;
+    std::string loadCommands = runCommandCapture({"otool", "-l", entrypointBinaryPath}, &otoolOk);
+    if (!otoolOk) {
+        fprintf(stderr, "bakeRamdisk: %s: cannot read load commands from %s (otool -l failed)\n",
+                label.c_str(), entrypointBinaryPath.c_str());
+        return false;
+    }
+
+    std::vector<std::string> dylibs;
+    std::string dylinker;
+    {
+        std::istringstream in(loadCommands);
+        std::string line;
+        std::string pending;
+        while (std::getline(in, line)) {
+            std::string t = trim(line);
+            if (t.rfind("cmd ", 0) == 0) {
+                std::string cmd = t.substr(4);
+                if (cmd == "LC_LOAD_DYLIB" || cmd == "LC_LOAD_WEAK_DYLIB" ||
+                    cmd == "LC_REEXPORT_DYLIB" || cmd == "LC_LOAD_UPWARD_DYLIB" ||
+                    cmd == "LC_LOAD_DYLINKER") {
+                    pending = cmd;
+                } else {
+                    pending.clear();
+                }
+                continue;
+            }
+            if (!pending.empty() && t.rfind("name ", 0) == 0) {
+                std::string value = trim(t.substr(5));
+                // otool appends " (offset N)" to the name field.
+                size_t paren = value.find(" (offset ");
+                if (paren != std::string::npos) value = value.substr(0, paren);
+                if (pending == "LC_LOAD_DYLINKER") {
+                    dylinker = value;
+                } else {
+                    dylibs.push_back(value);
+                }
+                pending.clear();
+            }
+        }
+    }
+
+    std::vector<std::string> missingPaths;
+    auto checkOnRamdisk = [&](const std::string& p) {
+        if (p.empty()) return;
+        if (p[0] == '@') {
+            // @rpath/@executable_path/@loader_path have no meaning for a
+            // binary that becomes PID 1 on a ramdisk with no launcher to set
+            // one up. Treat as unsatisfiable rather than guessing.
+            missingPaths.push_back(p + "  (@-relative install name; not resolvable as PID 1)");
+            return;
+        }
+        std::error_code ec;
+        if (!fs::exists(mountpoint + p, ec)) missingPaths.push_back(p);
+    };
+    for (const auto& d : dylibs) checkOnRamdisk(d);
+    checkOnRamdisk(dylinker);
+
+    if (!missingPaths.empty()) {
+        fprintf(stderr,
+                "bakeRamdisk: %s: entrypoint depends on libraries this ramdisk does not have:\n",
+                label.c_str());
+        for (const auto& p : missingPaths) fprintf(stderr, "    %s\n", p.c_str());
+        fprintf(stderr,
+                "  This is almost always a toolchain/SDK mismatched to the target firmware.\n"
+                "  entrypoint/Makefile picks the pinned Xcode per device (XCODE_FOR_<model>):\n"
+                "  Xcode 6.4 / iPhoneOS8.4.sdk for AppleTV3,1 and AppleTV3,2, Xcode 5.1.1 /\n"
+                "  iPhoneOS7.1.sdk for AppleTV2,1. A binary built against the wrong one links\n"
+                "  clean and dies silently at load on the device.\n");
+        return false;
+    }
+
+    // --- symbol closure -----------------------------------------------------
+    bool nmOk = false;
+    std::string undefinedRaw = runCommandCapture({"nm", "-j", "-u", entrypointBinaryPath}, &nmOk);
+    if (!nmOk) {
+        fprintf(stderr, "bakeRamdisk: %s: cannot list undefined symbols in %s (nm -u failed)\n",
+                label.c_str(), entrypointBinaryPath.c_str());
+        return false;
+    }
+
+    std::set<std::string> undefined;
+    {
+        std::istringstream in(undefinedRaw);
+        std::string line;
+        while (std::getline(in, line)) {
+            std::string t = trim(line);
+            if (!t.empty()) undefined.insert(t);
+        }
+    }
+
+    if (undefined.empty()) {
+        printf("  entrypoint closure: %zu dylib(s), 0 undefined symbols — nothing to bind\n",
+               dylibs.size());
+        return true;
+    }
+
+    std::set<std::string> defined;
+    size_t scanned = 0;
+    for (const char* sub : {"/usr/lib", "/usr/lib/system"}) {
+        std::error_code ec;
+        fs::path dir = fs::path(mountpoint + sub);
+        if (!fs::is_directory(dir, ec)) continue;
+        for (fs::directory_iterator it(dir, ec), end; it != end && !ec; it.increment(ec)) {
+            if (it->path().extension() != ".dylib") continue;
+            std::error_code fileEc;
+            if (!fs::is_regular_file(it->path(), fileEc)) continue;  // follows symlinks
+            bool ok = false;
+            std::string out = runCommandCapture({"nm", "-j", "-g", "-U", it->path().string()}, &ok);
+            if (!ok) continue;
+            ++scanned;
+            std::istringstream in(out);
+            std::string line;
+            while (std::getline(in, line)) {
+                std::string t = trim(line);
+                if (!t.empty()) defined.insert(t);
+            }
+        }
+    }
+
+    std::vector<std::string> unbound;
+    for (const auto& s : undefined) {
+        if (defined.find(s) == defined.end()) unbound.push_back(s);
+    }
+
+    if (!unbound.empty()) {
+        fprintf(stderr,
+                "bakeRamdisk: %s: %zu of entrypoint's %zu undefined symbol(s) are not exported by\n"
+                "  anything on this ramdisk (scanned %zu dylib(s) under /usr/lib and\n"
+                "  /usr/lib/system, %zu exported symbols):\n",
+                label.c_str(), unbound.size(), undefined.size(), scanned, defined.size());
+        size_t shown = 0;
+        for (const auto& s : unbound) {
+            if (shown++ == 40) {
+                fprintf(stderr, "    ... and %zu more\n", unbound.size() - 40);
+                break;
+            }
+            fprintf(stderr, "    %s\n", s.c_str());
+        }
+        fprintf(stderr,
+                "  These LINK but will not BIND. On this hardware that is a silent death at\n"
+                "  boot — no console, no display — so the bake fails here instead.\n"
+                "  This is almost always a toolchain/SDK mismatched to the target firmware.\n"
+                "  entrypoint/Makefile picks the pinned Xcode per device (XCODE_FOR_<model>):\n"
+                "  Xcode 6.4 / iPhoneOS8.4.sdk for AppleTV3,1 and AppleTV3,2, Xcode 5.1.1 /\n"
+                "  iPhoneOS7.1.sdk for AppleTV2,1. Rebuild entrypoint against the right one\n"
+                "  (`make -C entrypoint clean all DEVICE=<model>`) and re-bake with --force.\n");
+        if (scanned == 0) {
+            fprintf(stderr,
+                    "  NOTE: zero dylibs were readable under %s/usr/lib — if that is wrong, the\n"
+                    "  failure above is this check's own, not the binary's.\n",
+                    mountpoint.c_str());
+        }
+        return false;
+    }
+
+    printf("  entrypoint closure: %zu dylib(s), %zu undefined symbol(s), all bound against %zu\n"
+           "                      exported symbol(s) from %zu ramdisk dylib(s)\n",
+           dylibs.size(), undefined.size(), defined.size(), scanned);
+    return true;
+}
+
 // patchRamdisk() (as it was, before this file existed) went through three
 // designs before this one. Recording why, since the investigation was
 // expensive and the wrong lesson ("just patch the bug") would be easy for a
@@ -2712,6 +2962,28 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     // this function checks geteuid() up front.
     if (!spliceFileContentInPlace(mount.mountpoint + "/sbin/launchd", entrypointBinaryPath)) {
         return false;
+    }
+
+    // Now that the real target volume is attached, prove the binary just
+    // spliced over PID 1 can actually load on it: every LC_LOAD_DYLIB and the
+    // LC_LOAD_DYLINKER target must exist here, and every undefined symbol must
+    // be exported by something under /usr/lib or /usr/lib/system. See
+    // verifyEntrypointRuntimeClosure() for why this is a bake-time check and
+    // not a CI one, and why it is deliberately a no-op while entrypoint is
+    // still freestanding.
+    //
+    // The label is derived from outputPath rather than threaded down as new
+    // parameters: BakeFirmware.cpp builds it as
+    // dist/RestoreRamDisk-<device>_<buildID>.dmg, so the stem already carries
+    // exactly the device and build this bake is for.
+    {
+        std::string label = fs::path(outputPath).stem().string();
+        const std::string prefix = "RestoreRamDisk-";
+        if (label.rfind(prefix, 0) == 0) label = label.substr(prefix.size());
+        if (label.empty()) label = outputPath;
+        if (!verifyEntrypointRuntimeClosure(mount.mountpoint, entrypointBinaryPath, label)) {
+            return false;
+        }
     }
 
     // `ditto`, NOT `cp -a`, and that is load-bearing rather than stylistic:

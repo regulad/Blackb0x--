@@ -2249,26 +2249,76 @@ static bool computePreinstalledPackages(const std::set<std::string>& eligibleFil
 // computed preinstall payload + dpkg state into `blackb0xRoot`. No
 // network, no container, no dpkg invocation — just local file copies —
 // which is exactly why the expensive computation above is worth caching
+// Stages ONE top-level entry of a device-shaped payload into the overlay,
+// redirecting whatever is bound for the data partition into the var stage.
+//
+// A .deb's data.tar is device-shaped: a package that ships files under /var
+// has them at a bare top-level `var/`. Merging that at the overlay root puts
+// them on /mnt/var, a symlink onto the data partition — the one volume that
+// refuses new regular files — so `var` is redirected into the stage and
+// every other top-level name keeps its device-shaped path.
+//
+// `private/` IS THE CASE THAT MAKES THIS A FUNCTION rather than a ternary.
+// A comment here used to assert that no package ships `private/var/`,
+// "checked against every .deb in debcache/". That check was wrong:
+// com.nexuist.webzzuf ships private/var/mobile/webzzuf/. A rescan of all 107
+// packages finds it — 8004 payload entries, where the scan that produced the
+// false claim reported 603 and should have been disbelieved on that basis
+// alone.
+//
+// The trap is LATENT, not active: webzzuf is one of the archival-only
+// packages in debcache/ that misc/README.md documents as deliberately not
+// wired into packages.txt, so nothing stages it today and it caused none of
+// the 130 observed failures. It is handled anyway because /var IS /private/var
+// on the device — the moment anything shipping `private/` is curated into
+// packages.txt, those files are bound for the same refusing volume as a bare
+// `var/`, and they would fail the same silent way this whole change exists to
+// stop. A latent trap that costs four lines to close is not worth leaving for
+// the person who curates that list to rediscover from a hardware run.
+//
+// So `private/` cannot be redirected wholesale and cannot be passed through
+// wholesale either: its children do not share a destination. `private/var`
+// goes to the stage, everything else under it keeps `private/<name>`. That is
+// the only top-level name needing per-child treatment, which is why this
+// recurses exactly one level and no further.
+//
+// `remapEtc` exists because the two callers disagree about `etc/`, and
+// legitimately so. Our own package ships `etc/` meaning the device's
+// /private/etc; a .deb payload's `etc/` is already device-shaped and must not
+// be touched.
+static bool stagePayloadTopLevel(const fs::path& blackb0xRoot, const std::string& name,
+                                 const fs::path& srcPath, bool remapEtc) {
+    if (name == "var") {
+        return mergeRealFilesystemEntry(blackb0xRoot, varStage(""), srcPath);
+    }
+    if (name == "private") {
+        bool ok = true;
+        std::error_code ec;
+        for (const auto& child : fs::directory_iterator(srcPath, ec)) {
+            const std::string childName = child.path().filename().string();
+            const std::string dest = (childName == "var") ? varStage("")
+                                                          : "private/" + childName;
+            ok &= mergeRealFilesystemEntry(blackb0xRoot, dest, child.path());
+        }
+        return ok;
+    }
+    if (remapEtc && name == "etc") {
+        return mergeRealFilesystemEntry(blackb0xRoot, "private/etc", srcPath);
+    }
+    return mergeRealFilesystemEntry(blackb0xRoot, name, srcPath);
+}
+
 // across every firmware a single bake-firmware run bakes (see
 // computeGlobalDebcacheOnce()) while this part still runs once per
 // firmware, into that firmware's own /blackb0x.
 //
-// The preinstall payload root is DEVICE-SHAPED — it is the union of real .deb
-// data.tar payloads, so a package that ships files under /var has them at a
-// bare top-level `var/` here (never `private/var/`; checked against every
-// .deb in debcache/, and several do ship one — seatbeltunlock, p0sixspwn,
-// a few of the tihmstar tools). Merging that at the overlay root would put
-// them on /mnt/var, which is a symlink onto the data partition and therefore
-// exactly the volume that refuses new files; so `var` alone is redirected
-// into the var stage here, and every other top-level name keeps its
-// device-shaped path. See kVarStageRel.
 static bool mergePreinstalledPackages(const fs::path& blackb0xRoot, const std::string& preinstallDir,
                                        const std::string& dpkgStateDir) {
     bool ok = true;
     std::error_code dirEc;
     for (const auto& entry : fs::directory_iterator(preinstallDir, dirEc)) {
-        std::string name = entry.path().filename().string();
-        ok &= mergeRealFilesystemEntry(blackb0xRoot, name == "var" ? varStage("") : name, entry.path());
+        ok &= stagePayloadTopLevel(blackb0xRoot, entry.path().filename().string(), entry.path(),
+                                    /*remapEtc=*/false);
     }
     if (fs::exists(dpkgStateDir + "/status")) {
         ok &= stageFile(blackb0xRoot, varStage("lib/dpkg/status"), dpkgStateDir + "/status", 0, 0, 0644);
@@ -3001,10 +3051,7 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
             name.rfind("data.tar", 0) == 0) {
             continue;
         }
-        std::string destRel = name;
-        if (name == "etc") destRel = "private/etc";
-        if (name == "var") destRel = varStage("");
-        ok &= mergeRealFilesystemEntry(blackb0xRoot, destRel, entry.path());
+        ok &= stagePayloadTopLevel(blackb0xRoot, name, entry.path(), /*remapEtc=*/true);
     }
 
     // Record the real on-device paths, which are the .deb's own (unprefixed)

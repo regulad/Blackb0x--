@@ -6644,3 +6644,83 @@ which is where this project has actually been blind, keeps its console.
 If this is ever revisited, the prerequisite is the offline `mobilesubstrate`
 install, not the tweak; without that, the tweak is worth nothing on the only
 boots where it matters.
+
+## sshd never started because launchd does not scan `/Library/LaunchDaemons`
+
+Read off the **real decrypted stock root filesystem** for 12H1006
+(`048-37456-138.dmg` out of the IPSW, `RootFSKey` from theapplewiki, decrypted
+with xpwn's `dmg extract` — the CLI is not built on macOS by default, so it was
+compiled by hand against the already-built `libdmg.a`/`libhfs.a`/`libcommon.a`):
+
+- **`/Library/LaunchDaemons` DOES NOT EXIST.** Stock `/Library` is
+  `Application Support, Audio, Caches, Filesystems, Internet Plug-Ins,
+  Keychains, LaunchAgents, Logs, Managed Preferences, MobileDevice,
+  Preferences, Printers, Updates`. There is a `LaunchAgents` and no
+  `LaunchDaemons`.
+- `/System/Library/LaunchDaemons` holds **174** plists.
+- The device's `/sbin/launchd` contains the string
+  `/System/Library/LaunchDaemons` and contains `/Library/LaunchDaemons`
+  **nowhere**.
+
+`openssh` ships its plist **only** to `/Library/LaunchDaemons`. So on this
+platform, out of the box, nothing ever loads it. That is the whole bug, and it
+predates every change this project made to that file: the socket activation was
+real and worth fixing, but it was never reached.
+
+### How the ecosystem papers over it, and why that did not help us
+
+Five of the seven LaunchDaemon-shipping packages in `debcache/` install into
+`/Library/LaunchDaemons` — `cydia`, `openssh`, `com.firecore.freemem-watcher`,
+`com.nito.tssagent`, `org.tihmstar.fuzzyparrot`. They work on jailbroken
+Apple TVs because **the untether loads that directory by hand.** This project's
+own `misc/untether.bin` carries the line, in plain text:
+
+```sh
+echo 'really jailbroken';
+ls /Library/LaunchDaemons | while read a; do launchctl load /Library/LaunchDaemons/$a; done;
+ls /etc/rc.d       | while read a; do /etc/rc.d/$a; done;
+```
+
+So the loading is done twice over, by the untether payload itself and again by
+anything it finds in `/etc/rc.d` — where `stageEtasonatv()` has always staged
+tihmstar's `daemonload`, which is the same `launchctl load
+/Library/LaunchDaemons` wrapped in `orphan_commander`. Stock tvOS has **no
+`/etc/rc.d` directory at all**, and neither `launchd`, `launchctl` nor
+`xpcproxy` contains the string `rc.d`; that directory is also purely a
+jailbreak construct, run only by the untether's own loop.
+
+The consequence is precise, and it is exactly what was observed: **everything
+in `/Library/LaunchDaemons` runs only on a boot where the untether ran.** Every
+sshd test so far has been a TETHER boot — booting the NAND OS off our patched
+kernel, where AMFI is already permissive and the untether is neither needed nor
+triggered. `daemonload` was staged correctly the whole time and never executed.
+
+### Two wrong turns, both worth keeping
+
+The first evidence for this conclusion was the restore ramdisk's
+`/sbin/launchd`, and it was **dismissed as the wrong binary** — "that is the
+restore ramdisk's launchd, not the booted device's". It is the same binary.
+Both are 239,536 bytes and both hash to
+`dfd35edf9a66a8408506e1da446d52b07cc1d11ac7fe83cb6f9fb7bbffedfcbb`. A correct
+conclusion was thrown away on a plausible-sounding objection that one `shasum`
+would have settled.
+
+The second was treating the packages as a refutation. `cydia` shipping its
+startup daemon to `/Library/LaunchDaemons`, on a platform where Cydia
+demonstrably works, looked conclusive. It is evidence about **iOS**, where
+launchd does scan that directory — not about this Apple TV build. Packaging
+conventions describe the ecosystem a package targets, not the loader on the
+device in front of you.
+
+### The fix
+
+The plist ships in **both** directories, byte-identical and under one Label.
+`/System/Library/LaunchDaemons` is what launchd itself scans, so sshd comes up
+on any boot including a tethered one; the `/Library` copy overwrites openssh's
+own so that `daemonload`, on an untethered boot, loads ours rather than the
+socket-activated original. Whichever path fires, the job is the same one, and a
+duplicate Label is a benign "already loaded".
+
+This is also the answer to a question `stageEtasonatv()` never wrote down: it
+has always staged `xyz.regulad.blackb0x.postinstall.plist` into both
+directories. That is why the first-boot daemon works and sshd did not.

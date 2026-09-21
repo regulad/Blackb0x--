@@ -1104,6 +1104,47 @@ int main(void) {
     }
     printf("Devices mounted\n");
 
+    /* NO OVERLAY => SAY SO AND EXIT CLEANLY, WITHOUT REBOOTING.
+     *
+     * This is the DiagBinary ramdisk's whole purpose. That image carries this
+     * binary, its plist and /mnt, and deliberately no /blackb0x at all, so
+     * there is nothing to install. Left to itself the normal path would run
+     * merge_tree() against a directory that does not exist, log the failure,
+     * and then fall through to reboot(0) anyway -- which is exactly what the
+     * first hardware run of it did: the device rebooted so fast that nothing
+     * ever reached the screen.
+     *
+     * That reboot destroys the only thing we are trying to measure. Staying
+     * alive keeps Apple's launchd and restored_external running, which means
+     * the display stays lit and the device stays enumerated on USB, so
+     * whatever we print here has somewhere to land and a human has time to
+     * read it.
+     *
+     * WHAT THIS TESTS. It is not known whether console output survives
+     * restored_external pointing the display pipe at its own IOSurfaces --
+     * the kernel console draws into the boot framebuffer iBoot set up, and
+     * once that swap lands the boot framebuffer is plausibly off-screen. If
+     * this line appears on the TV, /dev/console is a real diagnostic channel
+     * and the framebuffer work is unnecessary. If the logo comes up and this
+     * never does, the console is dead behind it and drawing into the shared
+     * IOSurface is the only way to get a pixel out.
+     *
+     * exit code 0, not a reboot and not a failure: KeepAlive is absent from
+     * the plist, so launchd reaps us and does not respawn. Nothing else on
+     * the ramdisk touches block devices, and the NAND is already unmounted
+     * below before we return. */
+    if (access("/blackb0x", F_OK) != 0) {
+        printf("no overlay to copy, dying peacefully\n");
+        fflush(stdout);
+        sync();
+        rmdir(MNT "/private/var2");
+        unmount(MNT "/dev", 0);
+        unmount(MNT "/private/var", 0);
+        unmount(MNT, 0);
+        sync();
+        return 0;
+    }
+
     do_install();
 
     /* CLOSE THE DIRTY WINDOW IMMEDIATELY. Nothing goes between the merge

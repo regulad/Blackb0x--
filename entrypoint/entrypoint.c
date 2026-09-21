@@ -271,10 +271,31 @@ static void emit_err(const char *fmt, ...)
  * which is where /dev/disk0s1s2 (the data partition) is mounted by main()
  * before do_install() ever runs — so this path only resolves after that
  * mount, which is exactly why the LaunchDaemon plist cannot point
- * StandardOutPath here. See "Where output goes" below. */
-#define INSTALL_LOG_PARENT MNT "/var/mobile"
-#define INSTALL_LOG_DIR    INSTALL_LOG_PARENT "/Media"
-#define INSTALL_LOG        INSTALL_LOG_DIR "/blackb0x_install.log"
+ * StandardOutPath here. See "Where output goes" below.
+ *
+ * MOVED OUT OF /var/mobile/Media, on evidence. That was this project's path
+ * since the original, and on the first run where the screen console could
+ * actually show an error it said:
+ *
+ *     entrypoint: cannot open /mnt/var/mobile/Media/blackb0x_install.log (o
+ *
+ * /var/mobile/Media is a data-protected location, and on a device whose
+ * keybag has never been unlocked — which is every boot of a restore ramdisk
+ * — opening a file there fails even as root. That is a property of the class
+ * key, not of permissions, so there is nothing to chmod past.
+ *
+ * /var/.blackb0x is where this project already keeps its on-NAND state
+ * (install-done, and postinstall.out.log / postinstall.err.log written by
+ * the first-boot LaunchDaemon). It sits directly under /var, which carries
+ * no protection class, so it is writable exactly where the old path was not
+ * — and putting the record beside the rest of our state is what the
+ * convention already was everywhere except here. Note the leading dot: the
+ * directory is `.blackb0x`, matching install-done and the postinstall logs.
+ *
+ * The directory is created if absent, because panic() can call this before
+ * the overlay that would otherwise have supplied it is merged. */
+#define BLACKB0X_STATE_DIR MNT "/var/.blackb0x"
+#define INSTALL_LOG        BLACKB0X_STATE_DIR "/install.log"
 
 /* uid/gid used throughout for installed files — 501:20, "mobile:staff",
  * standard iOS convention. */
@@ -386,29 +407,33 @@ static void emit_err(const char *fmt, ...)
  * evaporating. */
 static void write_install_record(const char *outcome) {
     struct stat st;
-    const char *dirs[2] = {INSTALL_LOG_PARENT, INSTALL_LOG_DIR};
-    for (int i = 0; i < 2; i++) {
-        if (stat(dirs[i], &st) == 0) continue;
-        emit_err("entrypoint: %s is missing on the target volume — creating it\n", dirs[i]);
-        if (mkdir(dirs[i], 0755) != 0) {
-            emit_err("entrypoint: cannot create %s (%s) — install record NOT written\n", dirs[i],
-                    strerror(errno));
+
+    if (stat(BLACKB0X_STATE_DIR, &st) != 0) {
+        emit("entrypoint: %s absent on the target volume — creating it\n", BLACKB0X_STATE_DIR);
+        if (mkdir(BLACKB0X_STATE_DIR, 0755) != 0) {
+            emit_err("entrypoint: cannot create %s (errno %d, %s) — install record NOT written\n",
+                     BLACKB0X_STATE_DIR, errno, strerror(errno));
             return;
         }
-        chown(dirs[i], UID_MOBILE, GID_STAFF);
+        chown(BLACKB0X_STATE_DIR, UID_MOBILE, GID_STAFF);
     }
 
+    /* The numeric errno goes out alongside strerror's text deliberately:
+     * "Operation not permitted" and "Operation not supported" read almost
+     * identically at a glance on a TV and mean very different things. */
     int fd = open(INSTALL_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) {
-        emit_err("entrypoint: cannot open %s (%s) — install record NOT written\n", INSTALL_LOG,
-                strerror(errno));
+        emit_err("entrypoint: cannot open %s (errno %d, %s) — install record NOT written\n",
+                 INSTALL_LOG, errno, strerror(errno));
         return;
     }
     (void)write(fd, outcome, strlen(outcome));
     close(fd);
     if (chown(INSTALL_LOG, UID_MOBILE, GID_STAFF) != 0 || chmod(INSTALL_LOG, 0644) != 0) {
-        emit_err("entrypoint: cannot set 501:20 0644 on %s (%s)\n", INSTALL_LOG, strerror(errno));
+        emit_err("entrypoint: cannot set 501:20 0644 on %s (errno %d, %s)\n",
+                 INSTALL_LOG, errno, strerror(errno));
     }
+    emit("entrypoint: install record written to %s\n", INSTALL_LOG);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1057,6 +1082,50 @@ static void start_restored_external(void) {
     emit("Started %s (pid %d) for display and USB bring-up\n", prog, (int)pid);
 }
 
+/* ---------------------------------------------------------------------- */
+/* Saying what we found, not just that we got there.                       */
+/*                                                                          */
+/* Until the screen console worked, extra logging was writing into a hole,  */
+/* so this binary said only "Main filesystem mounted" and moved on. Now     */
+/* that a human can watch a run, the interesting facts are the ones that    */
+/* distinguish a mount that worked from a mount that succeeded onto the     */
+/* wrong thing: which device backs it, how big it is, how much room is left */
+/* (the merge needs room), and whether the directories the next step is     */
+/* about to use are actually there. Every one of these is a question this   */
+/* project has had to answer by guessing at least once.                     */
+/*                                                                          */
+/* Both are pure reporting: they never fail the run, and a probe that       */
+/* cannot answer says so and returns.                                       */
+/* ---------------------------------------------------------------------- */
+
+static void report_volume(const char *label, const char *path) {
+    struct statfs fs;
+    if (statfs(path, &fs) != 0) {
+        emit_err("  %s: statfs(%s) failed (errno %d, %s)\n",
+                 label, path, errno, strerror(errno));
+        return;
+    }
+    emit("  %s: %s on %s, %llu MiB total, %llu MiB free\n", label,
+         fs.f_mntfromname, fs.f_mntonname,
+         (unsigned long long)fs.f_blocks * fs.f_bsize >> 20,
+         (unsigned long long)fs.f_bavail * fs.f_bsize >> 20);
+}
+
+static void report_path(const char *path) {
+    struct stat st;
+    const char *kind;
+    if (lstat(path, &st) != 0) {
+        emit("  %s: ABSENT (errno %d, %s)\n", path, errno, strerror(errno));
+        return;
+    }
+    kind = S_ISDIR(st.st_mode)  ? "dir"  :
+           S_ISREG(st.st_mode)  ? "file" :
+           S_ISLNK(st.st_mode)  ? "link" : "other";
+    emit("  %s: %s mode 0%o uid %u gid %u size %llu\n", path, kind,
+         (unsigned)(st.st_mode & 07777), (unsigned)st.st_uid,
+         (unsigned)st.st_gid, (unsigned long long)st.st_size);
+}
+
 /* THE ONE PLACE THIS BINARY WAITS TO BE READ.
  *
  * Both endings of a run now go through here, and they did not used to. The
@@ -1195,7 +1264,7 @@ int main(void) {
     }
 
     emit("\n\n\n\n\n");
-    emit("blackb0x Jailbreak - by @NSSpiral\n");
+    emit("Blackb0x-- by regulad (orig. Blackb0x by NSSpiral)\n");
     emit("Mounting filesystem...\n");
 
     /* CRITICAL: matches FUN_00006028 exactly. Darwin's HFS mount doesn't
@@ -1217,6 +1286,9 @@ int main(void) {
         return -1;
     }
     emit("Main filesystem mounted\n");
+    report_volume("system", MNT);
+    report_path(MNT "/private/var");
+    report_path(MNT "/Applications");
 
     emit("Mounting user filesystem...\n");
     mkdir(MNT "/private/var2", 0x1ed);
@@ -1227,6 +1299,10 @@ int main(void) {
         return -1;
     }
     emit("User Filesystem mounted\n");
+    report_volume("data", MNT "/private/var");
+    report_path(BLACKB0X_STATE_DIR);
+    report_path(MNT "/var/.blackb0x/install-done");
+    report_path(MNT "/var/mobile");
 
     emit("Mounting devices...\n");
     if (mount("devfs", MNT "/dev", 0, NULL) != 0) {
@@ -1250,6 +1326,13 @@ int main(void) {
         return -1;
     }
     emit("Devices mounted\n");
+    report_path(MNT "/dev/disk0s1s1");
+
+    /* What we are about to install, before we try. A missing or empty
+     * overlay is the difference between the install path and the diagnostic
+     * one, and it has been diagnosed from the outside twice. */
+    report_path("/blackb0x");
+    report_volume("ramdisk", "/");
 
     /* NO OVERLAY => SAY SO AND EXIT CLEANLY, WITHOUT REBOOTING.
      *
@@ -1289,49 +1372,31 @@ int main(void) {
         unmount(MNT, 0);
         sync();
 
-        /* SLEEP FOREVER INSTEAD OF RETURNING. This is a live hypothesis test,
-         * not defensive coding.
+        /* WAIT, THEN REBOOT — the same ending as a successful install, and
+         * deliberately no longer a special one.
          *
-         * The previous revision returned 0 here, and on hardware the device
-         * STILL rebooted into iBoot Recovery after showing the Apple logo --
-         * even though the shipped binary was verified to contain this very
-         * early-exit, so nothing here called reboot(2). Something else reboots
-         * when our job is present, and the DiagRepack image (identical except
-         * that it carries no job at all) does not reboot.
+         * Three revisions of this path, each answering the previous one's
+         * question. It first returned 0, and on hardware the device rebooted
+         * into iBoot Recovery even though the shipped binary provably called
+         * no reboot(2) -- something else reboots when our job exits, and the
+         * DiagRepack image (identical but carrying no job at all) does not.
+         * It then slept forever to test that, and the device did sit there
+         * indefinitely, which confirmed it: on this ramdisk a job EXITING is
+         * itself a reason for the system to go down, and a restore ramdisk
+         * whose bootstrap carries Boot tasks is a coherent place for that to
+         * be true.
          *
-         * The hypothesis: this launchd treats a job EXITING as a reason to
-         * reboot. That is not as strange as it sounds here -- this is a
-         * restore ramdisk, and launchd's embedded bootstrap plist carries Boot
-         * tasks with RequireSuccess semantics; a restore environment that
-         * reboots once its work is done is a coherent design. Nothing has been
-         * decoded to confirm it, which is exactly why this is worth one run.
-         *
-         * So: do not exit. Stay resident and let a human look at the screen.
-         * If the device now sits at the logo indefinitely, exiting was the
-         * trigger and we have learned something real about the environment we
-         * are a guest in. If it reboots anyway, the trigger is something this
-         * process DOES rather than the fact of its exiting, and the next
-         * suspect is our mount/unmount of the NAND.
-         *
-         * The heartbeat was originally the console test that motivated this
-         * whole image: a line every ten seconds would have meant /dev/console
-         * is a live diagnostic channel, not just a wired-up one. IT DID NOT
-         * APPEAR. The device sat at the Apple logo for as long as anyone
-         * watched, with nothing on screen -- which is the measurement that
-         * produced screen.h. The heartbeat stays because it is still the
-         * liveness signal on the console side, and it now has a second
-         * destination that is known to work.
-         *
-         * sleep(3) is real libc here -- the freestanding busy_wait() spin is
-         * gone -- so this costs no CPU and cannot be mistaken for a hang.
-         *
-         * The heartbeat this loop used to carry was originally the console
-         * test that motivated the whole image: a line every ten seconds would
-         * have meant /dev/console is a live diagnostic channel, not just a
-         * wired-up one. IT DID NOT APPEAR, which is the measurement that
-         * produced screen.h. It is now wait_to_be_read(), shared with the
-         * normal ending -- see that function. */
-        for (;;) wait_to_be_read();
+         * With that answered, sleeping forever has nothing left to measure
+         * and costs a power-cycle to get out of. So it now reads its screen
+         * for thirty seconds and reboots the way the install path does,
+         * through set_auto_boot() so the device comes up on the NAND OS
+         * rather than back in Recovery. The reboot is OURS and explicit,
+         * which is the point: the thing we learned is that leaving the
+         * decision to the environment produces a reboot we do not control. */
+        wait_to_be_read();
+        set_auto_boot();
+        reboot(0);
+        return 0;
     }
 
     do_install();

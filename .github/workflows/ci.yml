@@ -989,27 +989,23 @@ jobs:
       # hard-fails (it will not substitute the system compiler). Which is the
       # correct behaviour, and the reason these two names have to be here.
       #
-      # --diagnostic-ramdisks IS PASSED ON EVERY RUN, EVEN THOUGH THE THREE
-      # EXTRA IMAGES ARE PURE DIAGNOSTICS AND COST THIS LEG THREE MORE RAMDISK
-      # BAKES.
-      # That is not thoroughness; it is the only way the owner can obtain them
-      # at all. Baking a ramdisk needs root, Theos, apt, afsctool and the
-      # pinned Xcode, and takes ~30 minutes -- exactly the set of requirements
-      # this job exists to keep off end users' machines (see this file's header
-      # and AGENTS.md). A "run it locally when you need it" policy would mean
-      # the images are unavailable precisely when a device is sitting in DFU
-      # waiting to be bisected. So they ride along in the firmware-<device>
-      # artifact, and blackb0x's --diag-ramdisk-repack / --diag-ramdisk-binary
-      # / --diag-ramdisk-overlay find them already there. What each isolates,
-      # and the hardware observations that made the bisect necessary, are in
-      # src/BakeRamdisk.hpp's RamdiskVariant.
+      # --diagnostic-ramdisks IS NO LONGER PASSED, AND THE FLAG IS STILL THERE.
+      # The three diagnostic images existed to bisect one question -- why a
+      # booted ramdisk showed nothing -- and they answered it: repack alone is
+      # fine, size is not the problem, the binary runs and AMFI accepts it, a
+      # job exiting is what takes the system down, and /dev/console never
+      # reaches the display. With those settled there is nothing left for them
+      # to isolate, and baking them costs this leg three extra ramdisk bakes on
+      # every push. The flag stays in bake-firmware for a future bisect that
+      # needs it; what changes here is only that CI does not spend the time
+      # speculatively. See src/BakeRamdisk.hpp's RamdiskVariant for what each
+      # image isolates, and docs/HISTORY.md for what they found.
       - name: Bake
         run: |
           sudo env "PATH=$PATH" "THEOS=$HOME/theos" \
                    "XCODE_TOOLCHAIN=$XCODE_TOOLCHAIN" "DEVICE=$DEVICE" \
             ./build/bake-firmware --device '${{ matrix.device }}' \
-                                  --build '${{ steps.target.outputs.build }}' \
-                                  --diagnostic-ramdisks
+                                  --build '${{ steps.target.outputs.build }}'
 
       - name: Check the bake produced a complete, uploadable suite
         run: |
@@ -1033,22 +1029,12 @@ jobs:
           echo "ramdisk is $size bytes ($((size / 1048576)) MiB)"
           test "$size" -le $((64 * 1024 * 1024))
 
-          # The three diagnostic images (--diagnostic-ramdisks, passed above).
-          # Asserted for the same reason as everything else here: a flag that
-          # silently produced nothing would be discovered by a human with a
-          # device in DFU, which is the most expensive place to find out. They
-          # are held to the same 64 MiB ceiling -- every one of them is SMALLER
-          # than the real ramdisk by construction (one adds nothing, one adds a
-          # few hundred KB, and DiagOverlay is the real image minus the ~52 KB
-          # binary and its plist), so a diagnostic image at or over the ceiling
-          # means the bake did something nobody predicted and the bisect it
-          # feeds would be meaningless.
-          for c in RestoreRamDiskDiagRepack RestoreRamDiskDiagBinary RestoreRamDiskDiagOverlay; do
-            test -s "dist/${c}${suffix}.dmg"
-            dsize=$(stat -f%z "dist/${c}${suffix}.dmg")
-            echo "$c is $dsize bytes ($((dsize / 1048576)) MiB)"
-            test "$dsize" -le $((64 * 1024 * 1024))
-          done
+          # The three diagnostic images used to be asserted here. They are no
+          # longer built on every run -- see the Bake step above -- so there is
+          # nothing to assert. If --diagnostic-ramdisks is ever passed again,
+          # the same 64 MiB ceiling applies to them: each is smaller than the
+          # real ramdisk by construction, so one at or over the ceiling would
+          # mean the bake did something nobody predicted.
 
       # The artifact name is a contract with ensureBakedFirmware() (Cli.cpp),
       # which runs `gh run download -n "firmware-<deviceModel>"` -- device only,

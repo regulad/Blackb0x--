@@ -164,10 +164,17 @@ extern void         CFRelease(const void *cf);
 #define SCREEN_ATTACH_WINDOW_SECS 30
 
 /* Backlog held while no surface has been found yet, replayed on attach.
- * 48 * 112 = 5.25 KB of BSS. Sized to cover everything this binary says
- * between process start and the point restored_external has a display up. */
+ * 48 * 256 = 12 KB of BSS. Sized to cover everything this binary says
+ * between process start and the point restored_external has a display up.
+ *
+ * LINE_MAX WAS 112 AND THAT WAS ITS OWN TRUNCATION, separate from the one
+ * the display was doing. The error that motivated wrapping is 118 characters
+ * long, so fixing only the renderer would have moved the cut rather than
+ * removed it. 256 is past any message this binary formats — the longest are
+ * a path plus an errno plus a clause — and the console now wraps rather than
+ * cuts, so a long line costs rows instead of information. */
 #define SCREEN_BACKLOG_LINES 48
-#define SCREEN_LINE_MAX      112
+#define SCREEN_LINE_MAX      256
 
 /* How many surfaces we are willing to paint at once. restored_external makes
  * three; the bound exists so a surprise does not turn into an unbounded loop

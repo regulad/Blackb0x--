@@ -242,13 +242,24 @@ static int fbtext_string(const fbtext_surface *s, int px, int py, int scale,
  * would wrap the console every few minutes and erase the early boot lines —
  * i.e. destroy the only thing that run exists to show a human.
  *
- * OVERSCAN INSET. The text area is inset from the physical edges by a
- * fraction of the display, because a TV may overscan and the top-left corner
- * is precisely the part it eats first. Apple TV over HDMI normally maps 1:1
- * and would not need this, but "normally" is not a property we can check
- * from here and the cost is a few dozen pixels.
+ * WRAPPING, not truncation. A line longer than the text area continues on
+ * the next row. The first version cut at the right edge on the theory that
+ * the informative part of a progress line is at the front; the first real
+ * error this console ever showed was
+ *
+ *     entrypoint: cannot open /mnt/var/mobile/Media/blackb0x_install.log (o
+ *
+ * — cut exactly where the errno was about to be. The front of that line is
+ * the part we already knew. Wrapping costs rows, which is why the glyphs
+ * shrank at the same time.
+ *
+ * NO OVERSCAN INSET. The text starts at pixel (0,0). There was a ~3% inset
+ * on the theory that a TV may overscan and eats the top-left corner first;
+ * on the actual hardware the output maps 1:1 and the inset only moved the
+ * log inward and cost a row and two columns. If a future display does
+ * overscan, the thing to lose is the first character of a few lines, not
+ * every line's tail.
  * ------------------------------------------------------------------------ */
-#define FBTEXT_INSET_DIVISOR 32   /* ~3% each side; action-safe is ~5% */
 
 typedef struct {
     fbtext_surface s;
@@ -262,23 +273,22 @@ typedef struct {
 
 /* How far to scale an 8x8 cell up for a display `width` pixels across.
  *
- * This was derived from ten-foot legibility guidance — minimum comfortable
- * glyph height about 1/30 of the frame — which gave scale = width/416, i.e. 3
- * on the 1280x720 this device drives: a 24-pixel glyph and ~50 columns.
- * SEEN ON A TV, that is too big. The guidance is written for UI a viewer
- * reads from a sofa; this console is read by someone debugging, who is
- * looking at the screen deliberately and can walk closer. Optimising for
- * glanceability spent rows and columns that the log actually needed, and a
- * wrapped 50-column console throws away the thing the run exists to show.
+ * Twice measured on the real display, twice too big. It started at
+ * width/416 (scale 3 on 720p, ~50 columns) from ten-foot legibility
+ * guidance, which is written for UI read from a sofa rather than a log read
+ * by someone deliberately looking at it. width/640 gave scale 2 and ~75
+ * columns, and that was still too big AND still not enough columns — the
+ * first real error this console printed ran off the right edge.
  *
- * So: width/640, clamped to [2, 6]. 1280 wide lands on 2 — a 16-pixel glyph,
- * ~75 columns and ~40 rows after the overscan inset, which is half again as
- * much log on screen. 1920 lands on 3 and keeps the same apparent size. The
- * floor of 2 stays; an 8-pixel glyph on a TV is not readable from anywhere. */
+ * So: width/960, floored at 1. On the 1280x720 this device drives that is
+ * scale 1 — the font at its native 8x8, 160 columns and 90 rows, which is
+ * enough that most lines need no wrap at all. There is no gentler step
+ * available: the font is a bitmap and the scale is an integer, so below 2
+ * the only value is 1. 1920 lands on 2 and keeps the same apparent size. */
 static int fbtext_scale_for(uint32_t width)
 {
-    int scale = (int)(width / 640u);
-    if (scale < 2) scale = 2;
+    int scale = (int)(width / 960u);
+    if (scale < 1) scale = 1;
     if (scale > 6) scale = 6;
     return scale;
 }
@@ -313,28 +323,53 @@ static int fbtext_console_init(fbtext_console *c, const fbtext_surface *s)
 
     c->s     = *s;
     c->scale = fbtext_scale_for(s->width);
-    c->x0    = (int)(s->width  / FBTEXT_INSET_DIVISOR);
-    c->y0    = (int)(s->height / FBTEXT_INSET_DIVISOR);
+    c->x0    = 0;               /* very top-left; see "NO OVERSCAN INSET" */
+    c->y0    = 0;
     c->fg    = FBTEXT_WHITE;
     c->bg    = FBTEXT_NOFILL;   /* draw over what is there; see the sentinel */
     c->line  = 0;
 
     cell      = 8 * c->scale;
-    c->cols   = (int)(s->width  - 2u * (uint32_t)c->x0) / cell;
-    totalRows = (int)(s->height - 2u * (uint32_t)c->y0) / cell;
+    c->cols   = (int)(s->width)  / cell;
+    totalRows = (int)(s->height) / cell;
     c->rows   = totalRows - 1;   /* the last row is the status line */
 
     return (c->cols > 0 && c->rows > 0);
 }
 
-/* Append one line to the scrolling region. */
-static void fbtext_console_line(fbtext_console *c, const char *str)
+/* Draw one row's worth of text at the current line and advance. */
+static void fbtext_console_row(fbtext_console *c, const char *str, int n)
 {
     if (c->line >= c->rows) c->line = 0;   /* wrap; cheapest possible */
     fbtext_clear_row(c, c->line, c->bg);
     fbtext_string(&c->s, c->x0, c->y0 + c->line * 8 * c->scale, c->scale,
-                  str, c->cols, c->fg, c->bg);
+                  str, n, c->fg, c->bg);
     c->line++;
+}
+
+/* Append one logical line, WRAPPED across as many rows as it needs.
+ *
+ * Wrapping is by column, not by word. Word wrap on paths, errno strings and
+ * hex is worse than useless — it would break `/mnt/var/mobile/Media/...` at
+ * a slash and leave a ragged right edge on text that is mostly one long
+ * token anyway. A continuation row is not marked: at 160 columns a wrapped
+ * line is rare, and a marker costs a column on every line to annotate a few.
+ *
+ * An empty string still consumes a row, so deliberate vertical spacing in
+ * the caller's output survives. */
+static void fbtext_console_line(fbtext_console *c, const char *str)
+{
+    size_t len = strlen(str);
+    size_t off = 0;
+
+    if (len == 0) { fbtext_console_row(c, "", 0); return; }
+
+    while (off < len) {
+        size_t n = len - off;
+        if (n > (size_t)c->cols) n = (size_t)c->cols;
+        fbtext_console_row(c, str + off, (int)n);
+        off += n;
+    }
 }
 
 /* Rewrite the non-scrolling status row in place. */

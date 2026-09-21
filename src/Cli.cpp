@@ -957,6 +957,18 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
                 "  It may not have been baked for this device/build yet -- see the bake matrix in\n"
                 "  .github/workflows/ci.yml.\n",
                 deviceModel.c_str(), buildID.c_str());
+        // The common case for this message is now a diagnostic image, not a
+        // missing device. CI stopped passing --diagnostic-ramdisks once the
+        // bisect they existed for was finished, so the published artifact has
+        // the real ramdisk and nothing else. Say that plainly rather than let
+        // a reader conclude their device is unsupported.
+        if (!extraRamdisk.empty()) {
+            fprintf(stderr,
+                    "  Specifically, %s%s.dmg is absent. Diagnostic ramdisks are no longer\n"
+                    "  published by CI -- bake one locally:\n"
+                    "    sudo ./build/bake-firmware --device '%s' --build %s --diagnostic-ramdisks\n",
+                    extraRamdisk.c_str(), suffix.c_str(), deviceModel.c_str(), buildID.c_str());
+        }
     }
 
     if (geteuid() != 0) {
@@ -976,7 +988,15 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
 
     printf("Running as root and no gh available -- baking locally instead. This takes a few minutes.\n");
     fflush(stdout);
-    if (!runForeground({resolveBakeFirmwarePath(), "--device", deviceModel, "--build", buildID}) || !present()) {
+    // --diagnostic-ramdisks is forwarded when one was asked for. Without it
+    // the bake would succeed, present() would still fail on the missing
+    // diagnostic image, and the user would be told the bake "did not produce a
+    // complete suite" -- when what actually happened is that we never asked
+    // for the thing they requested.
+    std::vector<std::string> bakeArgv = {resolveBakeFirmwarePath(), "--device", deviceModel,
+                                         "--build", buildID};
+    if (!extraRamdisk.empty()) bakeArgv.push_back("--diagnostic-ramdisks");
+    if (!runForeground(bakeArgv) || !present()) {
         fprintf(stderr, "bake-firmware did not produce a complete suite for %s %s.\n",
                 deviceModel.c_str(), buildID.c_str());
         return false;

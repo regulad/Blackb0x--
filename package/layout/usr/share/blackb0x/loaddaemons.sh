@@ -43,16 +43,50 @@
 # a directory.
 set -u
 
+# -w, NOT a bare load. This launchctl is the launchd-2.0 one (its subcommands
+# include bootstrap, enable, kickstart and print-disabled), and its own help
+# text for -w says:
+#
+#   "If the service is disabled, it will be enabled. In previous versions of
+#    launchd, being disabled meant that a service was not loaded. Now,
+#    services are always loaded. If a service is disabled, launchd does not
+#    advertise its service endpoints (sockets, Mach ports, etc.)"
+#
+# So on this generation a disabled service LOADS SILENTLY AND NEVER BINDS ITS
+# SOCKET. A bare `launchctl load` would report success and openssh -- which is
+# socket-activated on port 22 -- would still never accept a connection, with
+# nothing anywhere saying why. -w clears that state as well as loading.
+#
+# The untether's own loop uses a bare load, which is why this is worth writing
+# down rather than matching it exactly: it is the one place this script
+# deliberately differs, and it differs in the safer direction.
 LD=/Library/LaunchDaemons
 if [ -d "$LD" ]; then
     for plist in "$LD"/*; do
         [ -f "$plist" ] || continue
-        echo "loaddaemons: launchctl load $plist"
-        launchctl load "$plist" 2>&1 || true
+        echo "loaddaemons: launchctl load -w $plist"
+        launchctl load -w "$plist" 2>&1 || true
     done
 else
     echo "loaddaemons: $LD absent, nothing to load"
 fi
+
+# NOT kickstarted. Whether a job needs a nudge after loading depends entirely
+# on what kind of job it is, and getting this wrong is worse than doing
+# nothing:
+#
+#   RunAtLoad jobs   start on load. A kickstart is redundant.
+#   socket jobs      bind on load and start when a connection arrives. Forcing
+#                    one to start means running `sshd -i` with no accepted
+#                    connection on stdin, which exits immediately and, under
+#                    inetdCompatibility, invites launchd to throttle-respawn a
+#                    job that was working correctly.
+#
+# openssh is the second kind, so the correct action after loading it is
+# nothing at all.
+echo "loaddaemons: services of interest after load:"
+launchctl list 2>&1 | grep -iE "openssh|blackb0x|cydia|tihmstar|firecore|nito" || \
+    echo "  (none matched -- launchctl list returned nothing for any of them)"
 
 # /etc/rc.d after the plists, matching the untether's own order. Note these
 # run SYNCHRONOUSLY and one of them, tihmstar's daemonload, is

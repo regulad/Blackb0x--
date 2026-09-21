@@ -272,12 +272,16 @@ jobs:
       # for this build, confirmed with `clang -###`. Nor is libLTO.dylib, which
       # ld references lazily and only wants for -flto.
       #
-      # The SDK is not needed TODAY: entrypoint is freestanding (-ffreestanding
-      # -nostdlib) and links no SDK at all, so clang + ld is the entire
-      # requirement. It is taken anyway because the dynamic-linking conversion
-      # queued behind the pending hardware test does link one, and the pairing
-      # is not interchangeable -- a cross-version pairing measured 787 phantom
-      # symbols. Copying it now means that conversion needs no change here.
+      # THE SDK IS LOAD-BEARING. entrypoint is a dynamically linked armv7
+      # binary now, not a freestanding armv6 one, so it links against this
+      # SDK's libSystem.B.dylib stub -- and the pairing is not interchangeable:
+      # matched is 0 phantom symbols on both branches, while an 8.4 SDK against
+      # a 7.1.2 device advertises 787 symbols the device does not export, the
+      # class that links clean and dies at dyld load with no console to say so.
+      # entrypoint/Makefile finds it under the toolchain root laid out below
+      # (SDKs/iPhoneOS<ver>.sdk) and picks the version from XCODE_VERSION,
+      # which DEVICE selects -- so the device -> Xcode -> SDK chain is decided
+      # in one place and this step only has to hand over the whole SDK.
       #
       # Laid out as a bare toolchain root (usr/bin/clang at the top) because
       # that is the first shape XCODE_TOOLCHAIN probes for, and handing over a
@@ -396,18 +400,81 @@ jobs:
               exit 1
             fi
           done
-          # entrypoint must stay a freestanding armv6 Mach-O: LC_UNIXTHREAD,
-          # and no dyld/libSystem at all. It runs as PID 1 on the ramdisk.
+          # entrypoint runs as PID 1 on the ramdisk, and it is a DYNAMICALLY
+          # LINKED armv7 Mach-O -- the same shape Apple's own /sbin/launchd
+          # has on both target ramdisks (LC_MAIN + LC_LOAD_DYLINKER against
+          # libSystem), which is the configuration known to boot on this
+          # hardware. These assertions used to demand the opposite
+          # (freestanding armv6, LC_UNIXTHREAD, zero LC_LOAD_DYLIB); all three
+          # inverted with the conversion.
+          #
+          # Note `! otool ... | grep` is avoided throughout: a leading !
+          # disables errexit for that command (shellcheck SC2251), so a
+          # regression would scroll past and the step would still pass.
           make -C entrypoint clean all
-          file entrypoint/entrypoint | grep -q 'Mach-O executable arm_v6'
-          otool -l entrypoint/entrypoint | grep -q LC_UNIXTHREAD
-          # Not `! otool ... | grep`: a leading ! disables errexit for that
-          # command (shellcheck SC2251), so a regression would scroll past and
-          # the step would still pass.
-          if otool -l entrypoint/entrypoint | grep -qE 'LC_LOAD_DYLIB|LC_LOAD_DYLINKER'; then
-            echo "entrypoint is no longer freestanding" >&2
+          file entrypoint/entrypoint | grep -q 'Mach-O executable arm_v7'
+
+          # LC_MAIN, not LC_UNIXTHREAD. dyld calls main() through entryoff;
+          # there is no crt startup glue (-nostdlib) and none is needed.
+          otool -l entrypoint/entrypoint | grep -q 'cmd LC_MAIN'
+          if otool -l entrypoint/entrypoint | grep -q 'cmd LC_UNIXTHREAD'; then
+            echo "entrypoint has LC_UNIXTHREAD -- it should be LC_MAIN" >&2
             exit 1
           fi
+
+          # EXACTLY ONE dylib, and it is libSystem. The whole runtime closure
+          # on both ramdisks is that one name (its LC_REEXPORT_DYLIB targets
+          # were verified 22/22 and 32/32 present, zero missing). A second
+          # entry here means a new per-firmware compatibility risk that
+          # nothing in this repo has measured.
+          deps=$(otool -L entrypoint/entrypoint | tail -n +2 | wc -l | tr -d ' ')
+          if [ "$deps" != 1 ]; then
+            echo "entrypoint links $deps dylibs, expected exactly 1" >&2
+            otool -L entrypoint/entrypoint >&2
+            exit 1
+          fi
+          otool -L entrypoint/entrypoint | grep -q '/usr/lib/libSystem\.B\.dylib'
+
+          # dyld has to be where the binary says it is. /usr/lib/dyld is
+          # present on both ramdisks.
+          otool -l entrypoint/entrypoint | grep -A2 LC_LOAD_DYLINKER \
+            | grep -q 'name /usr/lib/dyld'
+
+          # LC_VERSION_MIN_IPHONEOS, which is what stamps the deployment
+          # target the SDK pairing is chosen for.
+          otool -l entrypoint/entrypoint | grep -q 'cmd LC_VERSION_MIN_IPHONEOS'
+
+          # No load command a 2012/2015 dyld would not understand. The current
+          # output is already clean; this is here so a toolchain change cannot
+          # quietly introduce one.
+          if otool -l entrypoint/entrypoint \
+             | grep -qE 'LC_DYLD_CHAINED_FIXUPS|LC_DYLD_EXPORTS_TRIE|LC_BUILD_VERSION'; then
+            echo "entrypoint carries a modern load command no era dyld can read" >&2
+            exit 1
+          fi
+
+          # ARM MODE, NOT THUMB. This used to enforce itself -- the `rsbcs` in
+          # the hand-rolled syscall trampolines would not assemble outside an
+          # IT block -- and with that asm deleted it does not, so it is
+          # asserted directly. Two independent checks: ld64 sets bit 0 of
+          # LC_MAIN's entryoff for a Thumb entry point, so an odd entryoff is
+          # a Thumb _main; and ARM encodings are 4 bytes (8 hex digits) where
+          # Thumb is 2.
+          entryoff=$(otool -l entrypoint/entrypoint \
+                     | awk '/cmd LC_MAIN/{f=1} f && /entryoff/{print $2; exit}')
+          if [ -z "$entryoff" ] || [ $((entryoff % 2)) -ne 0 ]; then
+            echo "entrypoint's LC_MAIN entryoff is '$entryoff' -- odd means a Thumb entry point" >&2
+            exit 1
+          fi
+          insn=$(otool -tv entrypoint/entrypoint | awk '/^_main:/{getline; print $2; exit}')
+          if ! printf '%s' "$insn" | grep -qE '^[0-9a-f]{8}$'; then
+            echo "first instruction of _main is '$insn' -- not a 4-byte ARM encoding" >&2
+            exit 1
+          fi
+
+          # Signed under launchd's own identifier, because this binary
+          # replaces /sbin/launchd's content.
+          codesign -dv entrypoint/entrypoint 2>&1 | grep -q 'Identifier=com.apple.launchd'
           # The vendored apt has to actually run, not just link.
           # stderr is discarded on purpose: with no APT_CONFIG pointing at a
           # synthetic root, apt correctly complains it cannot find a packaging

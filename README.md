@@ -64,13 +64,22 @@ pinned toolchain rather than the stock one:
 | `Xcode_6.4.dmg` | AppleTV3,1 / AppleTV3,2 | `ld64-242.2`, iPhoneOS8.4 SDK |
 | `Xcode_5.1.1.dmg` | AppleTV2,1 | `ld64-236.4`, iPhoneOS7.1 SDK |
 
+**Both columns matter now.** `entrypoint` is a dynamically linked armv7
+binary — the same shape as the `/sbin/launchd` it replaces, which is the
+configuration known to boot on this hardware — so it links that Xcode's
+iPhoneOS SDK, and the pairing above is not interchangeable. Matched is a
+0-phantom-symbol match on both branches; an 8.4 SDK against a 7.1.2 device
+advertises 787 symbols the device does not export, which links clean and dies
+at dyld load with no console to say so. `DEVICE=<model>` is what picks the
+right one.
+
 Put both in **`~/Downloads`** and the bake finds them; whole `.dmg`s are fine
 and are mounted read-only for the build. Point somewhere else with the
-`XCODE_TOOLCHAIN=<dir>` environment variable (an `Xcode.app` bundle or a bare
-extracted toolchain root containing `usr/bin/clang`) or `XCODE_SEARCH_DIR=<dir>`
-(a different place to look for the same names). Both are read straight from
-the environment by `entrypoint/Makefile`, so a CI job sets one variable and
-needs nothing else.
+`XCODE_TOOLCHAIN=<dir>` environment variable (an `Xcode.app` bundle, or a bare
+extracted toolchain root containing `usr/bin/clang` and `SDKs/iPhoneOS<ver>.sdk`)
+or `XCODE_SEARCH_DIR=<dir>` (a different place to look for the same names).
+Both are read straight from the environment by `entrypoint/Makefile`, so a CI
+job sets one variable and needs nothing else.
 
 The build **fails rather than silently using the system compiler** if neither
 yields a toolchain. That is deliberate: Apple's current `ld` has no native

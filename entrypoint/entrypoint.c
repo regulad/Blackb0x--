@@ -4,199 +4,93 @@
  * Replaces PID 1 on the patched restore ramdisk. Not real launchd — this is
  * Blackb0x's own first-boot installer, reverse-engineered from the
  * precompiled ARMv6 Mach-O this project shipped at misc/launchd
- * (originally Blackb0x/Files/launchd). Confirmed genuinely freestanding via
- * its Mach-O load commands: LC_UNIXTHREAD (not LC_MAIN), zero
- * LC_LOAD_DYLIB entries — no libSystem, no dyld. Every syscall is made
- * directly via `mov r12, #N; svc #128` (verified against the real
- * disassembly, not inferred), and even strlen/memcpy/memset are hand-rolled.
- * This is almost certainly load-bearing, not a style choice: this binary
- * *is* what execs as PID 1 at the earliest point of ramdisk boot, before
- * dyld/libSystem are guaranteed to be functional. Replicated here with the
- * same approach: -ffreestanding -nostdlib -static, no libc.
+ * (originally Blackb0x/Files/launchd). See misc/README.md for the full
+ * reverse-engineering writeup this is built from (strings, the original
+ * Patcher.mm, a full Ghidra decompilation, and raw disassembly of every
+ * syscall trampoline).
  *
  * Originally a faithful reproduction of the original's exact behavior,
  * including two confirmed pre-existing bugs in its directory-creation
  * helper (a hardcoded-nonsense mode, and a missing-leading-zero octal
  * literal at its one call site) — since fixed, now that this entrypoint
  * does real first-time dpkg/apt bootstrap work where directory permissions
- * actually matter. See misc/README.md for the full
- * reverse-engineering writeup this is built from (strings, the original
- * Patcher.mm, a full Ghidra decompilation, and raw disassembly of every
- * syscall trampoline).
+ * actually matter.
  *
  * This entrypoint deliberately consumes NO boot-args: the `blackb0x.*`
  * runtime-directive mechanism (and the raw kern.bootargs sysctl read behind
  * it) was removed once the inert-`setenv boot-args` root cause was found, and
  * is recoverable verbatim from git history if it is ever wanted again.
  *
- * There are no #includes at all: -nostdlib means there are no system headers
- * to include, and nothing local is needed either.
+ * ---------------------------------------------------------------------------
+ * THIS IS A DYNAMICALLY LINKED armv7 BINARY. It used to be freestanding.
+ * ---------------------------------------------------------------------------
+ *
+ * The original binary genuinely was freestanding — confirmed via its Mach-O
+ * load commands (LC_UNIXTHREAD, zero LC_LOAD_DYLIB): no libSystem, no dyld,
+ * every syscall made directly via `mov r12, #N; svc #128`, even
+ * strlen/memcpy/memset hand-rolled. This file replicated that for a long
+ * time, and no longer does.
+ *
+ * The reason for converting is convergence on a known-good configuration,
+ * not novelty. Apple's own /sbin/launchd — the PID 1 this file's content
+ * replaces, and the one that demonstrably boots on this exact hardware
+ * (`blackb0x --stock-ramdisk`) — is LC_MAIN + LC_LOAD_DYLINKER against
+ * libSystem on BOTH target ramdisks. A dynamically linked PID 1 is the
+ * ordinary artifact here; the freestanding static one was the unusual one.
+ * dyld is demonstrably live at PID 1 on this boot.
+ *
+ * The hand-rolled syscall layer was also where every ABI bug this project
+ * has had to hunt down lived — all three of them:
+ *
+ *   - Darwin ARM signals syscall errors via the CARRY FLAG, not a negated
+ *     return value, so every wrapper needed an `rsbcs r0, r0, #0` or a
+ *     failed open()/stat() sailed past `fd < 0` as a valid result.
+ *   - reboot(2) is really `reboot(int opt, char *msg)` (xnu syscalls.master
+ *     #55), a TWO-argument syscall; a 1-arg raw call left r1 as garbage.
+ *   - fork(2) returns the child pid in r0 for BOTH sides and flags the child
+ *     in r1; a wrapper reading only r0 made every `if (pid == 0)` branch run
+ *     in the parent.
+ *
+ * libc gets all three right by construction. Two more latent instances of
+ * the same class died with the conversion: the STAT_*_OFFSET block, which
+ * hard-coded the 96-byte pre-64-bit-inode layout the raw SYS_stat (188) trap
+ * returns, and the per-byte console writer. Note on the first: libc's
+ * `stat()` on these firmwares IS stat64 (`_stat` in libsystem_kernel
+ * disassembles to syscall 338), so the real `struct stat` the SDK headers
+ * describe — 108 bytes, st_mode@4, st_uid@16, st_gid@20 — is exactly what
+ * comes back, and the offsets simply evaporated rather than being ported.
+ *
+ * Costs, recorded honestly: dynamic linking adds failure modes that happen
+ * BEFORE the first instruction here runs, where even a working console shows
+ * nothing. Those are closed at bake time rather than hoped away —
+ * verifyEntrypointRuntimeClosure() (src/BakeRamdisk.cpp) proves, against the
+ * real mounted ramdisk, that every LC_LOAD_DYLIB and the LC_LOAD_DYLINKER
+ * target exist there and every undefined symbol resolves against that
+ * volume's own dylibs. The dylib closure is ONE name,
+ * /usr/lib/libSystem.B.dylib (verified: its re-export targets are 22/22 and
+ * 32/32 present on the two ramdisks, zero missing).
+ *
+ * Build: armv7 (every dylib on both ramdisks is armv7 thin; there is no
+ * armv6 slice to link against), -marm, -nostdlib, against the iPhoneOS SDK
+ * MATCHED TO THE DEVICE — iPhoneOS 7.1 for AppleTV2,1 / 11D258, iPhoneOS 8.4
+ * for AppleTV3,x / 12H1006. That pairing is not interchangeable and the
+ * Makefile enforces it: matched is 0 phantom symbols on both branches, while
+ * an 8.4 SDK against a 7.1.2 device advertises 787 symbols the device does
+ * not export — the class that links clean and dies at dyld load, silently,
+ * on hardware with no console. -nostdlib is required (an SDK root has no
+ * crt1.o) and costs nothing: it still yields LC_MAIN with entryoff pointing
+ * straight at _main, which is what dyld calls and what Apple's own launchd
+ * uses.
  */
 
-/* ---------------------------------------------------------------------- */
-/* Raw syscalls — no libc. Numbers verified via llvm-objdump disassembly   */
-/* of the original binary's syscall trampolines (mov r12,#N; svc #128).   */
-/* ---------------------------------------------------------------------- */
-
-#define SYS_exit    1
-#define SYS_fork    2
-#define SYS_read    3
-#define SYS_write   4
-#define SYS_open    5
-#define SYS_close   6
-#define SYS_wait4   7
-#define SYS_unlink  10
-#define SYS_chdir   12
-#define SYS_chmod   15
-#define SYS_chown   16
-#define SYS_access  33
-#define SYS_kill    37
-#define SYS_sync    36
-#define SYS_dup     41
-#define SYS_reboot  55
-#define SYS_symlink 57
-#define SYS_readlink 58
-#define SYS_chroot  61
-#define SYS_dup2    90
-#define SYS_mount     167
-#define SYS_unmount   159
-#define SYS_mkdir     136
-#define SYS_rmdir     137
-#define SYS_stat      188
-#define SYS_fstat     189
-#define SYS_getdirentries 196
-#define SYS_execve  59
-
-typedef unsigned int uint32;
-typedef unsigned long size_t_;
-typedef long ssize_t_;
-
-/* Darwin's syscall ABI signals errors via the CARRY FLAG, not a negated
- * return value: after `svc #0x80`, carry clear = success (r0 is the result),
- * carry set = failure (r0 is a POSITIVE errno). This is unlike Linux, which
- * returns -errno in the result register. libSystem's stubs read that carry
- * and convert it to the C "-1 and set errno" convention; we have no
- * libSystem, so each wrapper must do it itself. Without this, a failed
- * open()/stat() returning e.g. ENOENT (2) as a positive value would sail
- * past every `fd < 0` / `!= 0` error check as if it were a valid fd/result.
- * `rsbcs r0, r0, #0` negates r0 in place ONLY when carry is set (reverse-
- * subtract from zero, predicated on CS), turning the positive errno into a
- * negative one so the C-side checks work like Linux's. It is a conditional
- * ARM instruction, valid because this file is built `-arch armv6` (ARM
- * encoding, not Thumb). "cc" is added to the clobber list because svc itself
- * writes the condition flags. Confirmed against Darwin's arm64 syscall path
- * (Go's asm_darwin_arm64.s BCC), same convention on armv7. */
-static inline long __syscall0(long n) {
-    register long r12 __asm__("r12") = n;
-    register long r0 __asm__("r0");
-    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "=r"(r0) : "r"(r12) : "memory", "cc");
-    return r0;
-}
-static inline long __syscall1(long n, long a0) {
-    register long r12 __asm__("r12") = n;
-    register long r0 __asm__("r0") = a0;
-    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12) : "memory", "cc");
-    return r0;
-}
-static inline long __syscall2(long n, long a0, long a1) {
-    register long r12 __asm__("r12") = n;
-    register long r0 __asm__("r0") = a0;
-    register long r1 __asm__("r1") = a1;
-    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12), "r"(r1) : "memory", "cc");
-    return r0;
-}
-static inline long __syscall3(long n, long a0, long a1, long a2) {
-    register long r12 __asm__("r12") = n;
-    register long r0 __asm__("r0") = a0;
-    register long r1 __asm__("r1") = a1;
-    register long r2 __asm__("r2") = a2;
-    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12), "r"(r1), "r"(r2) : "memory", "cc");
-    return r0;
-}
-static inline long __syscall4(long n, long a0, long a1, long a2, long a3) {
-    register long r12 __asm__("r12") = n;
-    register long r0 __asm__("r0") = a0;
-    register long r1 __asm__("r1") = a1;
-    register long r2 __asm__("r2") = a2;
-    register long r3 __asm__("r3") = a3;
-    __asm__ volatile("svc #128\n\trsbcs r0, r0, #0" : "+r"(r0) : "r"(r12), "r"(r1), "r"(r2), "r"(r3) : "memory", "cc");
-    return r0;
-}
-
-static int sys_open(const char *p, int flags, int mode) { return (int)__syscall3(SYS_open, (long)p, flags, mode); }
-static int sys_close(int fd) { return (int)__syscall1(SYS_close, fd); }
-static ssize_t_ sys_read(int fd, void *buf, size_t_ n) { return __syscall3(SYS_read, fd, (long)buf, (long)n); }
-static ssize_t_ sys_write(int fd, const void *buf, size_t_ n) { return __syscall3(SYS_write, fd, (long)buf, (long)n); }
-static int sys_unlink(const char *p) { return (int)__syscall1(SYS_unlink, (long)p); }
-static int sys_chdir(const char *p) { return (int)__syscall1(SYS_chdir, (long)p); }
-static int sys_chmod(const char *p, int mode) { return (int)__syscall2(SYS_chmod, (long)p, mode); }
-static int sys_chown(const char *p, int uid, int gid) { return (int)__syscall3(SYS_chown, (long)p, uid, gid); }
-static int sys_access(const char *p, int mode) { return (int)__syscall2(SYS_access, (long)p, mode); }
-static int sys_sync(void) { return (int)__syscall0(SYS_sync); }
-static int sys_dup2(int oldfd, int newfd) { return (int)__syscall2(SYS_dup2, oldfd, newfd); }
-/* reboot(2) is really `reboot(int opt, char *msg)` (xnu syscalls.master #55),
- * a TWO-argument syscall -- libc's userspace reboot(int) is a 1-arg wrapper
- * over it. The msg pointer is only dereferenced when opt has RB_PANIC/command
- * bits set, which we never use, so an earlier 1-arg call left r1 as garbage
- * harmlessly -- but pass an explicit NULL to match the real ABI. */
-static int sys_reboot(int opt) { return (int)__syscall2(SYS_reboot, opt, 0); }
-static int sys_symlink(const char *target, const char *linkpath) { return (int)__syscall2(SYS_symlink, (long)target, (long)linkpath); }
-static long sys_readlink(const char *path, char *buf, size_t_ n) { return __syscall3(SYS_readlink, (long)path, (long)buf, (long)n); }
-static int sys_chroot(const char *p) { return (int)__syscall1(SYS_chroot, (long)p); }
-static int sys_mount(const char *type, const char *dir, int flags, void *data) { return (int)__syscall4(SYS_mount, (long)type, (long)dir, flags, (long)data); }
-static int sys_unmount(const char *dir, int flags) { return (int)__syscall2(SYS_unmount, (long)dir, flags); }
-static int sys_mkdir(const char *p, int mode) { return (int)__syscall2(SYS_mkdir, (long)p, mode); }
-static int sys_rmdir(const char *p) { return (int)__syscall1(SYS_rmdir, (long)p); }
-static int sys_stat(const char *p, void *buf) { return (int)__syscall2(SYS_stat, (long)p, (long)buf); }
-static int sys_fstat(int fd, void *buf) { return (int)__syscall2(SYS_fstat, fd, (long)buf); }
-static long sys_getdirentries(int fd, void *buf, size_t_ n, long *basep) { return __syscall4(SYS_getdirentries, fd, (long)buf, (long)n, (long)basep); }
-static int sys_execve(const char *path, char *const argv[], char *const envp[]) { return (int)__syscall3(SYS_execve, (long)path, (long)argv, (long)envp); }
-static int sys_wait4(int pid, int *status, int options, void *rusage) { return (int)__syscall4(SYS_wait4, pid, (long)status, options, (long)rusage); }
-static void sys_exit(int code) { __syscall1(SYS_exit, code); }
-
-/* fork(2) returns twice, and the plain __syscallN wrapper CANNOT express it:
- * the Darwin ABI puts the child pid in r0 for BOTH parent and child, and
- * flags the child in r1 (0 = parent, 1 = child) -- libSystem's fork stub is
- * what zeroes r0 in the child (see xnu libsyscall/custom/__fork.s). A wrapper
- * reading only r0 makes the child see its own pid, never 0, so every
- * `if (pid == 0)` child branch silently runs as the parent. This does that r1
- * check itself. Carry still means error (rsbcs negates to -errno; r1 is
- * meaningless then, so the child-zeroing is gated behind carry-clear).
- *
- * fork, not vfork, deliberately: with fork the child gets its own address
- * space, so it can safely return through this C wrapper into run-a-child code
- * and execve/_exit there. vfork shares the parent's stack and forbids the
- * child from returning from the calling frame at all -- correctness would then
- * depend on this wrapper being inlined, which is too fragile to rely on. The
- * original binary's own child-spawn helpers (FUN_00006074/FUN_00006134) used
- * fork too. See docs/HISTORY.md. */
-static long sys_fork(void) {
-    register long r12 __asm__("r12") = SYS_fork;
-    register long r0 __asm__("r0");
-    register long r1 __asm__("r1");
-    __asm__ volatile("svc #128\n\t"
-                     "bcs 1f\n\t"         /* carry set -> error path */
-                     "cmp r1, #0\n\t"     /* r1: 0 = parent, 1 = child */
-                     "beq 2f\n\t"         /* parent: r0 already holds pid */
-                     "mov r0, #0\n\t"     /* child: return 0 */
-                     "b 2f\n\t"
-                     "1:\n\t"
-                     "rsb r0, r0, #0\n\t" /* error: r0 = -errno */
-                     "2:"
-                     : "=r"(r0), "=r"(r1)
-                     : "r"(r12)
-                     : "memory", "cc");
-    return r0;
-}
-
-/* O_* flags — BSD/XNU numeric values, not resolved from any header since
- * we have none (-nostdlib). */
-#define O_RDONLY 0
-#define O_WRONLY 1
-#define O_CREAT  0x200
-#define O_APPEND 0x8
-
-#define F_OK 0
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define MNT "/mnt1"
 #define INSTALL_LOG "/mnt1/var/mobile/Media/blackb0x_install.log"
@@ -219,36 +113,6 @@ static long sys_fork(void) {
  * here purely as a record of the bug, not a pointer to live code. */
 
 /* ---------------------------------------------------------------------- */
-/* Hand-rolled string/memory primitives — no libc available.               */
-/* ---------------------------------------------------------------------- */
-
-static int my_strlen(const char *s) {
-    int n = 0;
-    while (s[n] != '\0') n++;
-    return n;
-}
-static void *my_memcpy(void *dst, const void *src, int n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    for (int i = 0; i < n; i++) d[i] = s[i];
-    return dst;
-}
-static void *my_memset(void *dst, int c, int n) {
-    unsigned char *d = (unsigned char *)dst;
-    for (int i = 0; i < n; i++) d[i] = (unsigned char)c;
-    return dst;
-}
-static int my_strcmp(const char *a, const char *b) {
-    while (*a && (*a == *b)) { a++; b++; }
-    return *(const unsigned char *)a - *(const unsigned char *)b;
-}
-static char *my_strcat(char *dst, const char *src) {
-    int dl = my_strlen(dst);
-    my_memcpy(dst + dl, src, my_strlen(src) + 1);
-    return dst;
-}
-
-/* ---------------------------------------------------------------------- */
 /* Console + file-log output — two entirely separate, non-overlapping      */
 /* sinks in the original (verified: FUN_00005ef4 never touches the log     */
 /* file; FUN_00001a88 never touches the console). Which messages go to     */
@@ -258,36 +122,41 @@ static char *my_strcat(char *dst, const char *src) {
 /* only) — not something to "fix" or unify in this pass.                  */
 /* ---------------------------------------------------------------------- */
 
+/* One write(2) for the whole string, not the original's one syscall PER
+ * BYTE. stdio is deliberately not used: fd 1 is /dev/console, a character
+ * device, and a buffered printf path on PID 1 is a way to lose the last
+ * message of a run that never returns. The trailing sync() is the
+ * original's and is kept. */
 static void console_print(const char *s) {
-    for (int i = 0; s[i] != '\0'; i++) {
-        sys_write(1, s + i, 1);
+    size_t len = strlen(s);
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(1, s + off, len - off);
+        if (w <= 0) break;
+        off += (size_t)w;
     }
-    sys_sync();
+    sync();
 }
 
 /* Matches FUN_000019b0/FUN_00001a88 exactly: append if the log file
  * already exists (O_WRONLY|O_APPEND), else create it (O_WRONLY|O_CREAT,
  * mode 0600); write the message; close; then unconditionally chown+chmod
  * the file to 501:20 / 0755 — done on every single call, not just the
- * first, matching the original's redundant-but-harmless behavior. */
+ * first, matching the original's redundant-but-harmless behavior. The
+ * write/close on a failed open are also the original's: with libc they run
+ * against fd -1 and fail with EBADF, which is the same nothing the raw
+ * wrappers did. */
 static void log_to_file(const char *msg) {
     int fd;
-    if (sys_access(INSTALL_LOG, F_OK) == 0) {
-        fd = sys_open(INSTALL_LOG, O_WRONLY | O_APPEND, 0);
+    if (access(INSTALL_LOG, F_OK) == 0) {
+        fd = open(INSTALL_LOG, O_WRONLY | O_APPEND);
     } else {
-        fd = sys_open(INSTALL_LOG, O_WRONLY | O_CREAT, 0600);
+        fd = open(INSTALL_LOG, O_WRONLY | O_CREAT, 0600);
     }
-    sys_write(fd, msg, my_strlen(msg));
-    sys_close(fd);
-    sys_chown(INSTALL_LOG, UID_MOBILE, GID_STAFF);
-    sys_chmod(INSTALL_LOG, 0755);
-}
-
-/* Matches FUN_00005e9c exactly: a pure CPU busy-spin, not a real sleep
- * syscall — there is no sleep-family syscall anywhere in this binary. */
-static void busy_wait(int seconds) {
-    volatile long counter = (long)seconds * 10000000L;
-    while (counter > 0) counter--;
+    (void)write(fd, msg, strlen(msg));
+    close(fd);
+    chown(INSTALL_LOG, UID_MOBILE, GID_STAFF);
+    chmod(INSTALL_LOG, 0755);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -305,32 +174,32 @@ static void busy_wait(int seconds) {
  * original's, not just the source logic), relying entirely on the later
  * chmod() to set real permissions. */
 static int install_file(const char *src, const char *dst, int uid, int gid, int mode) {
-    struct { char pad[96]; } st;
-    if (sys_stat(src, &st) != 0) {
+    struct stat st;
+    if (stat(src, &st) != 0) {
         console_print("Unable to find source file\n");
         return -1;
     }
 
-    int in = sys_open(src, O_RDONLY, 0);
+    int in = open(src, O_RDONLY);
     if (in < 0) {
         return -1;
     }
-    int out = sys_open(dst, O_WRONLY | O_CREAT, 0);
+    int out = open(dst, O_WRONLY | O_CREAT, 0);
     if (out < 0) {
-        sys_close(in);
+        close(in);
         return -1;
     }
     char buf[2048];
-    ssize_t_ n;
+    ssize_t n;
     int rc = 0;
-    while ((n = sys_read(in, buf, sizeof(buf))) > 0) {
-        if (sys_write(out, buf, (size_t_)n) < 0) { rc = -1; break; }
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        if (write(out, buf, (size_t)n) < 0) { rc = -1; break; }
     }
-    sys_close(in);
-    sys_close(out);
+    close(in);
+    close(out);
     if (rc == 0) {
-        sys_chown(dst, uid, gid);
-        sys_chmod(dst, mode & 0xffff);
+        chown(dst, (uid_t)uid, (gid_t)gid);
+        chmod(dst, (mode_t)(mode & 0xffff));
     }
     return rc;
 }
@@ -350,40 +219,6 @@ static int install_file(const char *src, const char *dst, int uid, int gid, int 
 /* the original binary never had this mechanism at all.                    */
 /* ---------------------------------------------------------------------- */
 
-/* Minimal BSD dirent layout for getdirentries(2) on this XNU vintage:
- * d_fileno(4) d_reclen(2) d_type(1) d_namlen(1) d_name[...] */
-struct bsd_dirent {
-    uint32 d_fileno;
-    unsigned short d_reclen;
-    unsigned char d_type;
-    unsigned char d_namlen;
-    char d_name[256];
-};
-#define DT_DIR 4
-#define DT_REG 8
-#define DT_LNK 10
-
-/* Field offsets into the raw 96-byte stat(2) buffer used throughout this
- * file. This is the pre-64-bit-inode `struct stat` layout (dev_t st_dev;
- * ino_t st_ino; mode_t st_mode; nlink_t st_nlink; uid_t st_uid; gid_t
- * st_gid; dev_t st_rdev; 3x struct timespec; off_t st_size; blkcnt_t
- * st_blocks; blksize_t st_blksize; 3x uint32/int32; int64[2]) — the one the
- * raw SYS_stat (188) trap itself returns, not libc's $INODE64-suffixed
- * stat() (which iOS's real headers always redirect plain `stat()` calls to
- * — see the SDK's sys/cdefs.h __DARWIN_INODE64 macro — but has no bearing
- * on what this file's own direct `svc #128` calls get back). Verified
- * against the real iPhoneOS6.1 SDK's sys/stat.h and sys/_types.h field
- * typedefs: summing every field's real size lands at exactly 96 bytes with
- * natural alignment and no hidden padding, matching this buffer size
- * exactly, which is itself confirming evidence this is the right layout. */
-#define STAT_MODE_OFFSET 8  /* mode_t, 2 bytes */
-#define STAT_UID_OFFSET  12 /* uid_t, 4 bytes */
-#define STAT_GID_OFFSET  16 /* gid_t, 4 bytes */
-
-static unsigned short stat_mode(const void *st) { return *(const unsigned short *)((const char *)st + STAT_MODE_OFFSET); }
-static unsigned int stat_uid(const void *st) { return *(const unsigned int *)((const char *)st + STAT_UID_OFFSET); }
-static unsigned int stat_gid(const void *st) { return *(const unsigned int *)((const char *)st + STAT_GID_OFFSET); }
-
 /* Recursively merges `src` onto `dst`, both real directories, replacing
  * whatever's already at `dst`. Directories that already exist at the
  * destination are left with their own metadata untouched (only recursed
@@ -400,72 +235,78 @@ static unsigned int stat_gid(const void *st) { return *(const unsigned int *)((c
  * Symlinks are unlinked first, then recreated pointing at the source
  * symlink's own target string verbatim — this is how /blackb0x/--early-boot
  * (a real symlink to /untether/expl.js, no different from any other file
- * under /blackb0x) becomes /mnt1/--early-boot. */
+ * under /blackb0x) becomes /mnt1/--early-boot.
+ *
+ * opendir/readdir rather than the raw getdirentries(2) this used to parse
+ * by hand. readdir() reports end-of-directory and a real error the same
+ * way (NULL), so errno is cleared immediately before each call and read
+ * back immediately after — that is what preserves the old `n < 0` ->
+ * "failed to get directories" path, which a bare NULL check would silently
+ * turn into "directory ended early, all fine". */
 static int merge_tree(const char *src, const char *dst) {
-    int fd = sys_open(src, O_RDONLY, 0);
-    if (fd < 0) {
+    DIR *dir = opendir(src);
+    if (dir == NULL) {
         log_to_file("cannot open blackb0x source dir\n");
         return -1;
     }
 
-    char buf[4096];
-    long basep = 0;
-    long n;
     int ok = 1;
-    while ((n = sys_getdirentries(fd, buf, sizeof(buf), &basep)) > 0) {
-        char *p = buf;
-        char *end = buf + n;
-        while (p < end) {
-            struct bsd_dirent *de = (struct bsd_dirent *)p;
-            p += de->d_reclen;
-            if (de->d_name[0] == '.' &&
-                (de->d_name[1] == '\0' || (de->d_name[1] == '.' && de->d_name[2] == '\0'))) {
-                continue; /* "." / ".." only — unlike the old clone_directory(),
-                           * real dotfiles (.profile's parent, etc.) are staged
-                           * content here, not something to skip. */
+    for (;;) {
+        errno = 0;
+        struct dirent *de = readdir(dir);
+        if (de == NULL) {
+            if (errno != 0) {
+                closedir(dir);
+                log_to_file("failed to get directories\n");
+                return -1;
             }
+            break; /* genuine end of directory */
+        }
 
-            char srcPath[1024], dstPath[1024];
-            srcPath[0] = '\0'; dstPath[0] = '\0';
-            my_strcat(srcPath, src);
-            my_strcat(srcPath, "/");
-            my_strcat(srcPath, de->d_name);
-            my_strcat(dstPath, dst);
-            my_strcat(dstPath, "/");
-            my_strcat(dstPath, de->d_name);
+        if (de->d_name[0] == '.' &&
+            (de->d_name[1] == '\0' || (de->d_name[1] == '.' && de->d_name[2] == '\0'))) {
+            continue; /* "." / ".." only — unlike the old clone_directory(),
+                       * real dotfiles (.profile's parent, etc.) are staged
+                       * content here, not something to skip. */
+        }
 
-            if (de->d_type == DT_LNK) {
-                char target[1024];
-                long tn = sys_readlink(srcPath, target, sizeof(target) - 1);
-                if (tn < 0) { ok = 0; continue; }
-                target[tn] = '\0';
-                sys_unlink(dstPath);
-                if (sys_symlink(target, dstPath) != 0) ok = 0;
-            } else if (de->d_type == DT_DIR) {
-                struct { char pad[96]; } dstSt;
-                if (sys_stat(dstPath, &dstSt) != 0) {
-                    struct { char pad[96]; } srcSt;
-                    if (sys_stat(srcPath, &srcSt) == 0) {
-                        unsigned short mode = stat_mode(&srcSt) & 07777;
-                        sys_mkdir(dstPath, mode);
-                        sys_chmod(dstPath, mode);
-                        sys_chown(dstPath, (int)stat_uid(&srcSt), (int)stat_gid(&srcSt));
-                    }
+        char srcPath[1024], dstPath[1024];
+        srcPath[0] = '\0'; dstPath[0] = '\0';
+        strcat(srcPath, src);
+        strcat(srcPath, "/");
+        strcat(srcPath, de->d_name);
+        strcat(dstPath, dst);
+        strcat(dstPath, "/");
+        strcat(dstPath, de->d_name);
+
+        if (de->d_type == DT_LNK) {
+            char target[1024];
+            ssize_t tn = readlink(srcPath, target, sizeof(target) - 1);
+            if (tn < 0) { ok = 0; continue; }
+            target[tn] = '\0';
+            unlink(dstPath);
+            if (symlink(target, dstPath) != 0) ok = 0;
+        } else if (de->d_type == DT_DIR) {
+            struct stat dstSt;
+            if (stat(dstPath, &dstSt) != 0) {
+                struct stat srcSt;
+                if (stat(srcPath, &srcSt) == 0) {
+                    mode_t mode = srcSt.st_mode & 07777;
+                    mkdir(dstPath, mode);
+                    chmod(dstPath, mode);
+                    chown(dstPath, srcSt.st_uid, srcSt.st_gid);
                 }
-                if (merge_tree(srcPath, dstPath) != 0) ok = 0;
-            } else {
-                struct { char pad[96]; } srcSt;
-                if (sys_stat(srcPath, &srcSt) != 0) { ok = 0; continue; }
-                int mode = stat_mode(&srcSt) & 07777;
-                if (install_file(srcPath, dstPath, (int)stat_uid(&srcSt), (int)stat_gid(&srcSt), mode) != 0) ok = 0;
             }
+            if (merge_tree(srcPath, dstPath) != 0) ok = 0;
+        } else {
+            struct stat srcSt;
+            if (stat(srcPath, &srcSt) != 0) { ok = 0; continue; }
+            int mode = (int)(srcSt.st_mode & 07777);
+            if (install_file(srcPath, dstPath, (int)srcSt.st_uid, (int)srcSt.st_gid, mode) != 0) ok = 0;
         }
     }
-    sys_close(fd);
-    if (n < 0) {
-        log_to_file("failed to get directories\n");
-        return -1;
-    }
+
+    closedir(dir);
     return ok ? 0 : -1;
 }
 
@@ -474,7 +315,7 @@ static int merge_tree(const char *src, const char *dst) {
 /* ---------------------------------------------------------------------- */
 
 /* A genuine halt, not a graceful return: prints to both sinks, then hangs
- * forever rather than letting entry() reach its own unmount/reboot path.
+ * forever rather than letting main() reach its own unmount/reboot path.
  * An automatic reboot here would just re-run this same ramdisk straight
  * back into the same panic on every cycle, with nothing to show a human
  * debugging over console/serial that anything is wrong — a dead stop
@@ -484,20 +325,7 @@ static void panic(const char *msg) {
     console_print(msg);
     log_to_file("PANIC: ");
     log_to_file(msg);
-    for (;;) busy_wait(60);
-}
-
-/* Hand-rolled memmem() — no libc here. Linear substring search; fine for
- * the one-shot, small-needle use below (dpkg status files this project's
- * own package set produces are not large). */
-static const char *my_memmem(const char *hay, int haylen, const char *needle, int needlelen) {
-    if (needlelen <= 0 || haylen < needlelen) return 0;
-    for (int i = 0; i <= haylen - needlelen; i++) {
-        int j = 0;
-        while (j < needlelen && hay[i + j] == needle[j]) j++;
-        if (j == needlelen) return hay + i;
-    }
-    return 0;
+    for (;;) sleep(60);
 }
 
 /* Whether /mnt1/private/var/lib/dpkg/status (already written onto the real
@@ -512,28 +340,27 @@ static const char *my_memmem(const char *hay, int haylen, const char *needle, in
  * header line alone is an unambiguous signal, no real stanza-boundary
  * parsing needed.
  *
- * Reads into a fixed, generously-sized static (BSS, not stack — this
- * entrypoint runs with a small, freestanding stack) buffer rather than
- * streaming, since a plain substring search across a read-buffer boundary
- * would need real overlap-handling logic this one-shot check doesn't
- * justify. If the real status file ever somehow exceeds this buffer, this
- * fails closed (reports "not found", so fixup_etasonuntether_rtbuddyd()
- * below just does nothing) rather than searching a truncated/wrong window
- * and risking a false answer. */
+ * Reads into a fixed, generously-sized static (BSS, not stack) buffer
+ * rather than streaming, since a plain substring search across a
+ * read-buffer boundary would need real overlap-handling logic this
+ * one-shot check doesn't justify. If the real status file ever somehow
+ * exceeds this buffer, this fails closed (reports "not found", so
+ * fixup_etasonuntether_rtbuddyd() below just does nothing) rather than
+ * searching a truncated/wrong window and risking a false answer. */
 #define DPKG_STATUS_SCAN_BUF_SIZE (256 * 1024)
 static char g_dpkgStatusScanBuf[DPKG_STATUS_SCAN_BUF_SIZE];
 
 static int dpkg_status_has_installed_package(const char *statusPath, const char *pkgName) {
-    int fd = sys_open(statusPath, O_RDONLY, 0);
+    int fd = open(statusPath, O_RDONLY);
     if (fd < 0) return 0;
 
-    int total = 0;
-    ssize_t_ n;
+    size_t total = 0;
+    ssize_t n;
     while (total < DPKG_STATUS_SCAN_BUF_SIZE &&
-           (n = sys_read(fd, g_dpkgStatusScanBuf + total, DPKG_STATUS_SCAN_BUF_SIZE - total)) > 0) {
-        total += (int)n;
+           (n = read(fd, g_dpkgStatusScanBuf + total, DPKG_STATUS_SCAN_BUF_SIZE - total)) > 0) {
+        total += (size_t)n;
     }
-    sys_close(fd);
+    close(fd);
     if (total >= DPKG_STATUS_SCAN_BUF_SIZE) {
         log_to_file("dpkg status file larger than expected — package-state check skipped\n");
         return 0;
@@ -541,10 +368,10 @@ static int dpkg_status_has_installed_package(const char *statusPath, const char 
 
     char needle[192];
     needle[0] = '\0';
-    my_strcat(needle, "Package: ");
-    my_strcat(needle, pkgName);
-    my_strcat(needle, "\n");
-    return my_memmem(g_dpkgStatusScanBuf, total, needle, my_strlen(needle)) != 0;
+    strcat(needle, "Package: ");
+    strcat(needle, pkgName);
+    strcat(needle, "\n");
+    return memmem(g_dpkgStatusScanBuf, total, needle, strlen(needle)) != NULL;
 }
 
 /* Copies `src` to `dst`, preserving `src`'s own real owner/mode (read via
@@ -552,11 +379,11 @@ static int dpkg_status_has_installed_package(const char *statusPath, const char 
  * merge_tree() itself uses for regular files, reused here via the
  * existing install_file() primitive. */
 static int copy_preserving(const char *src, const char *dst) {
-    struct { char pad[96]; } st;
-    if (sys_stat(src, &st) != 0) return -1;
-    int mode = stat_mode(&st) & 07777;
-    int uid = (int)stat_uid(&st);
-    int gid = (int)stat_gid(&st);
+    struct stat st;
+    if (stat(src, &st) != 0) return -1;
+    int mode = (int)(st.st_mode & 07777);
+    int uid = (int)st.st_uid;
+    int gid = (int)st.st_gid;
     return install_file(src, dst, uid, gid, mode);
 }
 
@@ -589,22 +416,22 @@ static void fixup_etasonuntether_rtbuddyd(void) {
     if (!dpkg_status_has_installed_package("/mnt1/private/var/lib/dpkg/status", "net.tihmstar.etasonuntether")) {
         return;
     }
-    if (sys_access("/mnt1/usr/libexec/rtbuddyd.orig", F_OK) == 0) {
+    if (access("/mnt1/usr/libexec/rtbuddyd.orig", F_OK) == 0) {
         return; /* already backed up on a prior run */
     }
-    if (sys_access("/mnt1/usr/libexec/rtbuddyd", F_OK) == 0) {
+    if (access("/mnt1/usr/libexec/rtbuddyd", F_OK) == 0) {
         if (copy_preserving("/mnt1/usr/libexec/rtbuddyd", "/mnt1/usr/libexec/rtbuddyd.orig") != 0) {
             log_to_file("failed to back up rtbuddyd before etasonuntether symlink\n");
             return;
         }
-        sys_unlink("/mnt1/usr/libexec/rtbuddyd");
+        unlink("/mnt1/usr/libexec/rtbuddyd");
     }
     /* Either rtbuddyd was just backed up and removed above, or there was
      * never a real one to back up in the first place — the real postinst
      * symlinks unconditionally in that second case too (its own `else`
      * branch). */
-    if (sys_symlink("/System/Library/Frameworks/JavaScriptCore.framework/Resources/jsc",
-                     "/mnt1/usr/libexec/rtbuddyd") != 0) {
+    if (symlink("/System/Library/Frameworks/JavaScriptCore.framework/Resources/jsc",
+                "/mnt1/usr/libexec/rtbuddyd") != 0) {
         log_to_file("failed to symlink rtbuddyd -> jsc for etasonuntether\n");
     }
 }
@@ -635,12 +462,12 @@ static void fixup_etasonuntether_rtbuddyd(void) {
  * — its presence means real dpkg state now exists to protect, and the safe
  * response is to refuse outright, not press on. */
 static int do_install(void) {
-    if (sys_access("/mnt1/Applications/AppleTV.app/AppleTV", F_OK) != 0) {
+    if (access("/mnt1/Applications/AppleTV.app/AppleTV", F_OK) != 0) {
         console_print("Not an AppleTV...\n");
         return 0;
     }
 
-    if (sys_access("/mnt1/var/.blackb0x/install-done", F_OK) == 0) {
+    if (access("/mnt1/var/.blackb0x/install-done", F_OK) == 0) {
         panic("/var/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
     }
 
@@ -665,46 +492,49 @@ static int do_install(void) {
  * real, pristine binary already present on every restore ramdisk (confirmed directly:
  * firmware-sbin's own preinst backs up this exact path before ever
  * touching it), so nothing needs to be staged for this, just invoked.
- * fork(), not vfork(): see sys_fork()'s own comment for why the shared-stack
- * hazard of vfork made a raw-syscall C wrapper unsafe. The child execve()s
- * /usr/sbin/nvram and, only if execve() itself fails, _exit()s via
- * sys_exit(); the parent waits for it. */
+ * fork(), not vfork(): with fork the child gets its own address space, so
+ * it can safely return through the call frame and execve/_exit there,
+ * where vfork shares the parent's stack and forbids exactly that. The
+ * original binary's own child-spawn helpers (FUN_00006074/FUN_00006134)
+ * used fork too. The child execve()s /usr/sbin/nvram and, only if execve()
+ * itself fails, _exit()s; the parent waits for it. */
 static void set_auto_boot(void) {
     char *argv[] = {"/usr/sbin/nvram", "auto-boot=1", 0};
     char *envp[] = {0};
-    long pid = sys_fork();
+    pid_t pid = fork();
     if (pid == 0) {
-        sys_execve("/usr/sbin/nvram", argv, envp);
-        sys_exit(1); /* only reached if execve() itself failed */
+        execve("/usr/sbin/nvram", argv, envp);
+        _exit(1); /* only reached if execve() itself failed */
     }
-    /* pid > 0: parent, wait for the child. pid < 0: fork failed (-errno) --
-     * nothing to wait for, and auto-boot simply will not have been set. */
+    /* pid > 0: parent, wait for the child. pid < 0: fork failed — nothing
+     * to wait for, and auto-boot simply will not have been set. */
     if (pid > 0) {
-        sys_wait4((int)pid, 0, 0, 0);
+        wait4(pid, NULL, 0, NULL);
     }
 }
 
 /* ---------------------------------------------------------------------- */
-/* entry() — matches the original's Mach-O entry point exactly: console   */
+/* main() — matches the original's Mach-O entry point exactly: console    */
 /* fd setup, disk wait, the two mount()s + devfs, do_install(), then       */
-/* unmount everything and reboot. LC_UNIXTHREAD jumps straight here — no   */
-/* argc/argv/envp convention applies (no crt, no dyld).                   */
+/* unmount everything and reboot. dyld calls this directly via LC_MAIN's   */
+/* entryoff; there is no crt startup glue (-nostdlib), which is also why   */
+/* it takes no argc/argv/envp — dyld passes them, and nothing here wants   */
+/* them.                                                                   */
 /* ---------------------------------------------------------------------- */
 
-int entry(void) {
-    int consoleFd = sys_open("/dev/console", O_WRONLY, 0);
-    sys_dup2(consoleFd, 1);
-    sys_dup2(consoleFd, 2);
+int main(void) {
+    int consoleFd = open("/dev/console", O_WRONLY);
+    dup2(consoleFd, 1);
+    dup2(consoleFd, 2);
 
     console_print("Searching for disk...\n");
     /* Original waits on a stat() of /dev/disk0s1s1 succeeding — matches
-     * FUN_00006434 (stat) usage at the call site exactly, including its
-     * exact 96-byte stack buffer size (auStack_80 in the decompiled
-     * entry()) even though we never read the buffer's contents. */
-    struct { char pad[96]; } st;
-    while (sys_stat("/dev/disk0s1s1", &st) != 0) {
+     * FUN_00006434 (stat) usage at the call site exactly. The buffer's
+     * contents are never read; only the success of the call matters. */
+    struct stat st;
+    while (stat("/dev/disk0s1s1", &st) != 0) {
         console_print("Waiting for disk...\n");
-        busy_wait(1);
+        sleep(1);
     }
 
     console_print("\n\n\n\n\n");
@@ -723,56 +553,65 @@ int entry(void) {
      * filesystem with no backing block device. */
     long hfsArgs1[11];
     hfsArgs1[0] = (long)"/dev/disk0s1s1";
-    if (sys_mount("hfs", MNT, 0, hfsArgs1) != 0) {
+    if (mount("hfs", MNT, 0, hfsArgs1) != 0) {
         console_print("Failed to mount / r/w\n");
         return -1;
     }
     console_print("Main filesystem mounted\n");
 
     console_print("Mounting user filesystem...\n");
-    sys_mkdir("/mnt1/private/var2", 0x1ed);
+    mkdir("/mnt1/private/var2", 0x1ed);
     long hfsArgs2[11];
     hfsArgs2[0] = (long)"/dev/disk0s1s2";
-    if (sys_mount("hfs", "/mnt1/private/var", 0, hfsArgs2) != 0) {
+    if (mount("hfs", "/mnt1/private/var", 0, hfsArgs2) != 0) {
         console_print("Failed to mount /var r/w\n");
         return -1;
     }
     console_print("User Filesystem mounted\n");
 
     console_print("Mounting devices...\n");
-    if (sys_mount("devfs", "/mnt1/dev", 0, 0) != 0) {
+    if (mount("devfs", "/mnt1/dev", 0, NULL) != 0) {
         console_print("Unable to mount devices!\n");
-        sys_unmount("/mnt1", 0);
+        unmount("/mnt1", 0);
         set_auto_boot();
-        sys_reboot(0); /* RB_AUTOBOOT */
+        /* 0 is RB_AUTOBOOT. It is written as a bare 0 deliberately: Apple
+         * strips <sys/reboot.h> from every iPhoneOS SDK, so the RB_*
+         * constants are simply not available here, while `int reboot(int)`
+         * IS declared in <unistd.h> on both the 7.1 and 8.4 SDKs and
+         * `_reboot` is exported by both ramdisks. Defining RB_AUTOBOOT
+         * locally would only re-spell the 0. */
+        reboot(0);
         return -1;
     }
     console_print("Devices mounted\n");
 
     do_install();
 
-    sys_unmount("/mnt1/dev", 0);
-    sys_unmount("/mnt1", 0);
+    unmount("/mnt1/dev", 0);
+    unmount("/mnt1", 0);
     console_print("Installation complete\n");
-    sys_sync();
+    sync();
 
     console_print("Unmounting disks...\n");
-    sys_rmdir("/mnt1/private/var2");
-    sys_unmount("/mnt1/private/var", 0);
-    sys_unmount("/mnt1/dev", 0);
-    sys_unmount("/mnt1", 0);
+    rmdir("/mnt1/private/var2");
+    unmount("/mnt1/private/var", 0);
+    unmount("/mnt1/dev", 0);
+    unmount("/mnt1", 0);
 
     console_print("Flushing buffers...\n");
-    sys_sync();
+    sync();
 
     console_print("Rebooting device...\n");
     set_auto_boot();
-    sys_close(consoleFd);
-    /* RB_AUTOBOOT (0), a normal reboot. The original binary passed 1
+    close(consoleFd);
+    /* RB_AUTOBOOT (0), a normal reboot — see the bare-0 note above for why
+     * the constant is not spelled out. The original binary passed 1
      * (RB_ASKNAME) here -- a deliberate deviation: RB_ASKNAME is a bootstrap-
      * prompt flag with nothing to act on under iOS, so it was an inert
-     * wrong value, and 0 is the correct "reboot normally" request. */
-    sys_reboot(0);
+     * wrong value, and 0 is the correct "reboot normally" request. libc's
+     * reboot() is the one-argument wrapper over the two-argument syscall,
+     * so the arity bug this project once had to fix by hand cannot recur. */
+    reboot(0);
 
     return 0;
 }

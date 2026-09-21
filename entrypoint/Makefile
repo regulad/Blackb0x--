@@ -1,5 +1,22 @@
-# Plain Makefile — no Theos (see README.md for why: this binary is
-# freestanding, Theos's tool.mk assumes dynamic linking against libSystem).
+# Plain Makefile — no Theos (see README.md for why: Theos's tool.mk brings a
+# packaging/Logos apparatus that a binary spliced straight into a ramdisk has
+# no use for).
+#
+# **This builds a DYNAMICALLY LINKED armv7 binary against the iPhoneOS SDK
+# MATCHED TO THE DEVICE.** It used to build a freestanding armv6 one linking
+# nothing at all. The reason for the change is in README.md and in
+# entrypoint.c's header; the short form is that Apple's own /sbin/launchd —
+# the PID 1 this binary's content replaces, and the one that demonstrably
+# boots on this hardware — is LC_MAIN + LC_LOAD_DYLINKER against libSystem on
+# both target ramdisks, so a dynamic PID 1 is the conservative artifact here.
+#
+# **The SDK pairing is load-bearing and is NOT interchangeable.** Matched is
+# a 0-phantom-symbol match on both branches (iPhoneOS 7.1 vs the 11D258
+# ramdisk is 0/0 across 6640 symbols; iPhoneOS 8.4 vs 12H1006 is 0 phantom).
+# Crossed is catastrophic: an 8.4 SDK measured against a 7.1.2 device
+# advertises 787 symbols the device does not export — the class that links
+# clean and dies at dyld load, silently, on hardware with no console. That is
+# what the XCODE_FOR_<device> / IOS_MIN_FOR_<xcode> tables below exist for.
 #
 # **This builds with a PINNED, era-appropriate Xcode toolchain by default.**
 # Not the stock macOS one. The reason is in README.md's "What actually holds
@@ -24,6 +41,13 @@
 # system compiler. A build that silently used the wrong compiler is the exact
 # failure the pin exists to prevent.
 #
+# NOTE on XCODE_TOOLCHAIN=system now that this links an SDK: the stock
+# escape hatch needs one more thing than it used to. A current Xcode's
+# iPhoneOS.sdk is arm64e-only (`targets: [arm64e-ios]`), so there is nothing
+# in it to link an armv7 binary against. Set IPHONEOS_SDK=<path> to a real
+# armv7-bearing iPhoneOS SDK when using `system`; without it this fails and
+# says so, rather than producing a binary for the wrong architecture.
+#
 # This used to demand a cctools-port cross-toolchain named
 # `arm-apple-darwin11-clang`, bootstrapped against an iPhoneOS 6.1 SDK
 # extracted from a 1.7GB archive.org copy of Xcode 4.6. That is a different
@@ -42,9 +66,6 @@ ifeq ($(origin CC),default)
 CC := clang
 endif
 LDID ?= ldid
-
-CFLAGS := -arch armv6 -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -Wall -Wextra -O2
-LDFLAGS := -static -Wl,-e,_entry -nostartfiles
 
 # ---------------------------------------------------------------------------
 # Toolchain selection
@@ -121,6 +142,55 @@ endif
 endif
 XCODE_VERSION ?= 6.4
 
+# ---- Per-Xcode iOS deployment target ------------------------------------
+# The SDK a given Xcode carries, and therefore the -miphoneos-version-min
+# this binary is stamped with. Kept as its own table rather than derived
+# from XCODE_VERSION by string surgery, because the two numbers have no
+# relationship to each other (Xcode 6.4 -> iPhoneOS 8.4; 5.1.1 -> 7.1) and a
+# wrong guess here is the 787-phantom-symbol failure described at the top of
+# this file.
+IOS_MIN_FOR_6.4   := 8.4
+IOS_MIN_FOR_5.1.1 := 7.1
+
+IOS_MIN ?= $(IOS_MIN_FOR_$(strip $(XCODE_VERSION)))
+ifeq ($(strip $(IOS_MIN)),)
+$(error entrypoint: no iPhoneOS SDK version is mapped for XCODE_VERSION=$(XCODE_VERSION). Add an IOS_MIN_FOR_$(XCODE_VERSION) line to entrypoint/Makefile, or pass IOS_MIN= explicitly)
+endif
+
+# An explicit SDK path. Normally empty: the SDK is found inside whatever
+# toolchain was resolved, which is what keeps the compiler and its headers
+# from ever coming out of different Xcodes. Settable for XCODE_TOOLCHAIN=system
+# (where there is no pinned Xcode to look inside) and for a cctools-port
+# toolchain.
+IPHONEOS_SDK ?=
+
+# armv7, not armv6: every dylib on both ramdisks is armv7 THIN, so there is
+# no armv6 slice to link against. (The old freestanding build got away with
+# armv6 only because it linked nothing.) Both A4 and A5 Apple TVs are armv7.
+#
+# -marm, not Thumb. This used to be self-enforcing — the `rsbcs` in the
+# hand-rolled syscall trampolines simply would not assemble outside an IT
+# block — and with that asm gone it is not, so CI asserts ARM mode explicitly
+# (LC_MAIN's entryoff carries ld64's Thumb bit in bit 0, so an odd entryoff
+# is a Thumb entry point).
+#
+# -fno-stack-protector is kept from the freestanding build. __stack_chk_fail
+# and __stack_chk_guard are both exported by both ramdisks, so it is not a
+# requirement — it just keeps the undefined-symbol closure as small as it can
+# be, which is the thing that has to hold at dyld load time.
+CFLAGS := -arch armv7 -marm -fno-stack-protector -Wall -Wextra -O2 \
+          -miphoneos-version-min=$(IOS_MIN)
+
+# -nostdlib is REQUIRED on the link: an SDK root has no crt1.o, so without it
+# ld fails with "library not found for -lSystem". It costs nothing — the
+# output is still LC_MAIN with entryoff pointing straight at _main, which is
+# exactly what dyld calls and what Apple's own launchd on both ramdisks uses.
+# libSystem.B.dylib is then named as a positional input rather than via -l.
+# Deliberately NOT here: -undefined dynamic_lookup (it would turn a missing
+# symbol from a link error into a boot-time death) and -platform_version
+# (-miphoneos-version-min already stamps LC_VERSION_MIN_IPHONEOS).
+LDFLAGS := -nostdlib
+
 # There is deliberately NO diagnostic switch here, and none should be added.
 # This used to carry a -D that compiled a diagnostic in or out, and it was the
 # wrong shape for this project: the ramdisk this binary lives inside is baked
@@ -159,7 +229,9 @@ set -e; \
 xt='$(strip $(XCODE_TOOLCHAIN))'; \
 sd='$(strip $(XCODE_SEARCH_DIR))'; \
 xv='$(strip $(XCODE_VERSION))'; \
-mounted=''; tcbin=''; \
+iv='$(strip $(IOS_MIN))'; \
+sdk='$(strip $(IPHONEOS_SDK))'; \
+mounted=''; tcbin=''; tcroot=''; \
 cleanup() { \
 	{ set +x; } 2>/dev/null; \
 	if [ -n "$$mounted" ]; then \
@@ -179,6 +251,19 @@ resolve() { \
 		echo "$$1/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin"; return 0; fi; \
 	return 1; \
 }; \
+resolve_sdk() { \
+	for c in "$$1/SDKs/iPhoneOS$$iv.sdk" "$$1/SDKs/iPhoneOS.sdk" \
+	         "$$1/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS$$iv.sdk" \
+	         "$$1/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk" \
+	         "$$1/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS$$iv.sdk" \
+	         "$$1/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk" \
+	         "$$1/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS$$iv.sdk" \
+	         "$$1/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"; do \
+		[ -f "$$c/usr/lib/libSystem.B.dylib" ] || continue; \
+		echo "$$c"; return 0; \
+	done; \
+	return 1; \
+}; \
 version_ok() { \
 	for p in "$$1/Contents/version.plist" "$$1/Xcode.app/Contents/version.plist"; do \
 		[ -f "$$p" ] || continue; \
@@ -195,7 +280,7 @@ elif [ "$$xt" = auto ]; then \
 	         "/Volumes/Xcode_$$xv" "/Volumes/Xcode-$$xv" "/Volumes/Xcode"; do \
 		[ -d "$$c" ] || continue; \
 		version_ok "$$c" "$$xv" || continue; \
-		tcbin=`resolve "$$c"` && break; tcbin=''; \
+		if tcbin=`resolve "$$c"`; then tcroot="$$c"; break; fi; tcbin=''; \
 	done; \
 	if [ -z "$$tcbin" ]; then \
 		for d in "$$sd/Xcode_$$xv.dmg" "$$sd/xcode_$$xv.dmg" "$$sd/Xcode-$$xv.dmg"; do \
@@ -206,7 +291,9 @@ elif [ "$$xt" = auto ]; then \
 			     -mountpoint "$$mounted" "$$d" >/dev/null 2>&1; then \
 				rmdir "$$mounted" >/dev/null 2>&1 || true; mounted=''; continue; \
 			fi; \
-			if version_ok "$$mounted" "$$xv"; then tcbin=`resolve "$$mounted"` && break; fi; \
+			if version_ok "$$mounted" "$$xv"; then \
+				if tcbin=`resolve "$$mounted"`; then tcroot="$$mounted"; break; fi; \
+			fi; \
 			tcbin=''; cleanup; \
 		done; \
 	fi; \
@@ -251,15 +338,46 @@ else \
 		echo "" >&2; \
 		exit 1; \
 	}; \
+	tcroot="$$xt"; \
+fi; \
+if [ -z "$$sdk" ] && [ -n "$$tcroot" ]; then sdk=`resolve_sdk "$$tcroot"` || sdk=''; fi; \
+if [ -z "$$sdk" ]; then \
+	echo "" >&2; \
+	echo "entrypoint: FATAL — no iPhoneOS $$iv SDK found, and this build needs one." >&2; \
+	echo "  entrypoint links against libSystem now (it used to be freestanding and" >&2; \
+	echo "  link nothing), so it needs the SDK MATCHED to the target device:" >&2; \
+	echo "    AppleTV2,1              -> Xcode 5.1.1 -> iPhoneOS 7.1" >&2; \
+	echo "    AppleTV3,1 / AppleTV3,2 -> Xcode 6.4   -> iPhoneOS 8.4" >&2; \
+	echo "  Crossing them is not a warning, it is 787 symbols that link clean and" >&2; \
+	echo "  fail to bind at dyld load — silently, on hardware with no console." >&2; \
+	if [ -n "$$tcroot" ]; then \
+		echo "" >&2; \
+		echo "  Looked under the resolved toolchain root $$tcroot for:" >&2; \
+		echo "    SDKs/iPhoneOS$$iv.sdk, SDKs/iPhoneOS.sdk        (bare toolchain root)" >&2; \
+		echo "    Platforms/iPhoneOS.platform/Developer/SDKs/...  (Xcode.app layout)" >&2; \
+	else \
+		echo "" >&2; \
+		echo "  XCODE_TOOLCHAIN=system has no pinned Xcode to look inside, and a" >&2; \
+		echo "  current Xcode's iPhoneOS.sdk is arm64e-only — there is nothing in it" >&2; \
+		echo "  to link an armv7 binary against." >&2; \
+	fi; \
+	echo "" >&2; \
+	echo "  Fix: make IPHONEOS_SDK=<path to an iPhoneOS$$iv.sdk>" >&2; \
+	echo "" >&2; \
+	exit 1; \
 fi; \
 if [ -n "$$tcbin" ]; then \
 	echo "entrypoint: pinned toolchain $$tcbin"; \
+	echo "entrypoint: SDK $$sdk (-miphoneos-version-min=$$iv)"; \
 	"$$tcbin/ld" -v 2>&1 | head -1; \
 	set -x; \
-	"$$tcbin/clang" -B"$$tcbin" $(CFLAGS) $(LDFLAGS) -o '$@' '$<'; \
+	"$$tcbin/clang" -B"$$tcbin" $(CFLAGS) -isysroot "$$sdk" $(LDFLAGS) \
+		-o '$@' '$<' "$$sdk/usr/lib/libSystem.B.dylib"; \
 else \
+	echo "entrypoint: SDK $$sdk (-miphoneos-version-min=$$iv)"; \
 	set -x; \
-	$(CC) $(CFLAGS) $(LDFLAGS) -o '$@' '$<'; \
+	$(CC) $(CFLAGS) -isysroot "$$sdk" $(LDFLAGS) \
+		-o '$@' '$<' "$$sdk/usr/lib/libSystem.B.dylib"; \
 fi
 endef
 

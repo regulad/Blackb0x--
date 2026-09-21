@@ -922,7 +922,38 @@ int main(int argc, char** argv) {
         printf("Bootchain output root: %s\n", bootchainOut.c_str());
     }
 
-    std::string entrypointBinaryPath;
+    // entrypoint is built PER DEVICE MODEL now, and memoized here.
+    //
+    // It links against the iPhoneOS SDK matched to that model's target
+    // firmware -- AppleTV3,1/AppleTV3,2 against iPhoneOS 8.4 (Xcode 6.4),
+    // AppleTV2,1 against iPhoneOS 7.1 (Xcode 5.1.1). Pairing an SDK against
+    // the wrong firmware measured 787 phantom symbols: the class that links
+    // cleanly and then fails to bind at dyld load, which on a device with no
+    // console is an invisible death. So one shared binary across models,
+    // which was correct for a freestanding build that linked no SDK at all,
+    // is now a real defect.
+    //
+    // Memoized by model rather than rebuilt per tuple: every build of the
+    // same model resolves to the same Xcode and the same SDK, so the binary
+    // is identical and a rebuild would only cost time. Two models mapping to
+    // the same Xcode (3,1 and 3,2 both use 6.4) still get their own entry --
+    // the duplicate build is cheap, and keying on the model keeps this honest
+    // if the mapping ever stops being many-to-one.
+    //
+    // `DEVICE` reaches the Makefile through the environment: runCommand() is
+    // fork()+execvp(), which inherits environ, and every knob in
+    // entrypoint/Makefile is `?=` so the environment wins. setenv() is
+    // therefore sufficient and no argument threading is needed.
+    std::map<std::string, std::string> entrypointBinaryCache;
+    auto entrypointBinaryFor = [&](const std::string& model) -> std::string {
+        auto it = entrypointBinaryCache.find(model);
+        if (it != entrypointBinaryCache.end()) return it->second;
+        setenv("DEVICE", model.c_str(), 1);
+        std::string path = buildEntrypointBinary();
+        entrypointBinaryCache[model] = path;
+        return path;
+    };
+
     if (doRamdisk) {
         std::error_code distEc;
         fs::create_directories("dist", distEc);
@@ -937,20 +968,15 @@ int main(int argc, char** argv) {
         // entirely under --only bootchain, which is most of why that flag is
         // worth having.
         //
-        // THIS IS THE LINE THAT MOVES when entrypoint.c goes dynamic. Once it
-        // links an SDK, one shared binary stops being correct: AppleTV3,1 and
-        // AppleTV3,2 need iPhoneOS8.4 (Xcode 6.4), AppleTV2,1 needs
-        // iPhoneOS7.1 (Xcode 5.1.1), and a cross-version pairing measured 787
-        // phantom symbols — the class that links clean and dies at load. The
-        // build then belongs inside the per-target loop below, with
-        // `DEVICE=<model>` set in the child's environment (setenv() is enough;
-        // runCommand() is execvp() and make reads the environment).
-        // entrypoint/Makefile already carries and honours that mapping, so the
-        // work is here, not there. Until then one build is right, because a
-        // freestanding binary links no SDK at all — see
-        // buildEntrypointBinary()'s comment in BakeRamdisk.cpp.
-        entrypointBinaryPath = buildEntrypointBinary();
-        if (entrypointBinaryPath.empty()) {
+        // THIS LINE HAS NOW MOVED -- entrypoint.c is dynamically linked, so
+        // one shared binary is no longer correct and the build happens per
+        // device model, inside the loop below. See entrypointBinaryFor().
+        //
+        // Kept here only as the "can we build at all" preflight: failing now,
+        // before any IPSW is downloaded, beats failing after paying for every
+        // download. It builds for whatever DEVICE resolves to by default,
+        // which is enough to prove the toolchain is present and usable.
+        if (buildEntrypointBinary().empty()) {
             fprintf(stderr, "%s: failed to build entrypoint/ — see stderr above\n", kProg);
             return 1;
         }
@@ -998,8 +1024,16 @@ int main(int argc, char** argv) {
         if (doRamdisk) {
             printf("  ramdisk:   ");
             fflush(stdout);
-            result.ramdisk =
-                bakeRamdiskForTarget(device, buildID, entrypointBinaryPath, force, newestVersionCache, result.note);
+            // Built for THIS model's matched SDK -- see entrypointBinaryFor().
+            const std::string entrypointBinaryPath = entrypointBinaryFor(device);
+            if (entrypointBinaryPath.empty()) {
+                printf("failed (entrypoint build for %s)\n", device.c_str());
+                result.ramdisk = RamdiskOutcome::BakeFailed;
+                result.note = "entrypoint build failed for this device model";
+            } else {
+                result.ramdisk = bakeRamdiskForTarget(device, buildID, entrypointBinaryPath, force,
+                                                      newestVersionCache, result.note);
+            }
         }
 
         results.push_back(result);

@@ -33,27 +33,67 @@ lists, same quirks) so it's a verified-correct baseline before any actual
 behavior changes (current pinned deb filenames, hardcoded firmware-version
 branches, etc.) get made on top of it.
 
+## Freestanding, and why it isn't any more
+
 The original binary is genuinely freestanding — confirmed via its Mach-O
 load commands (`LC_UNIXTHREAD`, zero `LC_LOAD_DYLIB` entries): no libSystem,
 no dyld, every syscall made directly via `mov r12, #N; svc #128`, even
-`strlen`/`memcpy`/`memset` hand-rolled. `entrypoint.c` replicates that:
-`-ffreestanding -nostdlib -static`, raw syscalls, no libc.
+`strlen`/`memcpy`/`memset` hand-rolled. `entrypoint.c` replicated that for a
+long time — `-ffreestanding -nostdlib -static`, raw syscalls, no libc — and
+**no longer does. It is a dynamically linked armv7 binary now.**
 
-**The reason once given for that here was wrong, and is worth correcting
-rather than deleting.** This file used to claim freestanding was "almost
-certainly load-bearing" because dyld and libSystem might not be functional
-that early in ramdisk boot. They are. Apple's own `/sbin/launchd` on both a
-real AppleTV2,1 10B809 ramdisk and a real AppleTV3,1 12H606 ramdisk is
-`LC_MAIN` with `LC_LOAD_DYLINKER`, linking `libSystem.B.dylib` and
-`libobjc.A.dylib` — so the genuine PID 1 Apple ships for this exact boot is
-dynamically linked, and dyld demonstrably works there.
+Two arguments were made for freestanding here over time. The first was
+simply wrong and is worth correcting rather than deleting: this file used to
+claim freestanding was "almost certainly load-bearing" because dyld and
+libSystem might not be functional that early in ramdisk boot. They are.
+Apple's own `/sbin/launchd` on both a real AppleTV2,1 10B809 ramdisk and a
+real AppleTV3,1 12H606 ramdisk is `LC_MAIN` with `LC_LOAD_DYLINKER`, linking
+`libSystem.B.dylib` and `libobjc.A.dylib` — the genuine PID 1 Apple ships
+for this exact boot is dynamically linked, and dyld demonstrably works there.
 
-Freestanding is still the right choice, for a plainer reason: it has no
-dylib closure to satisfy. The ramdisk's `/usr/lib` is a fixed, minimal set
-we do not control and which differs between firmwares, so every dynamic
-dependency is a per-firmware compatibility risk for zero benefit in a binary
-this small. See "Why this is a binary and not a shell script" below, where
-that closure problem is what actually kills the obvious alternative.
+The second was that freestanding has no dylib closure to satisfy, and the
+ramdisk's `/usr/lib` is a fixed, minimal set we do not control. That one was
+true but has been measured rather than feared, and the measurement is what
+changed the answer:
+
+- **The ramdisks carry a real, complete libc, not stubs.** `libsystem_c` has
+  ~487 KB of `__text` on 6.1 and ~364 KB on 8.4, 1275 exports each, real
+  prologues under `otool -tV`. Every syscall this file used to hand-roll is
+  exported on both firmwares, all 30 checked by name.
+- **The closure is ONE name.** `/usr/lib/libSystem.B.dylib`, present on every
+  iOS ever shipped. Its `LC_REEXPORT_DYLIB` targets were walked against both
+  mounted ramdisks: 22/22 and 32/32 present, zero missing transitive deps.
+  There is no dyld shared cache on either ramdisk, so the individual dylibs
+  are linkable directly.
+- **Matched-SDK correspondence is exact.** iPhoneOS 7.1 SDK against the
+  11D258 ramdisk is 0 phantom / 0 device-only across 6640 symbols; iPhoneOS
+  8.4 against 12H1006 is 0 phantom. See "Pinned toolchain" for what happens
+  when the pairing is crossed.
+
+And the decisive argument is the plainest one: **a dynamically linked PID 1
+is MORE similar to the stock `/sbin/launchd`, which demonstrably works.**
+`blackb0x --stock-ramdisk` boots on real hardware. Our freestanding static
+binary was the unusual artifact, not the conservative one. The conversion is
+convergence on a known-good configuration.
+
+It also deleted the layer where every ABI bug this project has had to hunt
+down lived — the carry-flag error convention, `reboot(2)`'s real two-argument
+arity, and `fork`'s child detection via r1 — plus two latent instances of the
+same class that were still in the file: a `STAT_*_OFFSET` block hard-coding
+the 96-byte pre-64-bit-inode layout the raw trap returns (libc's `stat()`
+here IS `stat64`, so the real 108-byte `struct stat` is correct and the
+offsets evaporated), and a console writer that issued one `write(2)` per
+byte with a `sync()` after.
+
+**The honest cost**: freestanding failed only in ways we wrote. Dynamic adds
+failure modes that happen *before* the first instruction here runs, where
+even a working console shows nothing. Those are closed at bake time rather
+than hoped away — see "The bake-time symbol-closure check" below.
+
+See "Why this is a binary and not a shell script" below for the closure
+problem that still kills the obvious alternative: a staged `bash` needs
+`libreadline`/`libhistory`/`libncurses`, none of which exist on either
+ramdisk, whereas this binary needs only the one library that always does.
 
 ## Why it used to be containerized and cross-compiled, and isn't now
 
@@ -75,11 +115,17 @@ real iPhoneOS 6.1 SDK extracted from a 1.7GB archive.org copy of Xcode 4.6.
 That whole chain is unnecessary on a Mac and has been dropped: cctools-port
 exists to supply Apple's `ld64`/`as` to hosts that lack them. Apple's own
 `clang` still has the ARM backend, and Apple's own `ld` still lists `armv6`
-in `ld -v`'s supported-arch line, so plain `-arch armv6` produces exactly
+in `ld -v`'s supported-arch line, so plain `-arch armv6` produced exactly
 the artifact needed. Verified on Apple clang 21 / ld-1267 against this
-directory's real `entrypoint.c`: Mach-O `armv6`, `LC_UNIXTHREAD`, zero
-`LC_LOAD_DYLIB`, `_entry` as the thread-state PC, `ldid`-signed as
-`com.apple.launchd`.
+directory's `entrypoint.c` *as it then was*: Mach-O `armv6`,
+`LC_UNIXTHREAD`, zero `LC_LOAD_DYLIB`, `_entry` as the thread-state PC,
+`ldid`-signed as `com.apple.launchd`.
+
+(That paragraph is history, and the architecture in it is stale: the build is
+`-arch armv7` now, because every dylib on both ramdisks is armv7 **thin** and
+there is no armv6 slice to link against. The old build got away with armv6
+precisely because it linked nothing. The `ld-classic` mechanism the next
+section describes applies identically to both archs.)
 
 **That last sentence used to read "the only remaining requirement is `ldid`",
 and it no longer does.** The stock toolchain still works — it is
@@ -122,7 +168,8 @@ toolchain.
 
 The mitigations that actually address it, in increasing order of effort:
 
-1. **Commit the built `entrypoint`** (13 KB). A reproducible build is better,
+1. **Commit the built `entrypoint`** (~52 KB now that it is dynamic; it was
+   13 KB freestanding). A reproducible build is better,
    but a checked-in artifact means a dead toolchain cannot stop a release.
 2. **Vendor `ld-classic`** — one 3.5 MB binary — or pin a whole Xcode.
    **This is what shipped.** See "Pinned toolchain" below; it is the default
@@ -192,17 +239,32 @@ No `will use ld-classic for:` line. That is the entire point.
 Both run on an Apple Silicon host under Rosetta 2 — verified, they are
 x86_64 binaries and Rosetta handles them without complaint.
 
-**Today the SDK column does not matter**, because this build is
-`-ffreestanding -nostdlib` and links no SDK at all; either Xcode produces an
-equivalent artifact. **It will matter shortly.** The conversion of
-`entrypoint.c` to a dynamically linked binary (queued behind a pending
-hardware run) does link an SDK, and the pairing is not interchangeable: an
-8.4 SDK measured against a 7.1.2 device advertises **787 symbols the device
-does not export** — the class that links clean and dies at load, which on this
-hardware is a silent death with no console. So the mapping is real in the
-`Makefile` now (`XCODE_FOR_AppleTV2,1` and friends) rather than left as a
-comment, and `src/BakeRamdisk.cpp` carries a bake-time symbol-closure check
-that turns that failure class into a loud bake failure.
+**The SDK column is load-bearing.** This build links against that SDK's
+`libSystem.B.dylib` stub, and the pairing is not interchangeable:
+
+| SDK vs device | phantom (SDK-only) | device-only |
+|---|---|---|
+| **7.1 SDK vs 11D258 (7.1.2)** | **0** | **0** |
+| **8.4 SDK vs 12H1006 (8.4)** | **0** | 1 |
+| 8.4 SDK vs 11D258 (7.1.2) | **787** | 61 |
+| 7.1 SDK vs 12H1006 (8.4) | 61 | 788 |
+
+A phantom is a symbol the SDK advertises that the device does not export: it
+links clean and fails to bind at `dyld` load, which on this hardware is a
+silent death with no console. So `DEVICE=<model>` is not optional decoration
+— it selects `XCODE_VERSION` (`XCODE_FOR_AppleTV2,1` and friends), which
+selects the deployment target (`IOS_MIN_FOR_6.4` = 8.4, `IOS_MIN_FOR_5.1.1` =
+7.1), which selects the SDK found inside that toolchain. One chain, one place
+to change it.
+
+`src/BakeRamdisk.cpp` carries a bake-time symbol-closure check against the
+real mounted ramdisk that turns any residual instance of this failure class
+into a loud bake failure. See below.
+
+(If one Xcode ever had to serve both branches, the right pick is **5.1.1**,
+not 6.4 — 61 phantoms, none of them a libc primitive, versus 787. That is the
+opposite of the intuitive answer, and it is only a fallback; the per-device
+mapping is what ships.)
 
 ### Getting them
 
@@ -238,8 +300,19 @@ line, which is the whole plumbing story — see "Building entrypoint itself".
 | `XCODE_SEARCH_DIR` | `~/Downloads` | where `auto` looks |
 | `XCODE_VERSION` | `6.4` | which Xcode `auto` looks for |
 | `DEVICE` | *(unset)* | picks `XCODE_VERSION` from the table above |
+| `IOS_MIN` | from `XCODE_VERSION` | deployment target / which SDK to look for (6.4 → 8.4, 5.1.1 → 7.1) |
+| `IPHONEOS_SDK` | *(unset)* | an SDK path, used verbatim; normally found inside the resolved toolchain |
 | `LDID` | `ldid` | ad-hoc signer |
 | `CC` | `clang` | consulted **only** under `XCODE_TOOLCHAIN=system` |
+
+The SDK is found inside whatever toolchain was resolved, which is what keeps
+the compiler and its headers from ever coming out of different Xcodes. Both
+layouts are probed: `<root>/SDKs/iPhoneOS<ver>.sdk` (a bare extracted
+toolchain root, the shape CI hands over) and
+`<root>/.../Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS<ver>.sdk` (an
+`Xcode.app` bundle or a mounted DMG). `IPHONEOS_SDK` overrides that and is
+required under `XCODE_TOOLCHAIN=system`, which has no pinned Xcode to look
+inside.
 
 `XCODE_TOOLCHAIN` has three states:
 
@@ -284,18 +357,22 @@ one from parts is a CI concern and lives in CI.
 ### Examples
 
 ```sh
-make -C entrypoint clean all                       # ~/Downloads, Xcode 6.4
-make -C entrypoint clean all DEVICE=AppleTV2,1     # ~/Downloads, Xcode 5.1.1
+make -C entrypoint clean all DEVICE=AppleTV3,2     # ~/Downloads, Xcode 6.4,  iPhoneOS 8.4
+make -C entrypoint clean all DEVICE=AppleTV2,1     # ~/Downloads, Xcode 5.1.1, iPhoneOS 7.1
+make -C entrypoint clean all                       # no DEVICE -> defaults to 6.4 / 8.4
 make -C entrypoint clean all XCODE_TOOLCHAIN=/opt/xcode-6.4-toolchain
 make -C entrypoint clean all XCODE_SEARCH_DIR=/mnt/toolchains
-make -C entrypoint clean all XCODE_TOOLCHAIN=system   # stock compiler, on purpose
+make -C entrypoint clean all XCODE_TOOLCHAIN=system IPHONEOS_SDK=/path/to/iPhoneOS8.4.sdk
 ```
 
-Theos was tried first and dropped — its `tool.mk` template assumes exactly
-the opposite of what this binary needs (dynamic linking against `libSystem`,
-`LC_MAIN`, a normal `main(argc,argv,envp)` fed by crt startup glue), and its
-other conveniences (Logos, `.deb` packaging) don't apply to a binary that
-gets spliced directly into a ramdisk rather than installed via dpkg.
+Theos was tried first and dropped. Its `tool.mk` conveniences (Logos, `.deb`
+packaging) don't apply to a binary that gets spliced directly into a ramdisk
+rather than installed via dpkg, and it has no notion of the device → Xcode →
+SDK pinning this build turns on. (The original objection to it was sharper —
+`tool.mk` assumes dynamic linking against `libSystem` and `LC_MAIN`, which
+was "exactly the opposite of what this binary needs" while it was
+freestanding, and is now exactly what it produces. That half of the argument
+is gone; the rest still holds.)
 
 ## One-time setup
 
@@ -313,20 +390,30 @@ how to point the build somewhere other than `~/Downloads`
 `ldid-procursus` also provides an `ldid` and works here; the two formulae
 conflict, so pick one.
 
-Nothing is vendored and **no SDK is needed** — this binary is freestanding,
-so only the pinned Xcode's compiler and linker are used, never its headers or
-link stubs. (That changes when `entrypoint.c` goes dynamic; the pin is already
-sized for it.)
+Nothing is vendored, and **the pinned Xcode's SDK is used as well as its
+compiler and linker** — headers and the `libSystem.B.dylib` link stub both.
+This used to say "no SDK is needed", which was true while the binary was
+freestanding and is not any more.
+
+**`XCODE_TOOLCHAIN=system` needs one extra thing now.** A current Xcode's
+`iPhoneOS.sdk` is arm64e-only (`targets: [arm64e-ios]`), so there is nothing
+in it to link an armv7 binary against. Pass `IPHONEOS_SDK=<path>` pointing at
+a real armv7-bearing iPhoneOS SDK alongside it; without one the build fails
+and says so, rather than quietly producing something for the wrong
+architecture. The same variable is how a cctools-port toolchain is fed an
+SDK.
 
 If you deliberately want the stock Xcode Command Line Tools instead, that is
-`make XCODE_TOOLCHAIN=system` — it still produces a correct artifact, it just
-routes through `ld-classic`. A cctools-port cross-toolchain still works too:
+`make XCODE_TOOLCHAIN=system IPHONEOS_SDK=<sdk>` — it still produces a correct
+artifact, it just routes through `ld-classic`. A cctools-port cross-toolchain
+still works too:
 `make XCODE_TOOLCHAIN=system CC=arm-apple-darwin11-clang`.
 
-This was three steps until recently: `ldid`, an iPhoneOS 6.1 SDK, and a
-cctools-port toolchain built against it. The SDK is still not needed, and the
-cctools-port toolchain is optional — but the pinned Xcode above replaced
-"nothing at all" as the toolchain requirement, deliberately.
+This was three steps once: `ldid`, an iPhoneOS 6.1 SDK, and a cctools-port
+toolchain built against it. An SDK is a requirement again — but it arrives
+inside the pinned Xcode rather than as a separately-extracted archive, and it
+is the SDK matched to the device rather than whichever one happened to be
+obtainable. The cctools-port toolchain is still optional.
 `entrypoint/assets/README.md` still documents how to produce
 `iPhoneOS6.1.sdk.tar.xz`, but nothing in the build reads it any more — keep it
 for the record, not as a prerequisite.
@@ -373,7 +460,7 @@ recommendation.
 
 ## Why this is a binary and not a shell script
 
-A shebang would be much less machinery than a freestanding ARM binary, so
+A shebang would be much less machinery than a compiled ARM binary, so
 this was investigated properly rather than assumed. **The kernel side works.**
 The 12H606 kernelcache contains XNU's `execsw[]` dispatch strings contiguously
 — `Mach-o Binary`, `Fat Binary`, `Interpreter Script` — so `exec_shell_imgact`
@@ -406,10 +493,13 @@ dylib to place.
 
 It is fixable, by staging those dylibs into the ramdisk's real `/usr/lib/`
 or rewriting install names at bake time. It is just not cheaper: it trades
-one self-contained static binary, built by the stock toolchain in one
-compiler invocation, for a 2009 shell plus a hand-placed dylib closure plus
-a coreutils closure, all running as PID 1 on a shell-less ramdisk under a
-patched kernel. The binary stays.
+one binary built in one compiler invocation, whose entire dylib closure is
+`/usr/lib/libSystem.B.dylib` — the one library that is present and complete
+on every ramdisk — for a 2009 shell plus a hand-placed three-dylib closure
+plus a coreutils closure, all running as PID 1 on a shell-less ramdisk under
+a patched kernel. The binary stays. (This argument survived the conversion to
+dynamic linking intact: the problem with the shell was never "it links
+things", it was *which* things.)
 
 ## Building entrypoint itself
 
@@ -436,24 +526,47 @@ flag** for this: it would only re-spell an interface that already works, and
 would then have to be threaded through every caller. A CI step sets one
 environment variable and needs no other setup.
 
-`buildEntrypointBinary()` runs once for the whole invocation, so it does not
-set `DEVICE` today — correct, because a freestanding binary links no SDK and
-every target gets an equivalent artifact. When `entrypoint.c` goes dynamic
-that call moves inside `BakeFirmware.cpp`'s per-firmware loop and starts
-setting `DEVICE=<model>`; the `Makefile` already honours it.
+**OPEN, AND NOW A REAL DEFECT: `buildEntrypointBinary()` still runs once for
+the whole invocation and does not set `DEVICE`.** That was correct while this
+was freestanding — no SDK, one equivalent artifact for every target. It is
+not correct now. `BakeFirmware.cpp`'s `main()` calls it once before its
+per-firmware loop, so a multi-device `bake-firmware` run splices ONE binary,
+built against ONE SDK, into every device's ramdisk — and for the devices that
+do not match, that is the 787-phantom-symbol case. The call has to move
+inside the per-firmware loop with `DEVICE=<model>` set in the child's
+environment (`setenv()` is enough; `runCommand()` is `execvp()` and make
+reads the environment). Both `BakeFirmware.cpp` and `BakeRamdisk.cpp` carry
+comments marking the exact lines. Until that lands:
+
+- **CI is safe.** Each `bake` leg is one device and exports `DEVICE` into the
+  job environment, so make gets the right Xcode and SDK.
+- **A local `bake-firmware` narrowed to one device is safe** if `DEVICE` is
+  exported, and `bake-firmware --device <model>` does not export it.
+- **A local unnarrowed `bake-firmware` is not safe** across devices, and
+  `verifyEntrypointRuntimeClosure()` is what will catch it — loudly, at bake
+  time, naming the symbols.
+
+The `Makefile` already carries and honours the mapping, so this is a caller
+change rather than a redesign.
 
 For standalone development/testing without going through a full bake, it is
 just the Makefile:
 
 ```
-make -C entrypoint clean all
+make -C entrypoint clean all DEVICE=AppleTV3,2
+make -C entrypoint clean all DEVICE=AppleTV2,1
 ```
 
-Output lands at `entrypoint/entrypoint`, a freestanding ARMv6 Mach-O, signed
-with `ldid -S -Icom.apple.launchd` — that specific identifier because this
-binary replaces `/sbin/launchd`'s content, so it's signed under launchd's
-own well-known identifier rather than ldid's default (the binary's own
-filename).
+`DEVICE` matters here — it is what selects the matched SDK. Without it the
+`Makefile` defaults to `XCODE_VERSION=6.4` / iPhoneOS 8.4, which is right for
+the two AppleTV3,x models and wrong for AppleTV2,1.
+
+Output lands at `entrypoint/entrypoint`, a dynamically linked armv7 Mach-O
+(`LC_MAIN`, `LC_LOAD_DYLINKER` → `/usr/lib/dyld`, one `LC_LOAD_DYLIB` →
+`/usr/lib/libSystem.B.dylib`), signed with `ldid -S -Icom.apple.launchd` —
+that specific identifier because this binary replaces `/sbin/launchd`'s
+content, so it's signed under launchd's own well-known identifier rather than
+ldid's default (the binary's own filename).
 
 ### The bake-time symbol-closure check
 
@@ -464,12 +577,18 @@ must exist on the ramdisk, and every undefined symbol must be exported by
 something under `/usr/lib` or `/usr/lib/system`. A miss fails the bake with
 the symbol names listed.
 
-It is a **no-op today** — freestanding means zero undefined symbols, zero
-`LC_LOAD_DYLIB`, no `LC_LOAD_DYLINKER` — and that is why it landed now rather
-than alongside the dynamic conversion: it gets exercised by the existing bakes
-on all three devices while it still cannot fail. It is not in CI because the
-bake has something CI does not: the exact libraries that device will boot,
-per device and per build, with no stored snapshot to drift.
+**It does real work now.** It was deliberately landed while `entrypoint` was
+still freestanding — zero undefined symbols, zero `LC_LOAD_DYLIB`, no
+`LC_LOAD_DYLINKER`, so it could not fail — specifically so that it would be
+exercised by real three-device bakes before the conversion could need it.
+Since the conversion it checks 31 undefined symbols against one
+`LC_LOAD_DYLIB` and `/usr/lib/dyld`. Verified by hand against the extracted
+roots for both firmwares: **zero unresolved**, matched SDK to matched device.
+
+It is not in CI because the bake has something CI does not: the exact
+libraries that device will boot, per device and per build, with no stored
+snapshot to drift. It is also the backstop for the open
+`buildEntrypointBinary()` defect described above.
 
 ## Status
 
@@ -480,28 +599,36 @@ bugs found and fixed along the way — see `docs/HISTORY.md`). Wired into
 entrypoint itself" above) and splices it into `/sbin/launchd` in place of the
 real pristine binary there.
 
-Building now goes through the **pinned toolchain** by default. Verified on
-this host against the real `entrypoint.c`, with both pinned Xcodes and with
-the stock one, all three producing the same invariants — `Mach-O executable
-arm_v6`, `LC_UNIXTHREAD` with `_entry` as the thread-state PC, zero
-`LC_LOAD_DYLIB`, zero `LC_LOAD_DYLINKER`, `ldid`-signed `com.apple.launchd`:
+Building goes through the **pinned toolchain** by default, and now links that
+toolchain's matched iPhoneOS SDK. Verified on this host against the real
+`entrypoint.c`, both devices, with the resulting invariants: `Mach-O
+executable arm_v7`, `LC_MAIN` (no `LC_UNIXTHREAD`), exactly one
+`LC_LOAD_DYLIB` = `/usr/lib/libSystem.B.dylib`, `LC_LOAD_DYLINKER` =
+`/usr/lib/dyld`, `LC_VERSION_MIN_IPHONEOS`, none of
+`LC_DYLD_CHAINED_FIXUPS`/`LC_DYLD_EXPORTS_TRIE`/`LC_BUILD_VERSION`, ARM (not
+Thumb) encodings at `_main`, `ldid`-signed `com.apple.launchd`:
 
-| Toolchain | `ld` | size |
-|---|---|---|
-| Xcode 6.4 (`DEVICE=AppleTV3,x`) | `ld64-242.2`, native armv6 | 13,184 |
-| Xcode 5.1.1 (`DEVICE=AppleTV2,1`) | `ld64-236.4`, native armv6 | 13,152 |
-| stock (`XCODE_TOOLCHAIN=system`) | `ld-1267` → `ld-classic` `ld64-957.1` | 13,200 |
+| Device | Xcode / `ld` | SDK | size | undefined symbols resolved |
+|---|---|---|---|---|
+| AppleTV3,1 / AppleTV3,2 | 6.4, `ld64-242.2` native armv7 | iPhoneOS 8.4 | 51,920 | 31/31 against the 12H1006 ramdisk |
+| AppleTV2,1 | 5.1.1, `ld64-236.4` native armv7 | iPhoneOS 7.1 | 51,968 | 31/31 against the 11D258 ramdisk |
 
-They are functionally equivalent but not byte-identical, which is worth
-knowing when attributing a behaviour change.
+(It was 13,184 / 13,152 bytes freestanding. The growth is expected and is
+almost entirely the dynamic-linking metadata plus the SDK's own hardened
+string helpers.)
 
-**Nothing here has been booted on a device.** The pin is a supply-chain hedge
-against Apple removing `ld-classic`; it fixes nothing that is currently
-broken, and it changes no behaviour that has ever been observed on hardware.
+**Nothing here has been booted on a device** — not the pin, and not the
+dynamic conversion. The pin is a supply-chain hedge against Apple removing
+`ld-classic`. The conversion is convergence on the configuration Apple's own
+PID 1 uses on these exact ramdisks, which is the argument for it; but the
+only things measured are that it links, signs, and resolves every symbol
+against the real firmware's real dylibs. Whether it *boots* is untested, and
+if the device goes quiet after this change, this change is the obvious
+suspect.
 
-The SDK and cross-toolchain this section used to list as prerequisites are
-still not needed; see "What was here before, and why it is gone". The pinned
-Xcode is a different requirement, added deliberately — see "Pinned toolchain".
+The cross-toolchain this section used to list as a prerequisite is still not
+needed; see "What was here before, and why it is gone". An SDK is needed
+again, but it comes out of the pinned Xcode — see "Pinned toolchain".
 
 This went through a detour and back. For a while it spliced into
 `/etc/rc.boot` instead of `/sbin/launchd`, on the theory that `rc.boot` was

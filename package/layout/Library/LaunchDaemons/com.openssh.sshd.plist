@@ -1,6 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
+  IT STAYS IN /Library, and a wrong theory about that is worth recording so
+  nobody re-derives it. sshd not starting looked like it might be the
+  directory: the restore ramdisk's own /sbin/launchd contains the string
+  /System/Library/LaunchDaemons and contains /Library/LaunchDaemons nowhere.
+  That is the RESTORE ramdisk's launchd, though, not the booted device's --
+  this project never replaces the device's /sbin/launchd, and /blackb0x/sbin
+  holds nothing but a ping symlink. Evidence about the wrong binary.
+
+  What settles it is the ecosystem: of the real .debs in debcache/, cydia,
+  openssh, com.firecore.freemem-watcher, com.nito.tssagent and
+  org.tihmstar.fuzzyparrot all install into /Library/LaunchDaemons. Cydia's
+  own startup daemon lives there, and Cydia works on every jailbroken
+  ATV2/3 ever made, so that directory is unquestionably scanned. Shipping a
+  second copy under /System/Library would only put one Label in two scanned
+  directories for no benefit.
+
   THIS DELIBERATELY OVERWRITES THE openssh PACKAGE'S OWN PLIST, at the same
   path and under the same Label, so there is exactly one sshd job rather than
   two fighting over port 22. Our package is staged after the debcache merge
@@ -55,6 +71,24 @@
   bearing right now: /var is not populated until the first-boot postinstall
   daemon migrates the stage, and a job that needed /var/empty would fail on
   exactly the boot where someone is trying to SSH in to find out why.
+
+  TWO DECLARATIONS HOLD THIS OVERRIDE IN PLACE, and they guard different
+  directions. DEBIAN/control carries `Replaces: openssh`, which is what lets
+  dpkg legitimately write this path even though openssh's .list claims it --
+  without it, any on-device `apt-get install`/upgrade of OUR package aborts
+  with "trying to overwrite ... which is also in package openssh". And
+  openssh itself is held (`Status: hold ok installed`, set at bake time by
+  computePreinstalledPackages()), so apt never resolves openssh and never
+  restores its own version over this one. Replaces lets us win the write;
+  the hold stops the write from happening in the other direction. Removing
+  either one reintroduces a failure that only appears on a device, weeks
+  later, the first time someone runs apt.
+
+  Note that the bake hand-writes dpkg state rather than running dpkg, so the
+  path stays listed in openssh.list; a real `dpkg --unpack` honouring
+  Replaces would have moved it to ours. That simplification is harmless
+  while openssh is held, and `Replaces` is what makes it harmless if it ever
+  is not.
 -->
 <plist version="1.0">
 <dict>

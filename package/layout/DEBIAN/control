@@ -7,4 +7,5 @@ Maintainer: regulad <parkeredwardwahle2017@gmail.com>
 Author: regulad <parkeredwardwahle2017@gmail.com>
 Section: System
 Depends: firmware (>= 4.0)
+Replaces: openssh
 Tag: role::hacker

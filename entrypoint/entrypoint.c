@@ -1171,6 +1171,93 @@ static void report_volume(const char *label, const char *path) {
          (unsigned long long)fs.f_bavail * fs.f_bsize >> 20);
 }
 
+/* THE ONLY WAY TO READ THE BOOTED OS'S LOGS.
+ *
+ * This ramdisk has a working screen console. The booted device does not: the
+ * kernel console never reaches the display there either, SSH is what we would
+ * use and SSH not starting is exactly what needs explaining, and every log
+ * the first-boot daemons write lands on a volume nobody can see. That is a
+ * closed loop — the channel that would tell us why the channel is broken is
+ * the broken channel.
+ *
+ * It opens trivially from this side. We mount the NAND anyway, the logs are
+ * plain text on the system partition, and reads from either volume work
+ * (only file CREATION is refused). So: boot the ramdisk, and it prints what
+ * the last booted session had to say on the TV.
+ *
+ * TAIL, NOT HEAD. The screen holds about ninety rows and these files grow
+ * without bound across boots; the interesting part of a log is the end. The
+ * whole file is read (capped) and only the last few lines are drawn.
+ *
+ * Every failure here is a line and a return. A log that cannot be read is
+ * itself worth reporting — "absent" distinguishes "the daemon never ran" from
+ * "the daemon ran and said nothing", which is the single most useful bit this
+ * function produces. */
+#define LOG_TAIL_LINES 10
+#define LOG_TAIL_BYTES 8192
+
+static void report_log_tail(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        emit("  %s: ABSENT (errno %d, %s)\n", path, errno, strerror(errno));
+        return;
+    }
+    if (st.st_size == 0) {
+        emit("  %s: present but EMPTY\n", path);
+        return;
+    }
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        emit_err("  %s: cannot open (errno %d, %s)\n", path, errno, strerror(errno));
+        return;
+    }
+    /* Seek so a long-lived log costs one small read rather than its whole
+     * length; nothing here needs the head of the file. */
+    off_t start = (st.st_size > LOG_TAIL_BYTES) ? st.st_size - LOG_TAIL_BYTES : 0;
+    lseek(fd, start, SEEK_SET);
+
+    static char buf[LOG_TAIL_BYTES + 1];
+    ssize_t n = read(fd, buf, LOG_TAIL_BYTES);
+    close(fd);
+    if (n <= 0) {
+        emit_err("  %s: read failed (errno %d, %s)\n", path, errno, strerror(errno));
+        return;
+    }
+    buf[n] = '\0';
+
+    emit("  %s (%lld bytes, last %d lines):\n", path, (long long)st.st_size, LOG_TAIL_LINES);
+
+    /* Walk back over the requested number of newlines, then print forward. */
+    int wanted = LOG_TAIL_LINES;
+    ssize_t i = n - 1;
+    if (buf[i] == '\n') i--;            /* trailing newline is not a line */
+    for (; i >= 0 && wanted > 0; i--) {
+        if (buf[i] == '\n' && --wanted == 0) { i++; break; }
+    }
+    if (i < 0) i = 0;
+
+    for (char *line = buf + i; *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (*line) emit("    %s\n", line);
+        if (!nl) break;
+        line = nl + 1;
+    }
+}
+
+/* The set worth printing, in the order a reader needs them: did our install
+ * record get written, did the first-boot daemon run at all, and did sshd say
+ * anything on its way down. */
+static void report_device_logs(void) {
+    emit("Logs from the last booted session:\n");
+    report_log_tail(BLACKB0X_STATE_DIR "/install.log");
+    report_log_tail(BLACKB0X_STATE_DIR "/postinstall.out.log");
+    report_log_tail(BLACKB0X_STATE_DIR "/postinstall.err.log");
+    report_log_tail(BLACKB0X_STATE_DIR "/sshd.out.log");
+    report_log_tail(BLACKB0X_STATE_DIR "/sshd.err.log");
+}
+
 /* WHICH VOLUME WILL ACCEPT A NEW FILE, AND WHICH WILL NOT.
  *
  * The install record failed with EPERM at /var/mobile/Media, so it was moved
@@ -1497,6 +1584,11 @@ int main(void) {
      * merge is going to fail thousands of times and the reason is worth
      * knowing in one line rather than inferring from the wreckage. */
     probe_writability();
+
+    /* And before anything this run does can overwrite them, print what the
+     * PREVIOUS booted session left behind. This is the only channel that
+     * exists for those logs — see report_device_logs(). */
+    report_device_logs();
 
     /* NO OVERLAY => SAY SO AND EXIT CLEANLY, WITHOUT REBOOTING.
      *

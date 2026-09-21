@@ -6580,3 +6580,67 @@ where the install died. The staged `/var` payload — dpkg's database, apt's lis
 and apt's archives — has to fit inside that, on the **system** partition,
 instead of on the data partition where it was always meant to live. Whatever
 shape the migration eventually takes, 115 MB is the number it has to fit in.
+
+## REJECTED: drawing first-boot install status over the Apple TV UI
+
+The screen console works in the ramdisk, so the obvious next question was
+whether the same trick could report `postinstall.sh`'s progress on the booted
+device — an apt run over a slow or absent network is minutes of blank screen,
+and it is the phase a user is most likely to misread as a brick. It was
+investigated and dropped. Three separate reasons, and the third is the one
+that actually settled it.
+
+### The ramdisk technique does not transfer, for the reason it worked
+
+`screen.h` works because of a property of `restored_external` specifically:
+it publishes three IOSurfaces with `kIOSurfaceIsGlobal`, and while it sits in
+`accept()` with no host attached it performs **zero swaps and zero pixel
+writes**. Stores into those surfaces therefore stay on screen with no
+compositor cooperation at all. That is not a general fact about iOS; it is a
+fact about an idle restore daemon.
+
+On a booted system the display is composited continuously. Anything written
+into a layer is gone on the next frame, the UI's layers are not published for
+arbitrary `IOSurfaceLookup`, and taking `IOMobileFramebuffer` directly would
+mean contending for a display a person is actively watching. None of the code
+that produced the ramdisk console is reusable here.
+
+### The process is not the one the tvOS-era name suggests
+
+Worth recording because the wrong name leads to the wrong research: this
+device's UI is `/Applications/AppleTV.app/AppleTV`, the Frontrow-derived
+appliance host. **Pineboard is the 4th-generation tvOS UI and does not exist
+on an AppleTV3,2.** Both nitoTV and Kodi shipping
+`com.apple.frontrow.appliance.*` icons are the same fact from the other side,
+and `entrypoint.c` already stats that binary as its "is this an Apple TV"
+check.
+
+### The only workable design cannot cover the failure it exists for
+
+Drawing over a live UI on a jailbroken device means a MobileSubstrate tweak
+injected into `AppleTV.app` — a `UIWindow` at a high window level, rendering a
+status string read from a file `postinstall.sh` writes. That cooperates with
+the compositor instead of racing it, and the pinned ARM32 Xcode toolchain
+already builds exactly that shape of artifact.
+
+**But `mobilesubstrate` is installed BY the script the tweak would report
+on.** It is line 38 of `packages.txt`, pulled in by the bulk
+`apt-get install`. So the tweak is absent for the 60-second network wait, for
+`apt-get update`, and for the Cydia install that precede it — and, decisively,
+**if the network is down the tweak never installs at all**. A blank screen
+caused by no network is the single most likely thing a user would want
+explained, and it is the one case this design structurally cannot explain.
+A reporting mechanism whose availability is conditional on the thing it is
+reporting about succeeding is not a reporting mechanism.
+
+That is fixable in principle — hoist `mobilesubstrate` to an offline install
+from the staged cache immediately after Cydia, then load the tweak, then do
+the rest — but it buys a partial answer at the cost of a new build target, a
+new CI leg, and a reordering of the install for a device that already has two
+working channels for this: SSH once the daemon is up, and
+`/usr/share/blackb0x/postinstall.{out,err}.log` afterwards. The ramdisk phase,
+which is where this project has actually been blind, keeps its console.
+
+If this is ever revisited, the prerequisite is the offline `mobilesubstrate`
+install, not the tweak; without that, the tweak is worth nothing on the only
+boots where it matters.

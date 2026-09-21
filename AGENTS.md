@@ -467,10 +467,23 @@ the build shells out to it any more.)
     symbol must be exported by something under `/usr/lib` or
     `/usr/lib/system`, or the bake fails. It was a no-op while `entrypoint`
     was freestanding and landed early on purpose so the three-device bakes
-    would exercise it before it could fail; **it does real work now** (31
+    would exercise it before it could fail; **it does real work now** (38
     undefined symbols, one `LC_LOAD_DYLIB`). Verified by hand against both
     extracted firmware roots: zero unresolved on each, matched SDK to matched
     device. Do not special-case any path away.
+
+    The count rose 31 -> 38 when `entrypoint` stopped writing to
+    `/dev/console` itself and handed its output to launchd's
+    `StandardOutPath`: `_dup2` left with the console fd, and stdio brought
+    `___stdoutp`, `___stderrp`, `_fprintf`, `_fwrite`, `_puts`, `_setvbuf`,
+    `_strerror` and `___snprintf_chk` (clang lowers constant-string
+    `printf`s to `puts`/`fwrite`). All are ordinary `libsystem_c` exports and
+    all 38 were re-checked against the REAL mounted firmware roots, not just
+    against the SDK stubs: zero unresolved on 12H1006 (7367 exports) and zero
+    on 11D258 (18139). That re-check is the point of the guard -- linking
+    clean against an SDK stub proves nothing about what the device exports,
+    and the gap between those two is exactly the silent-death class this
+    project keeps finding.
   - **OPEN DEFECT, in `src/` and not owned by `entrypoint/`:**
     `BakeFirmware.cpp`'s `main()` still calls `buildEntrypointBinary()` ONCE
     before its per-firmware loop and does not set `DEVICE`, so a multi-device

@@ -1,13 +1,32 @@
 /*
  * entrypoint.c
  *
- * Replaces PID 1 on the patched restore ramdisk. Not real launchd — this is
- * Blackb0x's own first-boot installer, reverse-engineered from the
- * precompiled ARMv6 Mach-O this project shipped at misc/launchd
- * (originally Blackb0x/Files/launchd). See misc/README.md for the full
- * reverse-engineering writeup this is built from (strings, the original
- * Patcher.mm, a full Ghidra decompilation, and raw disassembly of every
- * syscall trampoline).
+ * Blackb0x's own first-boot installer for the patched restore ramdisk. Not
+ * real launchd, and no longer a replacement for it: on the LaunchDaemons
+ * generation of ramdisk (AppleTV3,x 12H1006, the primary target) this is
+ * installed as the NEW file /usr/sbin/blackb0x_entrypoint and started by
+ * Apple's own real /sbin/launchd as an ordinary one-shot LaunchDaemon,
+ * /System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist. The
+ * older rc.boot generation, which has no daemon-directory loader at all,
+ * still gets the legacy splice over /sbin/launchd's content — see
+ * BakeRamdisk.cpp's installEntrypoint(), which picks, and
+ * entrypoint/README.md's "Run as a launchd unit, not as launchd" for the
+ * measured evidence behind the change (short form: replacing PID 1 meant
+ * restored_external never ran, so the display never came up AND the USB
+ * device stack never came on-bus, because on this hardware nothing
+ * enumerates until a userspace process calls
+ * IOUSBDeviceControllerSetDescription).
+ *
+ * That buys observability and nothing else. It does NOT dodge AMFI — the
+ * kernel's exec of PID 1 and launchd's posix_spawn land in the same
+ * signature check, and if anything PID 1 is the less-checked position. The
+ * baked boot-args remain the only thing that disables enforcement.
+ *
+ * Reverse-engineered from the precompiled ARMv6 Mach-O this project shipped
+ * at misc/launchd (originally Blackb0x/Files/launchd). See misc/README.md
+ * for the full reverse-engineering writeup this is built from (strings, the
+ * original Patcher.mm, a full Ghidra decompilation, and raw disassembly of
+ * every syscall trampoline).
  *
  * Originally a faithful reproduction of the original's exact behavior,
  * including two confirmed pre-existing bugs in its directory-creation
@@ -33,11 +52,12 @@
  *
  * The reason for converting is convergence on a known-good configuration,
  * not novelty. Apple's own /sbin/launchd — the PID 1 this file's content
- * replaces, and the one that demonstrably boots on this exact hardware
- * (`blackb0x --stock-ramdisk`) — is LC_MAIN + LC_LOAD_DYLINKER against
- * libSystem on BOTH target ramdisks. A dynamically linked PID 1 is the
- * ordinary artifact here; the freestanding static one was the unusual one.
- * dyld is demonstrably live at PID 1 on this boot.
+ * used to replace, and the one that demonstrably boots on this exact
+ * hardware (`blackb0x --stock-ramdisk`) — is LC_MAIN + LC_LOAD_DYLINKER
+ * against libSystem on BOTH target ramdisks. A dynamically linked binary is
+ * the ordinary artifact here; the freestanding static one was the unusual
+ * one. dyld is demonstrably live at PID 1 on this boot, and it is even less
+ * in doubt now that we are spawned by launchd rather than by the kernel.
  *
  * The hand-rolled syscall layer was also where every ABI bug this project
  * has had to hunt down lived — all three of them:
@@ -86,6 +106,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -93,7 +114,15 @@
 #include <unistd.h>
 
 #define MNT "/mnt1"
-#define INSTALL_LOG "/mnt1/var/mobile/Media/blackb0x_install.log"
+
+/* The on-NAND install record. /mnt1/var is a symlink to /mnt1/private/var,
+ * which is where /dev/disk0s1s2 (the data partition) is mounted by main()
+ * before do_install() ever runs — so this path only resolves after that
+ * mount, which is exactly why the LaunchDaemon plist cannot point
+ * StandardOutPath here. See "Where output goes" below. */
+#define INSTALL_LOG_PARENT "/mnt1/var/mobile"
+#define INSTALL_LOG_DIR    INSTALL_LOG_PARENT "/Media"
+#define INSTALL_LOG        INSTALL_LOG_DIR "/blackb0x_install.log"
 
 /* uid/gid used throughout for installed files — 501:20, "mobile:staff",
  * standard iOS convention. */
@@ -107,56 +136,112 @@
  * 25556 decimal — a nonsense permission value with no sane rwx/setuid
  * interpretation). Every one of the ~80 base Cydia directories was created
  * with that mode on every real device this jailbreak was ever installed
- * on. This entrypoint no longer creates any directories itself at all
+ * on. This entrypoint no longer creates directories from any such list
  * (see merge_tree() below and BakeRamdisk.cpp's stageBlackb0xTree(), which
  * bakes correct 0755 modes directly into /blackb0x at bake time) — kept
- * here purely as a record of the bug, not a pointer to live code. */
+ * here purely as a record of the bug, not a pointer to live code. The two
+ * remaining mkdir() call sites both pass a real, explicit mode:
+ * merge_tree(), which copies the source entry's own, and
+ * write_install_record(), whose 0755 is a last-resort fallback for a NAND
+ * that somehow has no /var/mobile/Media. */
 
 /* ---------------------------------------------------------------------- */
-/* Console + file-log output — two entirely separate, non-overlapping      */
-/* sinks in the original (verified: FUN_00005ef4 never touches the log     */
-/* file; FUN_00001a88 never touches the console). Which messages go to     */
-/* which sink is preserved exactly as originally split, including its own  */
-/* inconsistencies (e.g. "Installing etasonATV" logs to file only, while   */
-/* "Installing p0sixspwn"/"Installing blackb0x tether" print to console    */
-/* only) — not something to "fix" or unify in this pass.                  */
+/* Where output goes                                                       */
+/* ---------------------------------------------------------------------- */
+/*                                                                         */
+/* ONE STREAM, and this process does not configure it. Everything this      */
+/* binary has to say goes to stdout (progress) or stderr (errors) with      */
+/* plain printf/fprintf, and launchd connects both to /dev/console from     */
+/* the unit's StandardOutPath/StandardErrorPath — exactly the way Apple's   */
+/* own com.apple.restored_external.plist does it on this same ramdisk.      */
+/*                                                                         */
+/* WHAT WAS DELETED, and why it was not just a cleanup:                     */
+/*                                                                         */
+/*   - console_print(): opened /dev/console itself and dup2()'d it onto     */
+/*     fds 1 and 2 from main(). That is launchd's job now, it is declared   */
+/*     in the plist where it can be read without disassembling anything,    */
+/*     and doing it here would fight whatever launchd already attached.     */
+/*   - log_to_file(): a second, entirely independent writer that            */
+/*     open/append/write/close/chown/chmod'd the on-NAND log on EVERY       */
+/*     message. Two writers to two destinations meant the two halves of a   */
+/*     run's story could interleave arbitrarily, and which sink a given     */
+/*     message used was inherited verbatim from the original binary's own   */
+/*     inconsistencies rather than from anything meaningful. With a single  */
+/*     stream, MESSAGE ORDERING IS NOW GUARANTEED BY CONSTRUCTION.          */
+/*                                                                         */
+/* WHY THE PLIST CANNOT SIMPLY POINT AT THE ON-NAND LOG. launchd opens      */
+/* StandardOutPath when it SPAWNS the job, long before this code has        */
+/* mounted anything. INSTALL_LOG lives under /mnt1, i.e. on the NAND, which */
+/* does not exist yet at that moment — and the failure would not even be    */
+/* loud: launchd would create the file on the RAMDISK under the empty       */
+/* /mnt1 mountpoint, we would then mount the real volume over the top, and  */
+/* every byte would land in an invisible, shadowed file that dies with the  */
+/* RAM disk.                                                                */
+/*                                                                         */
+/* THE ALTERNATIVE THAT WAS REJECTED, since it is the obvious one: point    */
+/* StandardOutPath at a path on the ramdisk itself and copy the finished    */
+/* file onto the NAND once /mnt1 is mounted. Two things kill it.            */
+/*   1. It rests on the ramdisk root being mounted READ-WRITE at the moment */
+/*      launchd spawns us, which is not established anywhere in this        */
+/*      project. If it is read-only, launchd's open() fails, the job gets   */
+/*      /dev/null for stdout, and we are totally blind with no diagnostic   */
+/*      at all — the precise failure this whole redesign exists to stop      */
+/*      producing. /dev/console is the one sink proven to work on this      */
+/*      exact volume, because Apple's own daemon uses it there.             */
+/*   2. It is in RAM until the copy happens, so every failure BEFORE the    */
+/*      mount — the disk-wait loop spinning forever, a mount(2) refusal, a  */
+/*      panic() — leaves nothing behind after a power cycle. Those are the  */
+/*      failures currently under investigation.                             */
+/*                                                                         */
+/* SO THE ON-NAND LOG IS A SEPARATE, DELIBERATE ARTIFACT, not a transcript: */
+/* there is no transcript to copy, since the live stream goes to a          */
+/* character device nothing reads back. write_install_record() below is the */
+/* whole of it — one call, at one point, after the volume is mounted.       */
 /* ---------------------------------------------------------------------- */
 
-/* One write(2) for the whole string, not the original's one syscall PER
- * BYTE. stdio is deliberately not used: fd 1 is /dev/console, a character
- * device, and a buffered printf path on PID 1 is a way to lose the last
- * message of a run that never returns. The trailing sync() is the
- * original's and is kept. */
-static void console_print(const char *s) {
-    size_t len = strlen(s);
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(1, s + off, len - off);
-        if (w <= 0) break;
-        off += (size_t)w;
+/* The on-NAND fingerprint: /var/mobile/Media/blackb0x_install.log, the file
+ * a later boot reads to learn whether this ramdisk ever ran. Same path and
+ * same owner (501:20, mobile:staff) as every previous version of this
+ * project.
+ *
+ * MODE CHANGED, DELIBERATELY: 0644, not the 0755 the old log_to_file()
+ * chmod()'d on every single write. 0755 on a log file is not a permission
+ * anyone wanted — it is what the original binary did, faithfully
+ * reproduced, and an executable bit on a text file read by a later boot has
+ * no meaning to grant.
+ *
+ * Both the directory check and every failure are reported on stderr. The
+ * old code passed O_CREAT and then ignored the result, so a missing
+ * /var/mobile/Media (a freshly-erased NAND) silently produced no artifact
+ * and no complaint. That directory is created here if it is genuinely
+ * absent — never touched if it already exists, so a real device keeps its
+ * own ownership — and a failure to create it says so rather than
+ * evaporating. */
+static void write_install_record(const char *outcome) {
+    struct stat st;
+    const char *dirs[2] = {INSTALL_LOG_PARENT, INSTALL_LOG_DIR};
+    for (int i = 0; i < 2; i++) {
+        if (stat(dirs[i], &st) == 0) continue;
+        fprintf(stderr, "entrypoint: %s is missing on the target volume — creating it\n", dirs[i]);
+        if (mkdir(dirs[i], 0755) != 0) {
+            fprintf(stderr, "entrypoint: cannot create %s (%s) — install record NOT written\n", dirs[i],
+                    strerror(errno));
+            return;
+        }
+        chown(dirs[i], UID_MOBILE, GID_STAFF);
     }
-    sync();
-}
 
-/* Matches FUN_000019b0/FUN_00001a88 exactly: append if the log file
- * already exists (O_WRONLY|O_APPEND), else create it (O_WRONLY|O_CREAT,
- * mode 0600); write the message; close; then unconditionally chown+chmod
- * the file to 501:20 / 0755 — done on every single call, not just the
- * first, matching the original's redundant-but-harmless behavior. The
- * write/close on a failed open are also the original's: with libc they run
- * against fd -1 and fail with EBADF, which is the same nothing the raw
- * wrappers did. */
-static void log_to_file(const char *msg) {
-    int fd;
-    if (access(INSTALL_LOG, F_OK) == 0) {
-        fd = open(INSTALL_LOG, O_WRONLY | O_APPEND);
-    } else {
-        fd = open(INSTALL_LOG, O_WRONLY | O_CREAT, 0600);
+    int fd = open(INSTALL_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "entrypoint: cannot open %s (%s) — install record NOT written\n", INSTALL_LOG,
+                strerror(errno));
+        return;
     }
-    (void)write(fd, msg, strlen(msg));
+    (void)write(fd, outcome, strlen(outcome));
     close(fd);
-    chown(INSTALL_LOG, UID_MOBILE, GID_STAFF);
-    chmod(INSTALL_LOG, 0755);
+    if (chown(INSTALL_LOG, UID_MOBILE, GID_STAFF) != 0 || chmod(INSTALL_LOG, 0644) != 0) {
+        fprintf(stderr, "entrypoint: cannot set 501:20 0644 on %s (%s)\n", INSTALL_LOG, strerror(errno));
+    }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -176,7 +261,7 @@ static void log_to_file(const char *msg) {
 static int install_file(const char *src, const char *dst, int uid, int gid, int mode) {
     struct stat st;
     if (stat(src, &st) != 0) {
-        console_print("Unable to find source file\n");
+        fprintf(stderr, "Unable to find source file: %s\n", src);
         return -1;
     }
 
@@ -246,7 +331,7 @@ static int install_file(const char *src, const char *dst, int uid, int gid, int 
 static int merge_tree(const char *src, const char *dst) {
     DIR *dir = opendir(src);
     if (dir == NULL) {
-        log_to_file("cannot open blackb0x source dir\n");
+        fprintf(stderr, "cannot open blackb0x source dir %s (%s)\n", src, strerror(errno));
         return -1;
     }
 
@@ -257,7 +342,7 @@ static int merge_tree(const char *src, const char *dst) {
         if (de == NULL) {
             if (errno != 0) {
                 closedir(dir);
-                log_to_file("failed to get directories\n");
+                fprintf(stderr, "failed to get directories under %s (%s)\n", src, strerror(errno));
                 return -1;
             }
             break; /* genuine end of directory */
@@ -314,17 +399,32 @@ static int merge_tree(const char *src, const char *dst) {
 /* Main install sequence.                                                 */
 /* ---------------------------------------------------------------------- */
 
-/* A genuine halt, not a graceful return: prints to both sinks, then hangs
- * forever rather than letting main() reach its own unmount/reboot path.
- * An automatic reboot here would just re-run this same ramdisk straight
- * back into the same panic on every cycle, with nothing to show a human
- * debugging over console/serial that anything is wrong — a dead stop
- * forces attention instead of masking the problem as a boot loop. */
+/* A genuine halt, not a graceful return: says so, records it on the NAND,
+ * then hangs forever rather than letting main() reach its own
+ * unmount/reboot path. An automatic reboot here would just re-run this same
+ * ramdisk straight back into the same panic on every cycle, with nothing to
+ * show a human debugging over console/serial that anything is wrong — a
+ * dead stop forces attention instead of masking the problem as a boot loop.
+ *
+ * ONE CALL PER SINK, not the old four: the message goes out on stderr and
+ * the outcome goes into the install record, and there is no longer an
+ * arbitrary split deciding which fragments reach which writer.
+ *
+ * WHAT THIS MEANS NOW THAT WE ARE NOT PID 1 — it got strictly better.
+ * Hanging as PID 1 froze the machine: launchd never ran, so nothing else on
+ * the ramdisk did either and the device was dark and off the USB bus.
+ * Hanging as an ordinary LaunchDaemon leaves Apple's launchd and
+ * restored_external alive, so the display stays up and the device stays
+ * enumerated while this process sits here — a panic is now something a host
+ * can observe rather than something indistinguishable from a brick.
+ * KeepAlive is false in the unit, so launchd will not respawn us either;
+ * see BakeRamdisk.cpp's installEntrypointUnit(). */
 static void panic(const char *msg) {
-    console_print("PANIC: ");
-    console_print(msg);
-    log_to_file("PANIC: ");
-    log_to_file(msg);
+    char record[512];
+    fprintf(stderr, "PANIC: %s", msg);
+    snprintf(record, sizeof(record), "PANIC: %s", msg);
+    write_install_record(record);
+    sync();
     for (;;) sleep(60);
 }
 
@@ -362,7 +462,7 @@ static int dpkg_status_has_installed_package(const char *statusPath, const char 
     }
     close(fd);
     if (total >= DPKG_STATUS_SCAN_BUF_SIZE) {
-        log_to_file("dpkg status file larger than expected — package-state check skipped\n");
+        fprintf(stderr, "dpkg status file larger than expected — package-state check skipped\n");
         return 0;
     }
 
@@ -421,7 +521,7 @@ static void fixup_etasonuntether_rtbuddyd(void) {
     }
     if (access("/mnt1/usr/libexec/rtbuddyd", F_OK) == 0) {
         if (copy_preserving("/mnt1/usr/libexec/rtbuddyd", "/mnt1/usr/libexec/rtbuddyd.orig") != 0) {
-            log_to_file("failed to back up rtbuddyd before etasonuntether symlink\n");
+            fprintf(stderr, "failed to back up rtbuddyd before etasonuntether symlink\n");
             return;
         }
         unlink("/mnt1/usr/libexec/rtbuddyd");
@@ -432,7 +532,7 @@ static void fixup_etasonuntether_rtbuddyd(void) {
      * branch). */
     if (symlink("/System/Library/Frameworks/JavaScriptCore.framework/Resources/jsc",
                 "/mnt1/usr/libexec/rtbuddyd") != 0) {
-        log_to_file("failed to symlink rtbuddyd -> jsc for etasonuntether\n");
+        fprintf(stderr, "failed to symlink rtbuddyd -> jsc for etasonuntether\n");
     }
 }
 
@@ -463,7 +563,7 @@ static void fixup_etasonuntether_rtbuddyd(void) {
  * response is to refuse outright, not press on. */
 static int do_install(void) {
     if (access("/mnt1/Applications/AppleTV.app/AppleTV", F_OK) != 0) {
-        console_print("Not an AppleTV...\n");
+        fprintf(stderr, "Not an AppleTV — refusing to touch this volume\n");
         return 0;
     }
 
@@ -471,10 +571,21 @@ static int do_install(void) {
         panic("/var/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
     }
 
-    log_to_file("Merging blackb0x payload\n");
-    merge_tree("/blackb0x", "/mnt1");
+    printf("Merging blackb0x payload\n");
+    int merged = merge_tree("/blackb0x", "/mnt1");
     fixup_etasonuntether_rtbuddyd();
-    log_to_file("Finished install\n");
+    printf("Finished install\n");
+
+    /* The one on-NAND write of a successful run. Deliberately AFTER the
+     * merge, so a record on the NAND means the merge was actually attempted
+     * against this volume, and deliberately carrying merge_tree()'s own
+     * result — which nothing used to look at at all, so a partial merge was
+     * indistinguishable from a clean one in every artifact this left
+     * behind. The details of what failed are on the console stream, where
+     * merge_tree() printed them as they happened. */
+    write_install_record(merged == 0 ? "blackb0x: merged /blackb0x onto the device\n"
+                                     : "blackb0x: merged /blackb0x onto the device WITH ERRORS "
+                                       "(see the console stream for which entries failed)\n");
 
     return 0;
 }
@@ -497,7 +608,17 @@ static int do_install(void) {
  * where vfork shares the parent's stack and forbids exactly that. The
  * original binary's own child-spawn helpers (FUN_00006074/FUN_00006134)
  * used fork too. The child execve()s /usr/sbin/nvram and, only if execve()
- * itself fails, _exit()s; the parent waits for it. */
+ * itself fails, _exit()s; the parent waits for it.
+ *
+ * UNCHANGED IN MEANING NOW THAT WE ARE NOT PID 1, but for a reason worth
+ * stating rather than assuming: wait4(pid, ...) names this specific child,
+ * so it cannot be confused by anything else. As PID 1 this process was also
+ * the reaper of every orphan on the system and a bare wait() would have
+ * been ambiguous; as an ordinary LaunchDaemon we have exactly the one child
+ * we forked, and orphan reaping is Apple's launchd's problem again. The
+ * explicitly empty envp is likewise still right — nvram reads none, and
+ * inheriting launchd's environment would only widen what this exec depends
+ * on. */
 static void set_auto_boot(void) {
     char *argv[] = {"/usr/sbin/nvram", "auto-boot=1", 0};
     char *envp[] = {0};
@@ -514,32 +635,74 @@ static void set_auto_boot(void) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* main() — matches the original's Mach-O entry point exactly: console    */
-/* fd setup, disk wait, the two mount()s + devfs, do_install(), then       */
+/* main() — disk wait, the two mount()s + devfs, do_install(), then        */
 /* unmount everything and reboot. dyld calls this directly via LC_MAIN's   */
 /* entryoff; there is no crt startup glue (-nostdlib), which is also why   */
 /* it takes no argc/argv/envp — dyld passes them, and nothing here wants   */
 /* them.                                                                   */
+/*                                                                         */
+/* The console-fd setup the original opened this function with is GONE.    */
+/* fds 1 and 2 arrive already connected to /dev/console, from the          */
+/* LaunchDaemon's StandardOutPath/StandardErrorPath — see "Where output    */
+/* goes" above.                                                            */
+/*                                                                         */
+/* KNOWN CONSEQUENCE ON THE LEGACY rc.boot GENERATION, recorded rather     */
+/* than silently accepted. Those ramdisks (AppleTV3,2 10B329a, AppleTV2,1  */
+/* 11D258) cannot load a LaunchDaemon plist at all, so BakeRamdisk.cpp's   */
+/* installEntrypoint() still splices this binary over /sbin/launchd there  */
+/* and it runs as PID 1 — with nothing to set up its fds, because the      */
+/* kernel does not open /dev/console for init. (That is precisely why the  */
+/* original binary opened it by hand; the disassembly shows the open/dup2  */
+/* as its first act.) So on that generation stdout/stderr are closed and   */
+/* every printf here fails with EBADF. That path is ALREADY the one        */
+/* documented as producing a dark, un-enumerated device with no            */
+/* restored_external and no display — it is explicitly not endorsed, see   */
+/* installEntrypoint()'s bake-time warning — so this costs a diagnostic    */
+/* channel that was already of little use. If it is ever wanted back, the  */
+/* honest shape is a guard that fires ONLY when launchd did not provide a  */
+/* stream (`if (fcntl(1, F_GETFD) == -1) { ... open + dup2 ... }`), never  */
+/* an unconditional re-open that would fight the plist on the primary      */
+/* path.                                                                   */
+/*                                                                         */
+/* RETURNING FROM HERE MEANS SOMETHING COMPLETELY DIFFERENT NOW. As PID 1  */
+/* an early `return -1` was a kernel-level catastrophe: init exiting takes */
+/* the system with it, and in practice the device just died. As a          */
+/* LaunchDaemon it is an ordinary job exit with an ordinary status —       */
+/* Apple's launchd stays up, restored_external keeps the display lit and   */
+/* the device on the USB bus, and the failure is something a host can      */
+/* actually look at. The error paths below are therefore diagnostics now   */
+/* rather than a second way to brick the boot, and they were left with     */
+/* their original return values deliberately: nothing downstream reads     */
+/* them, and inventing an exit-code scheme no reader exists for would be   */
+/* noise.                                                                  */
 /* ---------------------------------------------------------------------- */
 
 int main(void) {
-    int consoleFd = open("/dev/console", O_WRONLY);
-    dup2(consoleFd, 1);
-    dup2(consoleFd, 2);
+    /* Unbuffered, both streams. This is what replaces the old hand-rolled
+     * console_print()'s reason for existing: stdio would line-buffer on a
+     * tty and FULLY buffer if /dev/console ever failed the isatty() test,
+     * and this process has two paths that never return — panic()'s
+     * sleep loop and reboot(2) — where a buffered tail is a lost tail. The
+     * cost is one write(2) per printf, which for a few dozen status lines
+     * is nothing. stderr is already unbuffered by C's own rules; it is set
+     * here anyway so the guarantee is stated in one place rather than
+     * inferred. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
 
-    console_print("Searching for disk...\n");
+    printf("Searching for disk...\n");
     /* Original waits on a stat() of /dev/disk0s1s1 succeeding — matches
      * FUN_00006434 (stat) usage at the call site exactly. The buffer's
      * contents are never read; only the success of the call matters. */
     struct stat st;
     while (stat("/dev/disk0s1s1", &st) != 0) {
-        console_print("Waiting for disk...\n");
+        printf("Waiting for disk...\n");
         sleep(1);
     }
 
-    console_print("\n\n\n\n\n");
-    console_print("blackb0x Jailbreak - by @NSSpiral\n");
-    console_print("Mounting filesystem...\n");
+    printf("\n\n\n\n\n");
+    printf("blackb0x Jailbreak - by @NSSpiral\n");
+    printf("Mounting filesystem...\n");
 
     /* CRITICAL: matches FUN_00006028 exactly. Darwin's HFS mount doesn't
      * take the device path as a normal mount(2) argument — it goes in word
@@ -554,24 +717,24 @@ int main(void) {
     long hfsArgs1[11];
     hfsArgs1[0] = (long)"/dev/disk0s1s1";
     if (mount("hfs", MNT, 0, hfsArgs1) != 0) {
-        console_print("Failed to mount / r/w\n");
+        fprintf(stderr, "Failed to mount / r/w (%s)\n", strerror(errno));
         return -1;
     }
-    console_print("Main filesystem mounted\n");
+    printf("Main filesystem mounted\n");
 
-    console_print("Mounting user filesystem...\n");
+    printf("Mounting user filesystem...\n");
     mkdir("/mnt1/private/var2", 0x1ed);
     long hfsArgs2[11];
     hfsArgs2[0] = (long)"/dev/disk0s1s2";
     if (mount("hfs", "/mnt1/private/var", 0, hfsArgs2) != 0) {
-        console_print("Failed to mount /var r/w\n");
+        fprintf(stderr, "Failed to mount /var r/w (%s)\n", strerror(errno));
         return -1;
     }
-    console_print("User Filesystem mounted\n");
+    printf("User Filesystem mounted\n");
 
-    console_print("Mounting devices...\n");
+    printf("Mounting devices...\n");
     if (mount("devfs", "/mnt1/dev", 0, NULL) != 0) {
-        console_print("Unable to mount devices!\n");
+        fprintf(stderr, "Unable to mount devices! (%s)\n", strerror(errno));
         unmount("/mnt1", 0);
         set_auto_boot();
         /* 0 is RB_AUTOBOOT. It is written as a bare 0 deliberately: Apple
@@ -583,34 +746,49 @@ int main(void) {
         reboot(0);
         return -1;
     }
-    console_print("Devices mounted\n");
+    printf("Devices mounted\n");
 
     do_install();
 
     unmount("/mnt1/dev", 0);
     unmount("/mnt1", 0);
-    console_print("Installation complete\n");
+    printf("Installation complete\n");
     sync();
 
-    console_print("Unmounting disks...\n");
+    printf("Unmounting disks...\n");
     rmdir("/mnt1/private/var2");
     unmount("/mnt1/private/var", 0);
     unmount("/mnt1/dev", 0);
     unmount("/mnt1", 0);
 
-    console_print("Flushing buffers...\n");
+    printf("Flushing buffers...\n");
     sync();
 
-    console_print("Rebooting device...\n");
+    printf("Rebooting device...\n");
     set_auto_boot();
-    close(consoleFd);
     /* RB_AUTOBOOT (0), a normal reboot — see the bare-0 note above for why
      * the constant is not spelled out. The original binary passed 1
      * (RB_ASKNAME) here -- a deliberate deviation: RB_ASKNAME is a bootstrap-
      * prompt flag with nothing to act on under iOS, so it was an inert
      * wrong value, and 0 is the correct "reboot normally" request. libc's
      * reboot() is the one-argument wrapper over the two-argument syscall,
-     * so the arity bug this project once had to fix by hand cannot recur. */
+     * so the arity bug this project once had to fix by hand cannot recur.
+     *
+     * THIS IS THE ONE PLACE WHERE NOT BEING PID 1 MAKES US RUDER, NOT
+     * SAFER, and it is deliberate. As PID 1 there was nothing else running
+     * to disturb; now Apple's launchd and restored_external are alive, and
+     * reboot(2) takes them down without a SIGTERM. That is acceptable —
+     * restored_external is idle in an accept() loop at this point, it holds
+     * no mount of its own and writes nothing (every destructive primitive
+     * it has sits behind a host StartRestore message), and both NAND
+     * filesystems have already been unmounted and sync()'d above.
+     * `launchctl reboot`-style politeness would need /bin/launchctl and a
+     * live bootstrap port, and would buy nothing over this. What is NOT
+     * acceptable is a host-side restore client being connected while this
+     * runs — see entrypoint/README.md; that is a usage rule, not something
+     * this code can defend against. The close(consoleFd) that used to sit
+     * here is gone with the console fd itself; stdio is unbuffered and the
+     * sync() above has already flushed the filesystems. */
     reboot(0);
 
     return 0;

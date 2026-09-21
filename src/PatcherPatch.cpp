@@ -300,26 +300,37 @@ bool Patcher::patchiBEC(const std::string& path, const std::string& bootArgs,
     // the boot-args literal. A -b that silently fails reproduces this exact
     // bug class.
     //
-    // No -d: that patch forces `debug-enabled` to answer 1 forever,
-    // and blackb0x never wanted it -- Patcher.mm passed debug="FALSE" too.
-    // It was being applied anyway because zzanehip's iBootPatcher() entry
-    // point tested its RSA argument twice (fixed on our fork's branch, but
-    // the CLI never had the bug at all).
+    // -d (patch_debug_enabled) IS NOW PASSED. It used to be deliberately
+    // withheld -- the original app passed debug="FALSE" too, and it was only
+    // ever applied here by accident, because zzanehip's iBootPatcher() entry
+    // point tested its RSA argument twice (fixed on our fork's branch; the
+    // CLI never had the bug).
     //
-    // -d IS A KNOWN, DELIBERATELY DEFERRED FOLLOW-UP, not a closed question.
-    // It is the enabling half of adding `debug=0x14e` to the baked boot-args:
+    // It is the enabling half of `debug=0x14e` in the baked boot-args.
     // DB_LOG_PI_SCRN (0x100) makes the kernel render PANIC info onto the
-    // framebuffer, which would be the only panic-visibility channel this
-    // device has (-v covers ordinary printf, not the panic UI). That flag is
-    // gated by PE_i_can_has_debugger / the device-tree `debug-enabled`
-    // property, which is 0 on a production-fused retail unit, and
-    // patch_debug_enabled() -- iBoot32Patcher's -d -- is exactly what forces
-    // it true. It is deliberately NOT landing with the -b fix: the debug bit
-    // meanings are community-documented rather than decoded out of these
-    // kernels, the debug-enabled gate is inferred rather than observed, and
-    // changing the boot-args CHANNEL and adding a debug gate in one step
-    // would make a hardware failure uninterpretable. Do it on its own, after
-    // -b is confirmed on hardware. See Patcher.hpp's `bootargs` namespace.
+    // framebuffer, which is the only panic-visibility channel this device has
+    // -- -v covers ordinary printf, not the panic UI, and the UART is on
+    // internal test points. The kernel gates `debug=` on
+    // PE_i_can_has_debugger / the device-tree `debug-enabled` property, which
+    // is 0 on a production-fused retail unit; patch_debug_enabled() rewrites
+    // the `BL get_value_for_dtre_var("debug-enabled")` call site to
+    // `MOVS R0,#1; MOVS R0,#1` so it answers 1 unconditionally.
+    //
+    // It was held back from the -b change on purpose -- landing a second
+    // behavioural change alongside the boot-args-CHANNEL fix would have made
+    // a hardware failure uninterpretable -- and lands on its own now that -b
+    // is confirmed working on hardware (the kernel is accepted and boot
+    // handoff succeeds with both --stock-ramdisk and --tether-boot).
+    //
+    // Failure is loud: iBoot32Patcher returns -1 and writes no output file if
+    // find_dtre_get_value_bl_insn() cannot find its pattern, and runOne()
+    // below treats a nonzero exit as fatal. That is necessary and not
+    // sufficient -- this project has been burned three times by tools that
+    // exited zero and produced a wrong artifact -- so the landing of this
+    // patch is PROVEN by decoding the produced iBEC, exactly the way -b, -r
+    // and -t were. See docs/HISTORY.md and Patcher.hpp's `bootargs`
+    // namespace for the byte-level evidence.
+    //
     // -r, -k and -t, all three unconditional.
     //
     // -k (patch_kaslr) disables iBoot's kernel-slide randomization. This is
@@ -363,7 +374,7 @@ bool Patcher::patchiBEC(const std::string& path, const std::string& bootArgs,
     // cause (why iBoot decodes 38 bytes short of a stream that decodes fully
     // off-device) is tracked down. The fork keeps the -z capability, unused;
     // see docs/HISTORY.md.
-    const std::vector<std::string> iBECArgs = {"-r", "-k", "-t"};
+    const std::vector<std::string> iBECArgs = {"-r", "-k", "-t", "-d"};
 
     // TWO patched iBECs, deliberately, from the one decrypted input -- the
     // design the original app used and this port had collapsed. They differ

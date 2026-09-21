@@ -6,9 +6,13 @@
 # MATCHED TO THE DEVICE.** It used to build a freestanding armv6 one linking
 # nothing at all. The reason for the change is in README.md and in
 # entrypoint.c's header; the short form is that Apple's own /sbin/launchd —
-# the PID 1 this binary's content replaces, and the one that demonstrably
-# boots on this hardware — is LC_MAIN + LC_LOAD_DYLINKER against libSystem on
-# both target ramdisks, so a dynamic PID 1 is the conservative artifact here.
+# the PID 1 this binary's content USED TO replace, and the one that
+# demonstrably boots on this hardware — is LC_MAIN + LC_LOAD_DYLINKER against
+# libSystem on both target ramdisks, so a dynamic binary is the conservative
+# artifact here. (This binary is a LaunchDaemon started BY that launchd now,
+# not a replacement for it, on every ramdisk generation that can load one —
+# see README.md's "Run as a launchd unit, not as launchd". Nothing about the
+# build changes.)
 #
 # **The SDK pairing is load-bearing and is NOT interchangeable.** Matched is
 # a 0-phantom-symbol match on both branches (iPhoneOS 7.1 vs the 11D258
@@ -114,12 +118,12 @@ XCODE_TOOLCHAIN ?= auto
 XCODE_SEARCH_DIR ?= $(HOME)/Downloads
 
 # ---- Per-device toolchain selection -------------------------------------
-# Load-bearing, not placeholder. The current build is freestanding and links
-# no SDK at all, so today either pinned Xcode yields an equivalent artifact.
-# The dynamic-linking conversion queued behind the pending hardware test does
-# link an SDK, and the pairing is not interchangeable: a cross-version pairing
-# measured 787 phantom symbols — the class that links clean and dies at load
-# time. So the device -> Xcode mapping is real here and works now.
+# Load-bearing, not placeholder, and no longer merely prospective: this build
+# links an SDK, and the pairing is not interchangeable — a cross-version
+# pairing measured 787 phantom symbols, the class that links clean and dies at
+# dyld load time. (This paragraph used to say the build was freestanding and
+# linked no SDK, so either pinned Xcode was equivalent. That stopped being
+# true with the dynamic conversion.)
 #
 # Pass DEVICE=<model> to select by device, or XCODE_VERSION=<v> to select
 # directly (XCODE_VERSION wins if both are given).
@@ -203,15 +207,33 @@ LDFLAGS := -nostdlib
 # The runtime alternative that briefly replaced it is gone too. See
 # entrypoint.c's header comment.
 
-# entrypoint replaces /sbin/launchd's content directly (see
-# BakeRamdisk.cpp's spliceFileContentInPlace() call), so it's signed under
-# launchd's own well-known identifier rather than ldid's default (the
-# binary's own filename). A mid-rewrite detour signed this as `com.apple.rc`
-# and targeted /etc/rc.boot instead. That was reverted, and the reasoning
-# recorded for it turned out to be wrong as well — the kernel never execs
-# /etc/rc.boot on any firmware; launchctl does, downstream. See README.md's
-# "What actually runs as PID 1" for the disassembly-backed account.
-LAUNCHD_IDENTIFIER := com.apple.launchd
+# The ad-hoc signing identifier. It is OUR OWN now, and that is a deliberate
+# change: this binary no longer replaces /sbin/launchd's content, so signing
+# it `com.apple.launchd` would be a lie about what it is.
+#
+# What it is instead: a one-shot LaunchDaemon, installed at
+# /usr/sbin/blackb0x_entrypoint and started by Apple's own real launchd from
+# /System/Library/LaunchDaemons/xyz.regulad.blackb0x.entrypoint.plist (see
+# BakeRamdisk.cpp's installEntrypointUnit()). The identifier matches that
+# unit's Label exactly, and sits under the same reverse-DNS prefix as the
+# rest of the project -- the Debian package is `xyz.regulad.blackb0x` and
+# package/layout/ already ships `xyz.regulad.blackb0x.postinstall.plist`, so
+# this is a sibling of that rather than a shallower invented namespace.
+#
+# Two earlier identifiers, for the record: `com.apple.launchd` (while this
+# binary was spliced over /sbin/launchd's content) and, during a mid-rewrite
+# detour that targeted /etc/rc.boot, `com.apple.rc`. The rc.boot detour was
+# reverted, and the reasoning recorded for it turned out to be wrong as well
+# -- the kernel never execs /etc/rc.boot on any firmware; launchctl does,
+# downstream. See README.md's "What actually runs as PID 1" for the
+# disassembly-backed account, and "Run as a launchd unit, not as launchd"
+# for why the splice itself is gone.
+#
+# NOTE: none of this changes the code-signing situation. The binary is still
+# ad-hoc signed, and launchd spawning it faces exactly the same AMFI /
+# cs_enforcement check the kernel would have applied when exec'ing it as
+# PID 1. The identifier is about honesty, not about getting accepted.
+ENTRYPOINT_IDENTIFIER := xyz.regulad.blackb0x.entrypoint
 
 TARGET := entrypoint
 
@@ -387,7 +409,7 @@ all: $(TARGET)
 
 $(TARGET): entrypoint.c
 	@$(entrypoint_compile)
-	$(LDID) -S -I$(LAUNCHD_IDENTIFIER) $@
+	$(LDID) -S -I$(ENTRYPOINT_IDENTIFIER) $@
 
 clean:
 	rm -f $(TARGET)

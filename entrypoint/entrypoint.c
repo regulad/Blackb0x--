@@ -414,6 +414,72 @@ static void emit_err(const char *fmt, ...)
  * absent — never touched if it already exists, so a real device keeps its
  * own ownership — and a failure to create it says so rather than
  * evaporating. */
+/* THE UNTETHER'S OWN BOOTLOOP GUARD, RESET ON EVERY INSTALL.
+ *
+ * Both untether payloads count their attempts in
+ * /var/logs/untetherhomedepotLoopProtection.txt and refuse to run once it
+ * reaches ten:
+ *
+ *     [!] Max attempts reachend, not running untether to prevent bootloops!
+ *
+ * The counter is only cleared when the untether SUCCEEDS -- ours unlinks it at
+ * code offset 0x8da0, after tfp0 and after the kernel patches. So a device
+ * that failed ten times for any reason at all is permanently locked out of
+ * its own untether, and every boot after that is a silent refusal with no
+ * exploit attempt behind it. This device has been booted far more than ten
+ * times during development.
+ *
+ * That makes it a prime suspect for "the untether does not run", and it costs
+ * one unlink to eliminate. A fresh install is exactly the moment the budget
+ * should reset: whatever the previous ten attempts were fighting, they were
+ * fighting a different payload than the one being installed now.
+ *
+ * WHY A DELETE IS POSSIBLE ON A VOLUME THAT REFUSES WRITES: content
+ * protection gates the CREATION of a regular file, because that is what needs
+ * a per-file key wrapped by a class key from a keybag nothing here loads.
+ * Unlinking an existing file needs no such key. If that reasoning is wrong the
+ * errno will say so, which is why this reports rather than assumes.
+ *
+ * GATED ON THE UNTETHER WE ACTUALLY SHIPPED, because this counter belongs to
+ * exactly one of the three persistence payloads. stageVersionBranch() picks by
+ * ProductVersion at bake time: 8.4.x gets etasonATV, other 8.x/7.x gets the
+ * iOS 7 tether, 6.1.4 gets p0sixspwn, anything else gets none. The counter is
+ * tihmstar's homedepot-family file and only the etasonATV branch can ever
+ * write it, so on any other image clearing it would be deleting a stranger's
+ * state on the strength of a filename.
+ *
+ * The overlay is what says which branch ran, and it says so unambiguously:
+ * stageEtasonatv() is the ONLY branch that stages a top-level /untether --
+ * the iOS 7 branch stages just usr/libexec/dirhelper, and p0sixspwn stages
+ * into the var stage rather than /untether. So the presence of
+ * /blackb0x/untether/expl.js, the JSC exploit that only the etasonATV chain
+ * uses, is the same decision stageVersionBranch() already made, read back at
+ * runtime from its own output rather than re-derived from a version string
+ * this binary would have to parse again. */
+static void clear_untether_loop_guard(void) {
+    static const char *const guard = MNT "/var/logs/untetherhomedepotLoopProtection.txt";
+    static const char *const etasonMarker = "/blackb0x/untether/expl.js";
+    struct stat st;
+
+    if (access(etasonMarker, F_OK) != 0) {
+        emit("untether: %s absent -- this image ships no etasonATV payload, "
+             "leaving its bootloop counter alone\n", etasonMarker);
+        return;
+    }
+
+    if (stat(guard, &st) != 0) {
+        emit("untether: no bootloop counter at %s (errno %d) -- nothing to reset\n",
+             guard, errno);
+        return;
+    }
+    emit("untether: clearing bootloop counter %s (%lld bytes)\n",
+         guard, (long long)st.st_size);
+    if (unlink(guard) != 0) {
+        emit_err("untether: could NOT clear it (errno %d, %s) -- if it had reached ten, "
+                 "the untether will keep refusing to run\n", errno, strerror(errno));
+    }
+}
+
 static void write_install_record(const char *outcome) {
     struct stat st;
 
@@ -817,6 +883,10 @@ static int do_install(void) {
     if (access(MNT "/var/.blackb0x/install-done", F_OK) == 0) {
         panic("/var/.blackb0x/install-done already exists — refusing to re-run (would clobber live dpkg state)\n");
     }
+
+    /* Before the merge, so a failure to clear is visible above the merge's own
+     * noise rather than buried after it. */
+    clear_untether_loop_guard();
 
     emit("Merging blackb0x payload\n");
     int merged = merge_tree("/blackb0x", MNT);
@@ -1265,6 +1335,9 @@ static void report_device_logs(void) {
     report_log_tail(BLACKB0X_STATE_DIR "/loaddaemons.err.log");
     report_log_tail(BLACKB0X_STATE_DIR "/postinstall.out.log");
     report_log_tail(BLACKB0X_STATE_DIR "/postinstall.err.log");
+    /* Not ours, and not a log so much as a counter -- but it is read the same
+     * way and it can veto the untether outright. See clear_untether_loop_guard(). */
+    report_log_tail(MNT "/var/logs/untetherhomedepotLoopProtection.txt");
 }
 
 /* DOES THE DEVICE ACTUALLY HAVE THE FILES WE THINK WE INSTALLED.
@@ -1293,6 +1366,30 @@ static void report_device_install(void) {
     report_path(MNT "/Library/LaunchDaemons/com.openssh.sshd.plist");
     report_path(MNT "/usr/sbin/sshd");
     report_path(MNT "/etc/rc.d/daemonload");
+
+    /* THE UNTETHER CHAIN, end to end.
+     *
+     * Disassembling both payloads settled that ours is built FOR this build:
+     * it carries 12H1006's exact kernel banner (xnu-2784.40.6~93/
+     * RELEASE_ARM_S5L8947X, built 2021-01-29), its firmware check is patched
+     * to pass unconditionally (CMP r0,r0 where stock has CMP r0,#0), and its
+     * 18 hardcoded kernel offsets verify byte-exactly against 12H1006's own
+     * kernelcache -- three of its values occur exactly once each in the whole
+     * 12.9 MB image, and its gadget offsets land on real instruction
+     * boundaries. The .deb's own 8.4.1 payload, by contrast, matches none of
+     * them and would panic here.
+     *
+     * So "the 2022 update patched the untether" is not what is happening, and
+     * the remaining suspects are all about whether the chain is WIRED UP on
+     * the device. launchd's embedded boot plist runs /usr/libexec/rtbuddyd
+     * --early-boot; that binary does not exist on stock, which is why the slot
+     * is usable. The jailbreak symlinks it to JavaScriptCore's jsc, and /
+     * --early-boot to /untether/expl.js, so jsc runs the exploit as a script.
+     * Every link in that chain is a file we either place or fail to. */
+    report_path(MNT "/usr/libexec/rtbuddyd");
+    report_path(MNT "/--early-boot");
+    report_path(MNT "/untether/expl.js");
+    report_path(MNT "/untether/untether.bin");
     /* THE LAUNCHD JOB CACHE. Reported, deliberately not touched.
      *
      * launchd does not find its daemons by reading /System/Library/
@@ -1386,6 +1483,23 @@ static void report_path(const char *path) {
     kind = S_ISDIR(st.st_mode)  ? "dir"  :
            S_ISREG(st.st_mode)  ? "file" :
            S_ISLNK(st.st_mode)  ? "link" : "other";
+
+    /* A symlink's TARGET is the interesting half here. The untether's whole
+     * trigger chain is symlinks -- /usr/libexec/rtbuddyd must point at jsc,
+     * /--early-boot at /untether/expl.js -- and "link" alone would say a link
+     * exists while leaving the only question about it unanswered. */
+    if (S_ISLNK(st.st_mode)) {
+        char target[512];
+        ssize_t n = readlink(path, target, sizeof(target) - 1);
+        if (n < 0) {
+            emit("    %s: link (unreadable: errno %d, %s)\n", path, errno, strerror(errno));
+        } else {
+            target[n] = '\0';
+            emit("    %s: link -> %s\n", path, target);
+        }
+        return;
+    }
+
     emit("    %s: %s mode 0%o uid %u gid %u size %llu\n", path, kind,
          (unsigned)(st.st_mode & 07777), (unsigned)st.st_uid,
          (unsigned)st.st_gid, (unsigned long long)st.st_size);

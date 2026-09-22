@@ -304,6 +304,8 @@ static void emit_err(const char *fmt, ...)
  * The directory is created if absent, because panic() can call this before
  * the merge that would otherwise have supplied it. */
 #define BLACKB0X_STATE_DIR MNT "/usr/share/blackb0x"
+/* Where BakeRamdisk.cpp's kVarStageRel puts everything bound for /var. */
+#define BLACKB0X_VAR_STAGE "usr/share/blackb0x/var"
 #define INSTALL_LOG        BLACKB0X_STATE_DIR "/install.log"
 
 /* uid/gid used throughout for installed files — 501:20, "mobile:staff",
@@ -737,51 +739,6 @@ static void panic(const char *msg) {
     for (;;) sleep(60);
 }
 
-/* Whether /mnt/private/var/lib/dpkg/status (already written onto the real
- * target volume by the merge_tree() call in do_install() below, staged at
- * bake time by BakeRamdisk.cpp's stageManualDpkgInstall()/
- * stageEtasonatv()) has a real `Package: <pkgName>` stanza — a plain
- * substring search on the stanza header line is enough here: this
- * project's own bake-time writer only ever appends a stanza for a package
- * name once it's decided that package is genuinely installed (see
- * BakeRamdisk.cpp's stageManualDpkgInstall() — every stanza it writes
- * always carries `Status: install ok installed`), so presence of the
- * header line alone is an unambiguous signal, no real stanza-boundary
- * parsing needed.
- *
- * Reads into a fixed, generously-sized static (BSS, not stack) buffer
- * rather than streaming, since a plain substring search across a
- * read-buffer boundary would need real overlap-handling logic this
- * one-shot check doesn't justify. If the real status file ever somehow
- * exceeds this buffer, this fails closed (reports "not found", so
- * fixup_etasonuntether_rtbuddyd() below just does nothing) rather than
- * searching a truncated/wrong window and risking a false answer. */
-#define DPKG_STATUS_SCAN_BUF_SIZE (256 * 1024)
-static char g_dpkgStatusScanBuf[DPKG_STATUS_SCAN_BUF_SIZE];
-
-static int dpkg_status_has_installed_package(const char *statusPath, const char *pkgName) {
-    int fd = open(statusPath, O_RDONLY);
-    if (fd < 0) return 0;
-
-    size_t total = 0;
-    ssize_t n;
-    while (total < DPKG_STATUS_SCAN_BUF_SIZE &&
-           (n = read(fd, g_dpkgStatusScanBuf + total, DPKG_STATUS_SCAN_BUF_SIZE - total)) > 0) {
-        total += (size_t)n;
-    }
-    close(fd);
-    if (total >= DPKG_STATUS_SCAN_BUF_SIZE) {
-        emit_err("dpkg status file larger than expected — package-state check skipped\n");
-        return 0;
-    }
-
-    char needle[192];
-    needle[0] = '\0';
-    strcat(needle, "Package: ");
-    strcat(needle, pkgName);
-    strcat(needle, "\n");
-    return memmem(g_dpkgStatusScanBuf, total, needle, strlen(needle)) != NULL;
-}
 
 /* Copies `src` to `dst`, preserving `src`'s own real owner/mode (read via
  * stat()) rather than a caller-supplied triple — the same idiom
@@ -821,11 +778,41 @@ static int copy_preserving(const char *src, const char *dst) {
  * all once install-done exists, but this check is what the real postinst
  * itself also relies on, kept here to mirror it exactly rather than lean
  * solely on the caller's own one-shot guarantee). */
+/* THE GATE USED TO READ A FILE THAT CANNOT BE READ, AND SO NEVER FIRED.
+ *
+ * This function is the ONLY place in the project that creates the
+ * /usr/libexec/rtbuddyd -> jsc symlink, and that symlink is the entire
+ * trigger for the untether: launchd's embedded boot plist starts
+ * `rtbuddyd --early-boot`, jsc treats --early-boot as a script path, and
+ * /--early-boot points at /untether/expl.js. No symlink, no exploit, and
+ * therefore no `launchctl load /Library/LaunchDaemons` -- which is exactly the
+ * symptom this project has been chasing: every daemon installed correctly and
+ * none of them ever started.
+ *
+ * It gated on dpkg's status file at MNT/private/var/lib/dpkg/status, which
+ * fails here twice over. Stock iOS has no dpkg, so on a first install there is
+ * nothing to read; and since the var migration our own copy is staged at
+ * /usr/share/blackb0x/var/lib/dpkg/status, on the system partition, because
+ * the ramdisk cannot write the data partition. On top of both, THE DATA
+ * PARTITION CANNOT BE READ FROM HERE AT ALL -- only unlink() and mkdir()
+ * work against it -- so a gate that opens a file under /var is unconditionally
+ * false no matter what is on the volume. It returned 0 and this function
+ * returned early, silently, on every run this project has ever made.
+ *
+ * The replacement asks the question the old one meant to ask, against
+ * something that can actually be inspected: did THIS BAKE ship the etasonATV
+ * payload? stageVersionBranch() answers that at bake time by ProductVersion,
+ * and stageEtasonatv() is the only branch that stages a top-level /untether,
+ * so the overlay itself carries the answer -- on the ramdisk, which is
+ * readable. Same decision, read from its own output instead of from a
+ * database that does not exist yet. */
 static void fixup_etasonuntether_rtbuddyd(void) {
-    if (!dpkg_status_has_installed_package(MNT "/private/var/lib/dpkg/status", "net.tihmstar.etasonuntether")) {
+    if (access("/blackb0x/untether/expl.js", F_OK) != 0) {
+        emit("untether: no etasonATV payload in this image — leaving rtbuddyd alone\n");
         return;
     }
     if (access(MNT "/usr/libexec/rtbuddyd.orig", F_OK) == 0) {
+        emit("untether: rtbuddyd.orig already present — symlink was installed on a prior run\n");
         return; /* already backed up on a prior run */
     }
     if (access(MNT "/usr/libexec/rtbuddyd", F_OK) == 0) {
@@ -841,7 +828,10 @@ static void fixup_etasonuntether_rtbuddyd(void) {
      * branch). */
     if (symlink("/System/Library/Frameworks/JavaScriptCore.framework/Resources/jsc",
                 MNT "/usr/libexec/rtbuddyd") != 0) {
-        emit_err("failed to symlink rtbuddyd -> jsc for etasonuntether\n");
+        emit_err("failed to symlink rtbuddyd -> jsc for etasonuntether (errno %d, %s)\n",
+                 errno, strerror(errno));
+    } else {
+        emit("untether: rtbuddyd -> jsc symlinked; the untether can now be triggered\n");
     }
 }
 
@@ -1335,9 +1325,6 @@ static void report_device_logs(void) {
     report_log_tail(BLACKB0X_STATE_DIR "/loaddaemons.err.log");
     report_log_tail(BLACKB0X_STATE_DIR "/postinstall.out.log");
     report_log_tail(BLACKB0X_STATE_DIR "/postinstall.err.log");
-    /* Not ours, and not a log so much as a counter -- but it is read the same
-     * way and it can veto the untether outright. See clear_untether_loop_guard(). */
-    report_log_tail(MNT "/var/logs/untetherhomedepotLoopProtection.txt");
 }
 
 /* DOES THE DEVICE ACTUALLY HAVE THE FILES WE THINK WE INSTALLED.
@@ -1349,6 +1336,55 @@ static void report_device_logs(void) {
  * identical from the outside, and they need opposite fixes.
  *
  * Each line is one stat, and `ABSENT` is as informative as a mode. */
+/* WHAT THE PERSISTENCE PAYLOAD LEFT BEHIND — ONLY THE ONE WE SHIPPED.
+ *
+ * stageVersionBranch() picks exactly one payload at bake time by
+ * ProductVersion: 8.4.x gets etasonATV, other 8.x/7.x the iOS 7 tether, 6.1.4
+ * p0sixspwn, anything else none. Reporting all three on every device would be
+ * three quarters noise, and worse, would invite reading another payload's
+ * absence as a fault. So this branches the same way the bake did, and reads
+ * the answer out of the overlay rather than re-deriving it: only
+ * stageEtasonatv() stages a top-level /untether, only stageP0sixspwn() stages
+ * untether files into the var stage, and the iOS 7 branch stages just
+ * dirhelper.
+ *
+ * NOTHING UNDER /var IS READ, ONLY STATTED. The data partition permits
+ * exactly unlink() and mkdir() from a restore ramdisk; open() for reading
+ * fails the same way open(O_CREAT) does. So the untether's own log and its
+ * bootloop counter can be shown to EXIST and no more -- which is still the
+ * fact that matters for both. An existing counter is the untether having run
+ * and failed; an existing log is it having got far enough to write one. */
+static void report_untether_state(void) {
+    if (access("/blackb0x/untether/expl.js", F_OK) == 0) {
+        emit("  etasonATV payload (8.4.x) — trigger chain:\n");
+        /* System partition: readable, and where the trigger lives. */
+        report_path(MNT "/usr/libexec/rtbuddyd");
+        report_path(MNT "/usr/libexec/rtbuddyd.orig");
+        report_path(MNT "/--early-boot");
+        report_path(MNT "/untether/expl.js");
+        report_path(MNT "/untether/untether.bin");
+        report_path(MNT "/usr/bin/orphan_commander");
+        /* Data partition: existence only. */
+        report_path(MNT "/var/logs/untetherhomedepot.log");
+        report_path(MNT "/var/logs/untetherhomedepotLoopProtection.txt");
+        return;
+    }
+    if (access("/blackb0x/" BLACKB0X_VAR_STAGE "/untether/untether", F_OK) == 0) {
+        emit("  p0sixspwn payload (6.1.4):\n");
+        report_path(MNT "/usr/libexec/dirhelper");
+        report_path(MNT "/var/untether/untether");
+        report_path(MNT "/var/untether/_.dylib");
+        report_path(MNT "/private/etc/launchd.conf");
+        return;
+    }
+    if (access("/blackb0x/usr/libexec/dirhelper", F_OK) == 0) {
+        emit("  iOS 7 tether payload:\n");
+        report_path(MNT "/usr/libexec/dirhelper");
+        return;
+    }
+    emit("  no persistence payload was staged into this image\n");
+}
+
 static void report_device_install(void) {
     emit("  What the device actually has:\n");
     /* Ours: the loader, in the only directory launchd's embedded bootstrap
@@ -1386,10 +1422,7 @@ static void report_device_install(void) {
      * is usable. The jailbreak symlinks it to JavaScriptCore's jsc, and /
      * --early-boot to /untether/expl.js, so jsc runs the exploit as a script.
      * Every link in that chain is a file we either place or fail to. */
-    report_path(MNT "/usr/libexec/rtbuddyd");
-    report_path(MNT "/--early-boot");
-    report_path(MNT "/untether/expl.js");
-    report_path(MNT "/untether/untether.bin");
+    report_untether_state();
     /* THE LAUNCHD JOB CACHE. Reported, deliberately not touched.
      *
      * launchd does not find its daemons by reading /System/Library/

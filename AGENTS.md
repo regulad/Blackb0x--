@@ -866,7 +866,18 @@ measured on real AppleTV3,2 hardware:
 |---|---|---|
 | `--stock-ramdisk` | Apple's, untouched | **Apple logo appears** |
 | `--tether-boot` | none (NAND root) | **installed OS boots** |
-| default | the real baked ramdisk | **nothing at all, no logo** |
+| default | the real baked ramdisk | **installs; sshd comes up on the next normal boot** |
+
+**`--tether-boot` IS NOT PART OF THE INSTALL, AND TESTING PERSISTENCE WITH IT
+IS TESTING NOTHING.** It boots the NAND OS off our patched kernel, which
+supplies AMFI-disabled privileges directly and therefore **never runs the
+untether**. Every sshd test done that way was exercising a configuration in
+which the mechanism under investigation is bypassed by construction, and it
+cost weeks — see `docs/HISTORY.md`, "RESOLVED: sshd is alive". It is a
+development aid for bringing a device up when persistence is broken; it is the
+wrong instrument for testing whether persistence works. The install needs it
+for nothing: the ramdisk stages the payload, the entrypoint wires the
+`rtbuddyd` → `jsc` trigger, and a normal boot does the rest.
 
 That third result is itself evidence about *where* it fails. The bake leaves
 Apple's `/sbin/launchd` byte-identical and leaves

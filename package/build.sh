@@ -203,8 +203,7 @@ fi
 # files 0644, then the handful of things that must execute.
 find "$STAGING" -type d -exec chmod 755 {} +
 find "$STAGING" -type f -exec chmod 644 {} +
-for f in DEBIAN/postinst DEBIAN/preinst DEBIAN/prerm DEBIAN/postrm \
-         usr/share/blackb0x/postinstall.sh usr/share/blackb0x/loaddaemons.sh; do
+for f in DEBIAN/postinst DEBIAN/preinst DEBIAN/prerm DEBIAN/postrm usr/share/blackb0x/postinstall.sh; do
     [ -f "$STAGING/$f" ] && chmod 755 "$STAGING/$f"
 done
 

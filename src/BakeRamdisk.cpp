@@ -3084,16 +3084,7 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
                           "/etc/apt/trusted.gpg.d/regulad.gpg", "/etc/apt/trusted.gpg.d/saurik.gpg",
                           "/etc/apt/trusted.gpg.d/awkwardtv.gpg", "/etc/apt/trusted.gpg.d/bigboss.gpg",
                           "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
-                          "/usr/share/blackb0x/postinstall.sh", "/var/root/.profile",
-                          // The loader that stands in for what this build's
-                          // launchd does not do: it lives in the one directory
-                          // launchd DOES scan, and loads /Library/LaunchDaemons
-                          // and /etc/rc.d itself. See the plist's own comment.
-                          // This package owns both files outright -- nothing
-                          // else ships them, so there is no conflict to declare
-                          // and nothing to hold.
-                          "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.loaddaemons.plist",
-                          "/usr/share/blackb0x/loaddaemons.sh"}) {
+                          "/usr/share/blackb0x/postinstall.sh", "/var/root/.profile"}) {
         ownedPaths.push_back(p);
     }
     ok &= stageManualDpkgInstall(blackb0xRoot, extracted.stanza, "xyz.regulad.blackb0x", ownedPaths);

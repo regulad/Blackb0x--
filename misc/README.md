@@ -350,14 +350,14 @@ listing that also holds unrelated payloads.
   historical record.
 
   Note that `openssh` is **bake-time preinstalled**, not installed by
-  `postinstall.sh`, so its plist is on the device from the first boot. It
-  ships to `/Library/LaunchDaemons`, which **this platform's launchd does not
-  scan** — verified against the decrypted stock root filesystem, where that
-  directory does not even exist. What loads it is
-  `xyz.regulad.blackb0x.loaddaemons`, a unit in `/System/Library/LaunchDaemons`
-  running `/usr/share/blackb0x/loaddaemons.sh`, which does on every boot what
-  the untether does only after a successful exploit. See `docs/HISTORY.md`,
-  "sshd never started because launchd does not scan `/Library/LaunchDaemons`".
+  `postinstall.sh`, so its plist is on the device from the first boot. It ships
+  to `/Library/LaunchDaemons`, which **this platform's launchd does not scan** —
+  verified against the decrypted stock root filesystem, where that directory
+  does not even exist. What loads it is the **untether**, whose payload runs
+  `launchctl load` over that whole directory once it has kernel R/W. So sshd
+  comes up as a consequence of the jailbreak succeeding, and its absence was
+  never an sshd problem — see `docs/HISTORY.md`, "Both halves of the untether
+  fit 12H1006. The trigger was never installed."
 - `apt/joshtv.gpg.key` — **renamed from `pubkey.key`**: confirmed via
   `gpg --show-keys` to be JoshTV's own signing key (`uid: JoshTV
   <jtv@JoshTV.net>`) — the old name gave no hint which repo it signed for.

@@ -6944,3 +6944,55 @@ boot, where the patched kernel has already disabled AMFI and no untether has
 run, and it is the reason `/Library/LaunchDaemons` daemons can be brought up
 for development without an untethered jailbreak. It is not, and cannot be, a
 persistence mechanism.
+
+## RESOLVED: sshd is alive. The untether works, and `--tether-boot` is not needed
+
+Wiring the untether's trigger was the whole fix. With
+`fixup_etasonuntether_rtbuddyd()` no longer gated on a file that cannot be
+read, the `/usr/libexec/rtbuddyd` → `jsc` symlink is created, and on the next
+**normal** boot the full chain runs end to end:
+
+```
+launchd  --(embedded Boot task "rtbuddy")-->  rtbuddyd --early-boot
+         --(symlink)-->  JavaScriptCore.framework/Resources/jsc
+         --(argv as script path, /--early-boot symlink)-->  /untether/expl.js
+         --(setImpureGetterDelegate type confusion)-->  RWX in jsc
+         --(stage 1 reads it into the JIT page)-->  /untether/untether.bin
+         --(kernel exploit)-->  tfp0, AMFI/sandbox/cs patches
+         --(its own shell one-liner)-->  launchctl load /Library/LaunchDaemons
+         -->  sshd
+```
+
+**SSH now answers on a normal, untethered boot.** Nothing this project writes
+loads a daemon; the untether does it, as it was always designed to.
+
+### `--tether-boot` is a development aid, not part of the install
+
+Worth stating plainly because it shaped weeks of wrong conclusions.
+`--tether-boot` boots the NAND OS off our patched kernel, which supplies
+AMFI-disabled privileges directly — and therefore **never runs the untether at
+all**. Every sshd test performed that way was testing a configuration in which
+the thing under investigation is bypassed by construction. It is genuinely
+useful for bringing a device up when persistence is broken, and it is the wrong
+instrument for testing persistence.
+
+The install itself needs it for nothing. The ramdisk stages the payload, the
+entrypoint wires the trigger, and a normal boot does the rest.
+
+### The loader unit is deleted
+
+`xyz.regulad.blackb0x.loaddaemons` and its script are removed outright. They
+were written to do by hand what the untether does on its own, at a time when
+the untether was believed broken. It never could have worked anyway — it runs
+`/bin/sh`, which is not stock and therefore unsigned, so AMFI blocks it on
+exactly the boots where it would have been needed (see the previous entry).
+With the real trigger repaired there is nothing for it to do on any boot, and
+a second mechanism racing the untether to load the same directory is a
+liability rather than a backstop.
+
+What survives from that detour is knowledge, recorded in the entries above:
+`/Library/LaunchDaemons` does not exist on stock and launchd never scans it;
+the job cache does not exist either and launchd really does walk
+`Bootstrap > Paths`; the data partition permits only `unlink` and `mkdir`; and
+`jsc` being Apple-signed is the one property that makes the untether's entry
+point possible and ours impossible.

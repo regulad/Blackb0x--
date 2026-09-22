@@ -25,10 +25,26 @@
 #   - An unrecognised key can make the app reject the whole file. Only keys the
 #     app documents belong here; when unsure, leave it out.
 #
-# Anything omitted is left alone. The boolean feature toggles (`has_issues`,
-# `has_wiki`, `has_projects`, `private`, the merge-button and security flags) are
-# deliberately absent: the repository's current live values were set by hand, and
-# restating them here would only create a way to flip one by accident.
+# Anything omitted is left alone. `private` and the security flags stay omitted
+# for the reason the feature toggles used to: their live values were set by hand
+# and restating them here would only create a way to flip one by accident. The
+# feature toggles below are now stated deliberately, because the intent is a
+# repository that takes ISSUES and nothing else.
+#
+# PULL REQUESTS CANNOT BE TURNED OFF, here or anywhere. GitHub has no such
+# setting and this app has no key for it -- the only PR-adjacent keys are
+# `allow_squash_merge` / `allow_merge_commit` / `allow_rebase_merge`, and the
+# API rejects disabling all three, so they control HOW a PR merges and never
+# WHETHER one can be opened. Anyone able to see a public repository can fork it
+# and open one. The real levers, if that ever matters, are branch protection
+# (this app's `branches:` section) to control what can actually land, or
+# `.github/PULL_REQUEST_TEMPLATE.md` to say so to anyone who tries.
+#
+# `allow_forking` and `has_discussions` are deliberately NOT here: neither
+# appears in the app's documented repository schema
+# (repository-settings/app, docs/plugins/repository.md), and per the warning
+# above an unrecognised key can make the app reject this entire file. Discussions
+# are already off live; forking is left to GitHub's own default.
 
 repository:
   name: "Blackb0x--"
@@ -36,17 +52,28 @@ repository:
   # Verbatim, at the owner's request. Do not rephrase or extend.
   description: "Apple TV 2/3 Jailbreak based on Blackb0x"
 
-  # `linux` is the real default branch, not `main`/`master`. The name is a
-  # fossil: this started as a Linux port, that support was removed outright
-  # (checkm8 never worked there), and the branch name outlived the reason.
-  # Stated here because it is load-bearing in two places that are easy to get
-  # wrong -- the Settings app itself only watches the DEFAULT branch, so this
-  # file is only read when it is on `linux`; and GitHub Actions caches written
-  # on the default branch are readable from every branch, whereas caches
-  # written elsewhere are visible only to that branch and its children. The CI
-  # toolchain cache depends on that, so anyone renaming this branch needs to
-  # know it moves more than a label.
-  default_branch: "linux"
+  # `master`, renamed from `linux`. That name was a fossil -- this began as a
+  # Linux port, the support was removed outright (checkm8 never worked there),
+  # and the branch name outlived the reason.
+  #
+  # The rename was done through GitHub's own branch-rename API rather than by
+  # pushing a new branch and deleting the old one, and that distinction is
+  # load-bearing. The default branch is not just a label here: the Settings app
+  # only watches the DEFAULT branch, so this file is only read while it sits on
+  # that branch; and GitHub Actions caches written on the default branch are
+  # readable from every branch, whereas caches written anywhere else are
+  # visible only to that branch and its children. CI's pinned-Xcode cache -- a
+  # multi-gigabyte entry that several jobs restore -- depends on that. The
+  # rename API moves the branch, the default, and everything attached to it;
+  # push-and-delete would have orphaned the cache and quietly cost every
+  # subsequent run a reassembly.
+  default_branch: "master"
+
+  # ISSUES ONLY. Everything else this app can switch off is off.
+  has_issues: true
+  has_projects: false
+  has_wiki: false
+  has_downloads: false
 
   # Max 20, lowercase/digits/hyphens, <=35 chars each — GitHub's rules.
   # Both `apple-tv` and `appletv` are present because GitHub's topic search is

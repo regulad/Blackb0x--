@@ -1,5 +1,7 @@
 # Blackb0x--
 
+[![wakatime](https://wakatime.com/badge/github/regulad/Blackb0x--.svg)](https://wakatime.com/badge/github/regulad/Blackb0x--)
+
 Don't eWaste what can still be used! 
  
 Jailbreak tool for the 2nd/3rd-gen Apple TV, via the `checkm8`/`SHAtter` DFU-mode boot
@@ -11,14 +13,17 @@ Additional features over the original [`blackb0x`](https://github.com/NSSpiral/B
 
 * Works in 2026 with current `apt` repositories
 * Restores Appliance support to `lowtide` (the springboard/pineboard equivalent for Apple TV Software), allowing legacy tweaks and apps to appear on the UI
-* Injects Debian 13 CAs into Apple TV Software, enabling the entire system to connect to current websites using TLS 1.2 (which was already supported)
+* Injects Debian 13 CAs into Apple TV Software, enabling the entire system to connect to current websites
+* `apt-get` configured to use the system SSL handlers (enables TLS 1.2 support, which a vast majority of the internet still supports)
 * Logs to screen during install process, making it easier to debug
-* Fully working on Apple Silicon (jailbreaking up to macOS 27/Golden Gate; authoring up to macOS 26/Tahoe, see next bullet)
-* Opportunistic use of pre-patched binaries built on CI (eliminates the need to run legacy Xcode through Rosetta 2 nor build huge libraries)
+* GPL compliance (all unlicensed code from Blackb0x was either rewritten or properly vendored and attributed as a submodule)
+* Fully declarative payload configuration
+* First-class Apple Silicon Mac support (jailbreaking up to macOS 27/Golden Gate; authoring up to macOS 26/Tahoe, see next bullet)
+* Opportunistic use of pre-patched binaries built on GHA CD pipeline (eliminates the need to run legacy Xcode through Rosetta 2 nor build huge libraries)
 
 Supported devices:
 
-| device | firmware | notes |
+| device | latest firmware | notes |
 |---|---|---|
 | AppleTV3,2 (A1469) | tvOS 8.4.3 (formerly Apple TV Software 7.x) | untethered only (`tihmstar`'s `etasonATV`) |
 | AppleTV3,1 (A1427) | tvOS 8.4.3 (formerly Apple TV Software 7.x) | untethered only; needs an Arduino running [`synackuk`'s `checkm8-A5`](https://github.com/synackuk/checkm8-a5) to pwn DFU first; `blackb0x` picks up from there |
@@ -58,11 +63,7 @@ brew install git-lfs ldid afsctool dpkg python3 \
 ```
 
 The baker also needs [Theos](https://theos.dev) for `dm.pl` (`$THEOS`, default
-`~/theos`).
-
-It further needs **two old Xcodes available locally**, because `entrypoint/`
-— the binary that becomes PID 1 on the patched ramdisk — is built with a
-pinned toolchain rather than the stock one:
+`~/theos`) and **two old Xcodes available locally** to build binaries.
 
 | Xcode | For | Why |
 |---|---|---|
@@ -85,8 +86,8 @@ Almost everything else is vendored under `third_party/` and built from source.
 git clone --recurse-submodules https://github.com/regulad/Blackb0x--.git
 cd Blackb0x--
 cmake -S . -B build
-cmake --build build --target jailbreak -j"$(sysctl -n hw.ncpu)"   # blackb0x and blackb0x-pwn
-cmake --build build --target authoring -j"$(sysctl -n hw.ncpu)"   # bake-firmware, vendored apt, tests, xpwntool
+cmake --build build --target jailbreak -j"$(sysctl -n hw.ncpu)"   # jailbreak only: blackb0x and blackb0x-pwn
+cmake --build build --target authoring -j"$(sysctl -n hw.ncpu)"   # authoring only: bake-firmware, vendored apt, tests, xpwntool
 ```
 
 `sysctl -n hw.ncpu` is the macOS equivalent of `nproc`, which does not exist
@@ -129,7 +130,7 @@ build artifacts.
 
 ## Credits
 **[NSSpiral](https://github.com/NSSpiral/Blackb0x)**
-* Original Blackb0x — the macOS Cocoa/Objective-C app this project is a portable CLI port of
+* Original Blackb0x
 
 **dora2ios**
 * iBSS loader for AppleTV3,1

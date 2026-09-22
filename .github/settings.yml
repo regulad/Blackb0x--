@@ -50,7 +50,7 @@ repository:
   name: "Blackb0x--"
 
   # Verbatim, at the owner's request. Do not rephrase or extend.
-  description: "Apple TV 2/3 Jailbreak based on Blackb0x"
+  description: "Modern Apple TV 2/3 Jailbreak based on Blackb0x"
 
   # `master`, renamed from `linux`. That name was a fossil -- this began as a
   # Linux port, the support was removed outright (checkm8 never worked there),

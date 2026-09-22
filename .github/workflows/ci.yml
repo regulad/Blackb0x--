@@ -1051,3 +1051,297 @@ jobs:
           # leaves the previous set downloadable.
           retention-days: 90
           if-no-files-found: error
+
+  # Every .deb this project ships, built and published as one artifact, so the
+  # repo at https://ios.regulad.xyz can be updated by downloading and copying
+  # rather than by running a bake.
+  #
+  # WHY THIS IS A SEPARATE JOB AND NOT PART OF `bake`. The bake does build two
+  # of these three packages -- stageBlackb0xPackage() and
+  # stageCainjectorPackage() call the same scripts -- but it builds them INTO A
+  # RAMDISK and throws the .deb away, once per device, as a side effect of a
+  # ~30-minute job that needs root, an IPSW download and a working patcher.
+  # Feeding an apt repo needs none of that: the three packages are
+  # architecture-wide (iphoneos-arm), identical across all three devices, and
+  # none of them needs the C++ authoring tools at all -- every build script
+  # here is standalone. So this job is minutes, not half an hour, and one run
+  # produces what the repo needs for every device.
+  debs:
+    name: Build .debs for the apt repo
+    needs: build
+    # Needs secrets.PAT for the Xcode mirror, which a fork PR cannot have.
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    env:
+      # Fixed, not matrixed. cainjector and appliancetvtweak are armv7 against
+      # the iPhoneOS 8.4 SDK regardless of which Apple TV installs them, and
+      # 6.4 is the Xcode that carries it (see entrypoint/Makefile's table).
+      # The 5.1.1/7.1 pairing exists for entrypoint, which is spliced into a
+      # per-device ramdisk; nothing in a .deb is per-device.
+      XCODE_VERSION: "6.4"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # LFS, because appliancetvtweak/Makefile unpacks CydiaSubstrate out
+          # of debcache/mobilesubstrate_*.deb and package/build.sh copies
+          # local_only_debs.txt's entries into the bundled local repo. Both are
+          # LFS-backed. No submodules: nothing here builds C++.
+          lfs: true
+
+      # dpkg for dpkg-deb and dpkg-scanpackages, ldid for signing the two
+      # compiled payloads. Deliberately not the bake job's full list -- no
+      # cmake, no autotools, no berkeley-db.
+      - name: Install packaging dependencies
+        run: brew install ldid dpkg
+
+      # dm.pl only, exactly as the bake job does it: a standalone Perl script
+      # using core modules, symlinked to the vendor/dm.pl submodule. None of
+      # Theos' toolchain is involved -- and could not be, since its vendored
+      # SDKs are arm64-only and cannot target armv7.
+      - name: Install Theos (dm.pl only)
+        run: |
+          git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          git -C "$HOME/theos" submodule update --init --depth 1 vendor/dm.pl
+          test -x "$HOME/theos/bin/dm.pl"
+
+      - name: Check out the Xcode mirror's LFS pointers
+        env:
+          XCODE_MIRROR_TOKEN: ${{ secrets.PAT }}
+        run: |
+          set -eu
+          if [ -z "${XCODE_MIRROR_TOKEN:-}" ]; then
+            echo "secrets.PAT is empty. cainjector and appliancetvtweak are armv7" \
+                 "binaries and cannot be built without a pinned Xcode, and" \
+                 "regulad/xcode is private, so there is nothing to fall back to." >&2
+            exit 1
+          fi
+          rm -rf xcode-mirror
+          GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 \
+            "https://x-access-token:${XCODE_MIRROR_TOKEN}@github.com/regulad/xcode.git" \
+            xcode-mirror
+          for p in xcode-mirror/parts/"$XCODE_VERSION"/*.part??; do
+            grep -q '^oid sha256:' "$p" || {
+              echo "$p is not a Git LFS pointer -- the mirror's layout changed," \
+                   "or this clone resolved LFS objects when it should not have." >&2
+              exit 1
+            }
+          done
+
+      # Same cache the bake job uses, keyed the same way: on the POINTERS, which
+      # are cheap to fetch, rather than on the multi-gigabyte image itself.
+      - name: Restore the cached Xcode disk image
+        id: xcode-dmg
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/xcode-dmg
+          key: xcode-dmg-${{ runner.os }}-6.4-${{ hashFiles('xcode-mirror/parts/6.4/*') }}
+
+      - name: Reassemble the Xcode disk image
+        if: steps.xcode-dmg.outputs.cache-hit != 'true'
+        working-directory: xcode-mirror
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/xcode-dmg"
+          ./reassemble.sh --fetch --consume --out "$RUNNER_TEMP/xcode-dmg" "$XCODE_VERSION"
+
+      - name: Save the Xcode disk image to the cache
+        if: steps.xcode-dmg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/xcode-dmg
+          key: ${{ steps.xcode-dmg.outputs.cache-primary-key }}
+
+      # A THINNER SLICE THAN THE BAKE JOB'S, and a different one. That job
+      # copies IOSurface and CoreFoundation, which is what entrypoint links.
+      # These two packages link CoreFoundation, Security (cainjector's
+      # SecTrustStore* calls) and Foundation (the tweak is Objective-C), so
+      # those are the three frameworks taken. libSystem and libobjc arrive
+      # with usr/lib wholesale.
+      - name: Extract the pinned toolchain
+        run: |
+          set -eu
+          dmg=''
+          for c in "$RUNNER_TEMP"/xcode-dmg/*.dmg; do
+            [ -f "$c" ] || continue
+            dmg="$c"
+            break
+          done
+          if [ -z "$dmg" ]; then
+            echo "no Xcode disk image in $RUNNER_TEMP/xcode-dmg -- the cache restore" \
+                 "reported a hit but produced nothing, or reassembly was skipped." >&2
+            exit 1
+          fi
+
+          mnt="$RUNNER_TEMP/xcode-mnt"
+          tc="$RUNNER_TEMP/xcode-toolchain"
+          rm -rf "$mnt" "$tc"
+          mkdir -p "$mnt"
+
+          detach() {
+            hdiutil detach -quiet "$mnt" >/dev/null 2>&1 \
+              || hdiutil detach -quiet -force "$mnt" >/dev/null 2>&1 \
+              || echo "warning: could not detach $mnt" >&2
+          }
+          trap detach EXIT INT TERM
+
+          # SC2209 is a false positive here: PAGER=cat is an environment
+          # prefix to hdiutil, not an assignment of the string "cat".
+          # shellcheck disable=SC2209
+          yes | PAGER=cat hdiutil attach -quiet -nobrowse -readonly -noverify \
+            -noautoopen -mountpoint "$mnt" "$dmg"
+
+          dev="$mnt/Xcode.app/Contents/Developer"
+          xct="$dev/Toolchains/XcodeDefault.xctoolchain"
+          [ -x "$xct/usr/bin/clang" ] || {
+            echo "$dmg does not contain XcodeDefault.xctoolchain/usr/bin/clang" >&2
+            exit 1
+          }
+
+          mkdir -p "$tc/usr/bin" "$tc/usr/lib/clang" "$tc/SDKs"
+          cp "$xct/usr/bin/clang" "$xct/usr/bin/ld" "$tc/usr/bin/"
+          cp -R "$xct/usr/lib/clang/"* "$tc/usr/lib/clang/"
+
+          # Resolve rather than assume which of iPhoneOS.sdk / iPhoneOS8.4.sdk
+          # is the real directory and which is the symlink -- 6.4 and 5.1.1
+          # disagree, and the Makefiles probe for SDKs/iPhoneOS<ver>.sdk.
+          sdks="$dev/Platforms/iPhoneOS.platform/Developer/SDKs"
+          real=''
+          for c in "$sdks"/iPhoneOS*.sdk; do
+            [ -d "$c" ] && [ ! -L "$c" ] || continue
+            real="$c"
+            break
+          done
+          [ -n "$real" ] || {
+            echo "no real iPhoneOS SDK directory under $sdks" >&2
+            exit 1
+          }
+          name=$(basename "$real")
+
+          mkdir -p "$tc/SDKs/$name/usr"
+          cp -R "$real/usr/include" "$tc/SDKs/$name/usr/include"
+          cp -R "$real/usr/lib" "$tc/SDKs/$name/usr/lib"
+          cp "$real/SDKSettings.plist" "$tc/SDKs/$name/"
+          mkdir -p "$tc/SDKs/$name/System/Library/Frameworks"
+          for fw in CoreFoundation Security Foundation; do
+            cp -R "$real/System/Library/Frameworks/$fw.framework" \
+                  "$tc/SDKs/$name/System/Library/Frameworks/"
+          done
+          ln -s "$name" "$tc/SDKs/iPhoneOS.sdk"
+
+          detach
+          trap - EXIT INT TERM
+          rm -rf "$RUNNER_TEMP/xcode-dmg"
+
+          "$tc/usr/bin/clang" --version
+          du -sh "$tc"
+          echo "XCODE_TOOLCHAIN=$tc" >> "$GITHUB_ENV"
+
+      # DATE.RUN_NUMBER, because an apt repo needs versions that only ever go
+      # up. The date dominates and the run number breaks ties within a day, so
+      # any later build sorts above any earlier one under dpkg's own comparison
+      # -- which a bare run number would not survive if this workflow were ever
+      # renamed and its counter reset.
+      - name: Compute the package version
+        id: version
+        run: |
+          set -eu
+          echo "value=$(date -u +%Y%m%d).${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build every .deb
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -eu
+          export THEOS="$HOME/theos"
+          out="$PWD/dist/debs"
+          mkdir -p "$out"
+
+          # The main package is the only one that needs a staging tree handed
+          # to it -- normally bakeRamdisk() assembles one because postinstall.sh
+          # is templated and the bundled local repo depends on what that bake
+          # resolved. Neither applies here: build.sh templates postinstall.sh
+          # from package/packages.txt itself and fills the local repo from
+          # local_only_debs.txt, so a plain copy of package/layout is a complete
+          # input.
+          stage="$RUNNER_TEMP/blackb0x-stage"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp -R package/layout/. "$stage/"
+          package/build.sh "$stage" \
+            "$out/xyz.regulad.blackb0x_${VERSION}_iphoneos-arm.deb" "$VERSION"
+
+          package/build_cainjector.sh \
+            "$out/xyz.regulad.blackb0x.cainjector_${VERSION}_iphoneos-arm.deb" "$VERSION"
+
+          package/build_appliancetvtweak.sh \
+            "$out/xyz.regulad.blackb0x.appliancetvtweak_${VERSION}_iphoneos-arm.deb" "$VERSION"
+
+      # Assert what the repo actually depends on, rather than trusting that
+      # three scripts exiting 0 means three usable packages. Each of these has
+      # been a real failure at least once: a .deb built with the host's own
+      # architecture, an unsigned payload that installs fine and never runs,
+      # and a maintainer script left non-executable so dm.pl refuses it.
+      - name: Check the packages are what they claim to be
+        run: |
+          set -eu
+          cd dist/debs
+          fail=0
+
+          for d in *.deb; do
+            arch=$(dpkg-deb -f "$d" Architecture)
+            [ "$arch" = "iphoneos-arm" ] || {
+              echo "$d: Architecture is '$arch', expected iphoneos-arm" >&2
+              fail=1
+            }
+            dpkg-deb -f "$d" Version | grep -qv '__BLACKB0X_VERSION__' || {
+              echo "$d: version placeholder was never substituted" >&2
+              fail=1
+            }
+          done
+
+          # The two compiled payloads: armv7 Mach-O, and signed. An unsigned
+          # binary installs and then silently never runs, which is the single
+          # most expensive failure mode this project has hit.
+          work="$RUNNER_TEMP/deb-check"
+          rm -rf "$work"
+          for d in *cainjector*.deb *appliancetvtweak*.deb; do
+            ex="$work/$(basename "$d" .deb)"
+            mkdir -p "$ex"
+            dpkg-deb -x "$d" "$ex"
+            found=0
+            for bin in "$ex/usr/libexec/blackb0x/cainjector" \
+                       "$ex/Library/MobileSubstrate/DynamicLibraries/appliancetvtweak.dylib"; do
+              [ -f "$bin" ] || continue
+              found=1
+              file -b "$bin" | grep -q arm_v7 || {
+                echo "$d: $(basename "$bin") is not armv7 ($(file -b "$bin"))" >&2
+                fail=1
+              }
+              codesign -dv "$bin" >/dev/null 2>&1 || {
+                echo "$d: $(basename "$bin") carries no code signature" >&2
+                fail=1
+              }
+            done
+            [ "$found" = 1 ] || { echo "$d: no expected payload binary found" >&2; fail=1; }
+          done
+
+          exit "$fail"
+
+      # A real dpkg-scanpackages index alongside the .debs, so updating the
+      # repo is a copy rather than a rebuild. Unsigned: signing is the repo's
+      # own business and its key does not belong on a CI runner.
+      - name: Generate a Packages index
+        working-directory: dist/debs
+        run: |
+          set -eu
+          dpkg-scanpackages . /dev/null > Packages
+          gzip -9kf Packages
+          echo "--- Packages ---"
+          grep -E '^(Package|Version|Architecture|Depends):' Packages
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debs
+          path: dist/debs/
+          retention-days: 90
+          if-no-files-found: error

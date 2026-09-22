@@ -460,13 +460,28 @@ else \
 fi
 endef
 
-.PHONY: all clean
+.PHONY: all clean force
 
 all: $(TARGET)
 
-$(TARGET): entrypoint.c fbtext.h screen.h
+# THE STAMP IS A DEPENDENCY, not just a -D, and it has to be.
+#
+# BLACKB0X_COMMIT lives in CFLAGS, and make cannot see into CFLAGS: with the
+# binary newer than entrypoint.c it would skip the rebuild and ship a stamp
+# naming an older commit. That is precisely the failure the stamp exists to
+# prevent -- a photograph of a television attributed to the wrong build -- so
+# it cannot be left to whether the sources happened to change.
+#
+# .commit-stamp holds the current value and is rewritten ONLY when it differs,
+# so its mtime moves exactly when the commit does. `force` makes make evaluate
+# that every time; `cmp -s` keeps it from touching the file, and thus from
+# triggering a rebuild, when nothing has changed.
+.commit-stamp: force
+	@printf '%s' '$(BLACKB0X_COMMIT)' | cmp -s - $@ 2>/dev/null || 		printf '%s' '$(BLACKB0X_COMMIT)' > $@
+
+$(TARGET): entrypoint.c fbtext.h screen.h .commit-stamp
 	@$(entrypoint_compile)
 	$(LDID) -S -I$(ENTRYPOINT_IDENTIFIER) $@
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) .commit-stamp

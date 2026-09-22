@@ -1161,11 +1161,11 @@ static void start_restored_external(void) {
 static void report_volume(const char *label, const char *path) {
     struct statfs fs;
     if (statfs(path, &fs) != 0) {
-        emit_err("  %s: statfs(%s) failed (errno %d, %s)\n",
+        emit_err("    %s: statfs(%s) failed (errno %d, %s)\n",
                  label, path, errno, strerror(errno));
         return;
     }
-    emit("  %s: %s on %s, %llu MiB total, %llu MiB free\n", label,
+    emit("    %s: %s on %s, %llu MiB total, %llu MiB free\n", label,
          fs.f_mntfromname, fs.f_mntonname,
          (unsigned long long)fs.f_blocks * fs.f_bsize >> 20,
          (unsigned long long)fs.f_bavail * fs.f_bsize >> 20);
@@ -1199,17 +1199,17 @@ static void report_volume(const char *label, const char *path) {
 static void report_log_tail(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) {
-        emit("  %s: ABSENT (errno %d, %s)\n", path, errno, strerror(errno));
+        emit("    %s: ABSENT (errno %d, %s)\n", path, errno, strerror(errno));
         return;
     }
     if (st.st_size == 0) {
-        emit("  %s: present but EMPTY\n", path);
+        emit("    %s: present but EMPTY\n", path);
         return;
     }
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        emit_err("  %s: cannot open (errno %d, %s)\n", path, errno, strerror(errno));
+        emit_err("    %s: cannot open (errno %d, %s)\n", path, errno, strerror(errno));
         return;
     }
     /* Seek so a long-lived log costs one small read rather than its whole
@@ -1221,12 +1221,12 @@ static void report_log_tail(const char *path) {
     ssize_t n = read(fd, buf, LOG_TAIL_BYTES);
     close(fd);
     if (n <= 0) {
-        emit_err("  %s: read failed (errno %d, %s)\n", path, errno, strerror(errno));
+        emit_err("    %s: read failed (errno %d, %s)\n", path, errno, strerror(errno));
         return;
     }
     buf[n] = '\0';
 
-    emit("  %s (%lld bytes, last %d lines):\n", path, (long long)st.st_size, LOG_TAIL_LINES);
+    emit("    %s (%lld bytes, last %d lines):\n", path, (long long)st.st_size, LOG_TAIL_LINES);
 
     /* Walk back over the requested number of newlines, then print forward. */
     int wanted = LOG_TAIL_LINES;
@@ -1240,7 +1240,7 @@ static void report_log_tail(const char *path) {
     for (char *line = buf + i; *line; ) {
         char *nl = strchr(line, '\n');
         if (nl) *nl = '\0';
-        if (*line) emit("    %s\n", line);
+        if (*line) emit("      %s\n", line);
         if (!nl) break;
         line = nl + 1;
     }
@@ -1255,7 +1255,7 @@ static void report_log_tail(const char *path) {
 static void report_path(const char *path);
 
 static void report_device_logs(void) {
-    emit("Logs from the last booted session:\n");
+    emit("  Logs from the last booted session:\n");
     report_log_tail(BLACKB0X_STATE_DIR "/install.log");
     /* The loader is the one that has to run FIRST and the only one whose
      * absence explains everything downstream, so it goes near the top. If
@@ -1277,7 +1277,7 @@ static void report_device_logs(void) {
  *
  * Each line is one stat, and `ABSENT` is as informative as a mode. */
 static void report_device_install(void) {
-    emit("What the device actually has:\n");
+    emit("  What the device actually has:\n");
     /* Ours: the loader, in the only directory launchd's embedded bootstrap
      * plist lists under Bootstrap>Paths, plus the script it runs. */
     report_path(MNT "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.loaddaemons.plist");
@@ -1331,11 +1331,6 @@ static void report_device_install(void) {
 }
 
 
-/* Defined below, next to the volume probes they belong with; declared here
- * because the grouping function is placed with the header it prints rather
- * than after everything it happens to call. */
-static void probe_writability(void);
-
 /* Stamped in by the Makefile from `git rev-parse HEAD`, with -dirty appended
  * when the tree had uncommitted edits. The fallback exists so a build from a
  * tree with no .git still compiles; it should never be what ships. */
@@ -1357,129 +1352,41 @@ static void probe_writability(void);
  * that is the part a user who is not debugging actually wants to see.
  *
  * Grouped here rather than at each mount because they must be readable as one
- * block, and every one of them needs all three mounts anyway. */
+ * block, and every one of them needs all three mounts anyway.
+ *
+ * THE /var WRITABILITY PROBES ARE GONE, deliberately. They existed to answer
+ * one question -- whether the data partition would accept a new regular file
+ * -- and it is answered: it will not, because iOS content protection needs a
+ * per-file key from a keybag no restore ramdisk loads, and 130 merge entries
+ * failed on hardware with every one of them bound for /var. The whole payload
+ * moved to the system partition as a result. A probe that can only confirm a
+ * closed case is noise on a screen that holds ninety rows, and the rows it
+ * was spending are wanted by the launchd question that is still open. */
 static void report_diagnostics(void) {
-    emit("DIAGNOSTIC INFO (%s):\n", BLACKB0X_COMMIT);
+    emit("DIAGNOSTIC INFO (blackb0x-- entrypoint %s):\n", BLACKB0X_COMMIT);
     report_volume("data", MNT "/private/var");
     report_path(MNT "/var/.blackb0x/install-done");
-    report_path(MNT "/var/mobile");
     report_path(BLACKB0X_STATE_DIR);
     report_path(BLACKB0X_STATE_DIR "/var");
     report_path(MNT "/dev/disk0s1s1");
     report_path("/blackb0x");
     report_volume("ramdisk", "/");
-    probe_writability();
     report_device_logs();
     report_device_install();
 }
 
-/* WHICH VOLUME WILL ACCEPT A NEW FILE, AND WHICH WILL NOT.
- *
- * The install record failed with EPERM at /var/mobile/Media, so it was moved
- * to /var/.blackb0x — and failed there too, with the same errno, as root.
- * That rules out the explanation that was obvious at /var/mobile/Media
- * (Media is a data-protected location) and replaces it with a much more
- * serious possibility: that NOTHING can create a file on the data partition
- * from this ramdisk.
- *
- * That would matter far beyond one log. /blackb0x stages a large part of its
- * payload into /var and /private/var — dpkg's database, apt's lists, this
- * project's own /private/var/.blackb0x — all of which live on disk0s1s2.
- * If creates are refused there, the install has been failing quietly for
- * every one of those files, and the log was simply the first to say so out
- * loud now that there is a screen to say it on.
- *
- * TWO EXPLANATIONS FIT, and they call for opposite responses, which is
- * exactly why this measures instead of guessing.
- *
- *   1. The VOLUME refuses. iOS content protection: on a CP-enabled volume a
- *      new file needs a per-file key wrapped by a class key from the keybag.
- *      Nothing here loads one — /usr/libexec/keybagd is referenced by
- *      launchd's embedded bootstrap but is NOT PRESENT on this ramdisk, and
- *      the only MobileKeyBag symbols restored_external imports are
- *      MKBKeyBagCreateSystem and MKBDeviceObliterateClassDKey, i.e. the
- *      restore-time destructive ones, not "load the existing bag". Reads of
- *      existing class-D files keep working, which matches what we see. This
- *      device has no passcode, so the class keys need no user input; the bag
- *      would just need loading, and loading it is setup this project does
- *      not currently do.
- *
- *   2. The PROCESS is refused. EPERM is also the canonical sandbox denial,
- *      and an ad-hoc-signed binary that the kernel does not treat as a
- *      platform binary can end up under a default profile regardless of the
- *      AMFI boot-args. If that is what is happening, the data partition is
- *      innocent and no amount of keybag work would help.
- *
- * The probes below separate them. A create on the RAMDISK's own root is the
- * control: it is local memory, not content-protected, and already writable
- * (ensure_root_writable ran). If even that is refused, the restriction is on
- * us and hypothesis 2 is the answer. If the ramdisk and the system partition
- * accept a file and only the data partition refuses, it is the volume, and
- * mkdir-vs-create then says whether it is specifically per-file keys —
- * directories need none, so mkdir succeeding where create fails is content
- * protection all but confirmed.
- *
- * Reading the data partition is the fourth control: a volume that lists its
- * own entries is genuinely mounted, so a create failure on it is a refusal
- * rather than a consequence of a mount that silently did nothing.
- *
- * Every probe cleans up after itself. Nothing here fails the run. */
-static void probe_writability(void) {
-    struct { const char *what; const char *path; int isDir; } probes[] = {
-        { "create on ramdisk root",     "/.blackb0x-probe",                      0 },
-        { "create on system partition", MNT "/.blackb0x-probe",                  0 },
-        { "mkdir  on data partition",   MNT "/private/var/.blackb0x-probe.d",    1 },
-        { "create on data partition",   MNT "/private/var/.blackb0x-probe",      0 },
-        { "create in existing data dir", MNT "/private/var/mobile/.blackb0x-probe", 0 },
-    };
-
-    emit("Probing what each volume will accept...\n");
-    for (unsigned i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
-        if (probes[i].isDir) {
-            if (mkdir(probes[i].path, 0755) != 0) {
-                emit("  %s: REFUSED (errno %d, %s)\n", probes[i].what, errno, strerror(errno));
-            } else {
-                emit("  %s: ok\n", probes[i].what);
-                rmdir(probes[i].path);
-            }
-            continue;
-        }
-        int fd = open(probes[i].path, O_WRONLY | O_CREAT | O_EXCL, 0644);
-        if (fd < 0) {
-            emit("  %s: REFUSED (errno %d, %s)\n", probes[i].what, errno, strerror(errno));
-        } else {
-            close(fd);
-            emit("  %s: ok\n", probes[i].what);
-            unlink(probes[i].path);
-        }
-    }
-
-    /* Reading the data partition, to prove the mount itself is sound. A
-     * volume that lists its own entries is mounted; a volume that cannot is
-     * a different bug entirely and would make every create failure above a
-     * consequence rather than a cause. */
-    DIR *d = opendir(MNT "/private/var");
-    if (!d) {
-        emit_err("  read   on data partition: REFUSED (errno %d, %s)\n", errno, strerror(errno));
-    } else {
-        int n = 0;
-        while (readdir(d) != NULL) n++;
-        closedir(d);
-        emit("  read   on data partition: ok, %d entries\n", n);
-    }
-}
 
 static void report_path(const char *path) {
     struct stat st;
     const char *kind;
     if (lstat(path, &st) != 0) {
-        emit("  %s: ABSENT (errno %d, %s)\n", path, errno, strerror(errno));
+        emit("    %s: ABSENT (errno %d, %s)\n", path, errno, strerror(errno));
         return;
     }
     kind = S_ISDIR(st.st_mode)  ? "dir"  :
            S_ISREG(st.st_mode)  ? "file" :
            S_ISLNK(st.st_mode)  ? "link" : "other";
-    emit("  %s: %s mode 0%o uid %u gid %u size %llu\n", path, kind,
+    emit("    %s: %s mode 0%o uid %u gid %u size %llu\n", path, kind,
          (unsigned)(st.st_mode & 07777), (unsigned)st.st_uid,
          (unsigned)st.st_gid, (unsigned long long)st.st_size);
 }
@@ -1645,7 +1552,6 @@ int main(void) {
     }
     emit("Main filesystem mounted\n");
     report_volume("system", MNT);
-    report_path(MNT "/private/var");
     report_path(MNT "/Applications");
 
     emit("Mounting user filesystem...\n");

@@ -337,10 +337,48 @@ static int fbtext_console_init(fbtext_console *c, const fbtext_surface *s)
     return (c->cols > 0 && c->rows > 0);
 }
 
+/* How many rows a logical line will occupy once wrapped. */
+static int fbtext_console_rows_for(const fbtext_console *c, const char *str)
+{
+    size_t len = strlen(str);
+    int n;
+    if (len == 0) return 1;
+    n = (int)((len + (size_t)c->cols - 1) / (size_t)c->cols);
+    return n < 1 ? 1 : n;
+}
+
+/* Would `rowsNeeded` more rows run off the bottom of the scrolling region? */
+static int fbtext_console_would_overflow(const fbtext_console *c, int rowsNeeded)
+{
+    return (c->line + rowsNeeded) > c->rows;
+}
+
+/* Blank the whole scrolling region to `colour` and rewind to the top.
+ *
+ * This is the ONE place that paints a real colour over the display, and it is
+ * the price of scrolling. Everything else in this file writes only the lit
+ * pixels of a glyph (FBTEXT_NOFILL) so that text lands over whatever the
+ * device is already showing and nothing can be blanked by accident. Scrolling
+ * cannot work that way: rows have to be reused, and a reused row that is not
+ * erased first is two lines of text on top of each other.
+ *
+ * So the console draws over the boot graphics right up until the moment it
+ * fills, and from then on it owns an opaque rectangle. That is the correct
+ * trade at exactly that moment -- by the time ninety rows have been written,
+ * what is underneath them has long stopped being the interesting thing on the
+ * screen. The status row is deliberately not cleared; it is rewritten in
+ * place and never scrolls. */
+static void fbtext_console_clear(fbtext_console *c, uint32_t colour)
+{
+    int row;
+    for (row = 0; row < c->rows; row++) fbtext_clear_row(c, row, colour);
+    c->line = 0;
+}
+
 /* Draw one row's worth of text at the current line and advance. */
 static void fbtext_console_row(fbtext_console *c, const char *str, int n)
 {
-    if (c->line >= c->rows) c->line = 0;   /* wrap; cheapest possible */
+    if (c->line >= c->rows) c->line = 0;   /* caller should have scrolled */
     fbtext_clear_row(c, c->line, c->bg);
     fbtext_string(&c->s, c->x0, c->y0 + c->line * 8 * c->scale, c->scale,
                   str, n, c->fg, c->bg);

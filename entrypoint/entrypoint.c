@@ -482,6 +482,11 @@ static void clear_untether_loop_guard(void) {
     }
 }
 
+/* Defined with the other volume probes further down; declared here because
+ * both the install path and the diagnostic block call it, and the first of
+ * those comes first in the file. */
+static void report_path(const char *path);
+
 static void write_install_record(const char *outcome) {
     struct stat st;
 
@@ -882,6 +887,24 @@ static int do_install(void) {
     int merged = merge_tree("/blackb0x", MNT);
     report_merge_failures();
     fixup_etasonuntether_rtbuddyd();
+
+    /* VERIFY THE TRIGGER WE JUST INSTALLED, HERE AND NOT IN THE DIAGNOSTIC
+     * BLOCK. That block runs before the merge, so everything it says about
+     * the untether describes the PREVIOUS boot -- on the first run of any fix
+     * it will report rtbuddyd absent no matter how well the fix worked, which
+     * is exactly how it read on hardware and exactly how it misled. What
+     * matters is the state after this run's symlink, so it is checked where
+     * that state exists.
+     *
+     * Two stats, deliberately placed before the unmount below rather than
+     * after: the teardown comment's rule is that nothing may sit between the
+     * merge and the flush, and this is part of the merge's own work -- the
+     * symlink is the last thing installed, and an unverified trigger is the
+     * one failure this project has already spent weeks not seeing. */
+    emit("Untether trigger, as installed by this run:\n");
+    report_path(MNT "/usr/libexec/rtbuddyd");
+    report_path(MNT "/--early-boot");
+
     emit("Finished install\n");
 
     /* The one on-NAND write of a successful run. Deliberately AFTER the
@@ -1309,11 +1332,6 @@ static void report_log_tail(const char *path) {
 /* The set worth printing, in the order a reader needs them: did our install
  * record get written, did the first-boot daemon run at all, and did sshd say
  * anything on its way down. */
-/* Defined below with the other volume probes; declared here because the
- * install report is placed next to the log report it belongs with rather
- * than next to the function it happens to call. */
-static void report_path(const char *path);
-
 static void report_device_logs(void) {
     emit("  Logs from the last booted session:\n");
     report_log_tail(BLACKB0X_STATE_DIR "/install.log");

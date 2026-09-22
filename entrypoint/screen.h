@@ -173,7 +173,7 @@ extern void         CFRelease(const void *cf);
  * removed it. 256 is past any message this binary formats — the longest are
  * a path plus an errno plus a clause — and the console now wraps rather than
  * cuts, so a long line costs rows instead of information. */
-#define SCREEN_BACKLOG_LINES 48
+#define SCREEN_BACKLOG_LINES 96
 #define SCREEN_LINE_MAX      256
 
 /* How many surfaces we are willing to paint at once. restored_external makes
@@ -191,6 +191,9 @@ static int            g_screenCount;
 static time_t         g_screenDeadline;
 static time_t         g_screenLastTry;
 
+static char g_screenRing[SCREEN_BACKLOG_LINES][SCREEN_LINE_MAX];
+static int  g_screenRingHead;
+static int  g_screenRingCount;
 static char g_screenBacklog[SCREEN_BACKLOG_LINES][SCREEN_LINE_MAX];
 static int  g_screenBacklogUsed;
 static int  g_screenBacklogDropped;
@@ -422,11 +425,87 @@ static void screen_init(void)
  * Output.
  * ------------------------------------------------------------------------ */
 
+/* SCROLLING, AND WHY IT IS A HALF-PAGE JUMP RATHER THAN A LINE AT A TIME.
+ *
+ * The console used to wrap to row 0 when it filled, overwriting the top of
+ * its own output. With the diagnostic block that is no longer a corner case:
+ * it is ninety-odd rows of mount state, device inventory and log tails, and
+ * the end of it was landing on top of the beginning.
+ *
+ * A pixel-domain scroll -- memmove the framebuffer up one row -- is not
+ * available. The surface is WRITE-COMBINED: sequential stores are fast and
+ * reads are very slow, and a memmove is half reads. Shifting a 1280x720
+ * surface up by eight pixels would mean reading ~3.6 MB through that mapping
+ * per line of output.
+ *
+ * So the scroll happens in the TEXT domain. Every line is kept in a ring
+ * buffer in ordinary memory, and when the region fills, the area is cleared
+ * and the most recent half of the ring is redrawn at the top. The cost is one
+ * full redraw per half screen rather than per line -- about forty-five lines
+ * of amortisation -- and a reader keeps the immediately preceding context
+ * instead of losing everything on the jump.
+ *
+ * The clear is the one place this file paints a colour rather than only the
+ * lit pixels of a glyph (see FBTEXT_NOFILL). It has to: a reused row that is
+ * not erased is two lines of text on top of each other. So the console draws
+ * over the boot graphics until it first fills, and owns an opaque rectangle
+ * from then on -- which is the right trade at exactly that point, since by
+ * the time ninety rows have been written, what is underneath them is no
+ * longer the interesting thing on screen.
+ *
+ * The ring is the same storage that holds pre-attach output, deliberately.
+ * Before a surface exists it is a backlog to replay; after one exists it is
+ * scrollback to redraw from. One buffer, two uses of the same lines. */
+static void screen_ring_push(const char *line)
+{
+    size_t n = strlen(line);
+    if (n >= SCREEN_LINE_MAX) n = SCREEN_LINE_MAX - 1;
+    if (g_screenRingCount == SCREEN_BACKLOG_LINES) {
+        g_screenRingHead = (g_screenRingHead + 1) % SCREEN_BACKLOG_LINES;
+        g_screenRingCount--;
+    }
+    {
+        int slot = (g_screenRingHead + g_screenRingCount) % SCREEN_BACKLOG_LINES;
+        memcpy(g_screenRing[slot], line, n);
+        g_screenRing[slot][n] = '\0';
+        g_screenRingCount++;
+    }
+}
+
+/* Clear and redraw the newest lines that fit in half the region. Chooses how
+ * many to replay by measuring backwards from the newest, so a few long
+ * wrapped lines take the space of many short ones rather than overflowing. */
+static void screen_scroll(void)
+{
+    int keepRows = g_screenCon[0].rows / 2;
+    int count = 0, used = 0, i;
+
+    for (i = g_screenRingCount - 1; i >= 0; i--) {
+        int slot = (g_screenRingHead + i) % SCREEN_BACKLOG_LINES;
+        int need = fbtext_console_rows_for(&g_screenCon[0], g_screenRing[slot]);
+        if (used + need > keepRows) break;
+        used += need;
+        count++;
+    }
+
+    SCREEN_FOR_EACH(fbtext_console_clear(con, FBTEXT_BLACK));
+
+    for (i = g_screenRingCount - count; i < g_screenRingCount; i++) {
+        int slot = (g_screenRingHead + i) % SCREEN_BACKLOG_LINES;
+        SCREEN_FOR_EACH(fbtext_console_line(con, g_screenRing[slot]));
+    }
+}
+
 static void screen_emit_line(const char *line)
 {
     if (g_screenState == SCREEN_SEARCHING) screen_attach_try();
 
     if (g_screenState == SCREEN_ATTACHED) {
+        screen_ring_push(line);
+        if (fbtext_console_would_overflow(&g_screenCon[0],
+                                          fbtext_console_rows_for(&g_screenCon[0], line))) {
+            screen_scroll();
+        }
         SCREEN_FOR_EACH(fbtext_console_line(con, line));
         return;
     }

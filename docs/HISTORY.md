@@ -6788,3 +6788,94 @@ The rule to carry forward: from the ramdisk, `/var` is a namespace you may
 *observe* and *prune*, not one you may read or write. Anything that needs
 content goes on the system partition, and anything that needs to be written
 there waits for the first-boot daemon.
+
+## Both halves of the untether fit 12H1006. The trigger was never installed.
+
+Three independent investigations, run after the untether was suspected of
+having been patched out by Apple's 2022 update. All three say the opposite,
+and the actual fault turned out to be one line in this project's own code.
+
+### The kernel half: our payload is built for this exact build
+
+`misc/untether.bin` — which `stageEtasonatv()` deliberately stages in
+preference to the `.deb`'s own copy — carries a table of four `Darwin Kernel
+Version` banners, all `S5L8947X`. One of them is
+`xnu-2784.40.6~93/RELEASE_ARM_S5L8947X`, built **2021-01-29**, which is exactly
+the banner 12H1006's kernel carries. The payload is dated 2021-04-28, two days
+after 12H923 (Apple TV Software 7.7) shipped.
+
+Its firmware check is **patched to pass unconditionally**: at `0x3300` it has
+`CMP r0,r0` where a stock build has `CMP r0,#0`, so the `beq` is always taken.
+That single byte is the one `.claude/TODO.md` recorded as "`ADDS r6, #0x28` →
+`#0x45` … still unexplained" — the old decode was off by one halfword.
+
+Its 18 hardcoded kernel offsets verify byte-exactly against 12H1006's own
+kernelcache: three of its values occur **exactly once each** in the whole
+12,984,320-byte image, and its gadget offsets land on real instruction
+boundaries (`ldr r0,[r0]; bx lr` at `0xc26a8`, `str r1,[r0,#0xc]; bx lr` at
+`0xb047c`). The negative control is the `.deb`'s own 8.4.1 payload: its values
+occur **zero** times in this kernel and its write gadget lands on a `bgt`. It
+would panic instantly; ours will not.
+
+And Apple never patched the kernel. xnu is **byte-identical** across 12H923
+(7.7), 12H937 (7.8) and 12H1006 (7.9) — SHA-256 `30acbe34…` over the whole
+pre-`__PRELINK_TEXT` region in all three. Every difference between 12H937's and
+12H1006's kernelcache lies inside AMFI's **static trust cache**, which changes
+whenever a signed userland binary is re-signed. Apple's own security page lists
+Apple TV Software 7.9 with "no published CVE entries".
+
+### The userland half: JavaScriptCore has not changed either
+
+The exploit's stage 1 is a jsc type confusion via `setImpureGetterDelegate`,
+so its hardcoded object-layout constants are only valid for the
+JavaScriptCore they were derived against. Measured across five builds:
+
+- **`jsc` is byte-identical on all five** — 12H876, 12H885, 12H923, 12H937,
+  12H1006, all 88,848 bytes, SHA-256 `40fe236e…`. Not merely equivalent: not
+  even re-signed. `createImpureGetter` and `setImpureGetterDelegate` are
+  jsc-shell-local (defined in `jsc.cpp`, absent from JSC's 1805 exports), so
+  the binding the exploit enters through lives entirely in this unchanged
+  binary.
+- **The whole shared cache differs between builds and that means nothing.**
+  All five are exactly 347,752,882 bytes and all five hashes differ. The cache
+  aggregates ~660 images; it will differ for reasons unrelated to JSC. Recorded
+  here only so nobody later mistakes it for evidence.
+- **JavaScriptCore extracted from inside the cache is byte-identical
+  12H923 → 12H937 → 12H1006.** `__TEXT`, `__text`, `__cstring`, `__const`, the
+  `__objc_*` sections, all of `__DATA`, the Mach-O header and complete load
+  commands (same UUID `1a2e2b38202f3905aa93160453abbe94`), and both symbol
+  table slices. **Zero bytes differ.** The on-disk framework tree including
+  `_CodeSignature/CodeResources` matches too, so JavaScriptCore was not even
+  re-signed for 7.9.
+
+Older builds differ only trivially — 6 bytes in 3 regions between 12H876 and
+12H923, 8 between 12H885 and 12H923 — and those are Thumb `TBH` jump-table
+halfword offsets, not logic. JSC was last touched between 7.5 and 7.7 and has
+been frozen since.
+
+A caveat kept rather than smoothed over: `expl.js` was derived against
+12H876/12H885, so strictly our build is bit-identical to **12H923**, not to
+etasonATV's original targets. The gap is 7.4/7.5 → 7.7, not 7.7 → 7.9. Since
+the payload's kernel offsets already match 12H923, the exploit and this device
+agree on exactly the same JavaScriptCore.
+
+### The actual fault
+
+`fixup_etasonuntether_rtbuddyd()` is the only place in this project that
+creates the `/usr/libexec/rtbuddyd` → `jsc` symlink, and that symlink is the
+entire trigger: launchd's embedded boot plist starts `rtbuddyd --early-boot`,
+`jsc` treats `--early-boot` as a script path, and `/--early-boot` points at
+`/untether/expl.js`. The slot is usable because `/usr/libexec/rtbuddyd` does
+not exist on a stock image at all.
+
+It gated on reading `MNT/private/var/lib/dpkg/status`, which cannot succeed:
+stock iOS ships no dpkg, our own copy moved to the system partition in the var
+migration, and — decisively — **the data partition cannot be read from a
+restore ramdisk at all**. The function returned early, silently, on every run
+this project has ever made. Every daemon installed correctly; nothing ever
+started them, because the thing that starts them was never wired up.
+
+The lesson is the same one this log keeps recording in different costumes: a
+gate that reads something unreadable is indistinguishable from a gate whose
+condition is false, and silence made a one-line bug look for weeks like a
+patched exploit.

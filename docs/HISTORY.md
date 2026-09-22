@@ -6879,3 +6879,68 @@ The lesson is the same one this log keeps recording in different costumes: a
 gate that reads something unreadable is indistinguishable from a gate whose
 condition is false, and silence made a one-line bug look for weeks like a
 patched exploit.
+
+## The launchd job cache does not exist on this device, and the loader could never have bootstrapped anything
+
+Two conclusions from one line of on-device diagnostic output, and the second
+is the more useful of the two.
+
+### The cache theory is dead, on hardware
+
+`/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib` is **ABSENT** on the
+device — as it is absent from the decrypted stock root filesystem and from the
+restore ramdisk.
+
+That closes a line of reasoning that looked strong. launchd's own error strings
+(`Configuration error: No service cache.`, `No daemons in cache.`, `No tree
+state entry in cache.`, beside `__xpcd_cache` and that path) read exactly like
+a loader that takes its daemon list from a prebuilt index rather than from a
+directory. alephsecurity's xnu-qemu-arm64 notes reinforced it: on iOS 12 they
+patch a branch in launchd specifically so it stops "looking at the instructions
+in `xpcd_cache.dylib`". From that it followed neatly that our loader unit was
+invisible because the cache predated it.
+
+**launchd cannot be consulting a file that is not there**, and the device boots
+with all 174 of its own daemons running. So on this build the `Bootstrap >
+Paths` entry in launchd's embedded plist — which names
+`/System/Library/LaunchDaemons` and nothing else — is a directory it really
+does walk, and a plist dropped there is seen.
+
+This is also the second time in this investigation that a theory survived on
+the strength of strings plus a plausible outside source, and died the moment
+anything on the actual device was measured. The first was the ramdisk's
+`/sbin/launchd` being "the wrong binary" when it was byte-identical to the
+device's.
+
+### The consequence that matters: our loader could never have worked at boot
+
+With the cache gone as an explanation, the loader unit's real problem becomes
+visible, and it is structural rather than incidental.
+
+`xyz.regulad.blackb0x.loaddaemons` runs `/bin/sh /usr/share/blackb0x/loaddaemons.sh`.
+**`/bin/sh` is not stock.** It comes from the `bash` package this project
+installs, so it is an unsigned third-party binary. On a normal boot, before the
+untether has run, AMFI is enforcing — and an unsigned binary cannot be
+executed. The job cannot spawn, whatever launchd thinks of its plist.
+
+So the loader is in a bootstrap trap of its own making:
+
+- **On a normal boot before the untether:** AMFI blocks `/bin/sh`; the loader
+  cannot run; it cannot load anything.
+- **After the untether has run:** AMFI is disabled and the loader would work —
+  but the untether's own payload has already executed the identical
+  `launchctl load /Library/LaunchDaemons` loop, so there is nothing left to do.
+
+It is impossible exactly when it would be needed and redundant exactly when it
+is possible. **This is why the untether's trigger works and ours does not, and
+the difference is the one property we cannot give ourselves: `jsc` is an
+Apple-signed binary.** That is the whole trick of the `rtbuddyd` →
+`JavaScriptCore.framework/Resources/jsc` symlink — the only thing AMFI will let
+run on a clean boot is Apple's own code, so the exploit has to enter through
+Apple's own code. Nothing this project writes can substitute for that.
+
+The loader is kept, with its scope corrected: it is useful on a **tether**
+boot, where the patched kernel has already disabled AMFI and no untether has
+run, and it is the reason `/Library/LaunchDaemons` daemons can be brought up
+for development without an untethered jailbreak. It is not, and cannot be, a
+persistence mechanism.

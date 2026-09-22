@@ -1441,39 +1441,31 @@ static void report_device_install(void) {
      * --early-boot to /untether/expl.js, so jsc runs the exploit as a script.
      * Every link in that chain is a file we either place or fail to. */
     report_untether_state();
-    /* THE LAUNCHD JOB CACHE. Reported, deliberately not touched.
+    /* THE LAUNCHD JOB CACHE: MEASURED, AND THE THEORY BUILT ON IT IS DEAD.
      *
-     * launchd does not find its daemons by reading /System/Library/
-     * LaunchDaemons. It reads a prebuilt index, and its own error strings say
-     * so -- "Configuration error: No service cache.", "Configuration error:
-     * No daemons in cache.", "Configuration error: No tree state entry in
-     * cache.", beside __xpcd_cache and the path below. The keys around them
-     * (LaunchDaemons, SystemLibraryTreeState, _serviceBundles, _infoPlist,
-     * _executablePath) are that index's shape. The `Bootstrap > Paths` entry
-     * in launchd's embedded plist, which names that directory and nothing
-     * else, is the INPUT the index is built from rather than a directory
-     * walked on every boot.
+     * launchd's own error strings -- "Configuration error: No service cache.",
+     * "No daemons in cache.", "No tree state entry in cache.", beside
+     * __xpcd_cache and the path below -- read exactly like a loader that takes
+     * its daemon list from a prebuilt index rather than from a directory. That
+     * reading was reinforced by alephsecurity's xnu-qemu-arm64 notes, which
+     * patch a branch in launchd on iOS 12 precisely so it stops "looking at the
+     * instructions in xpcd_cache.dylib". It produced a tidy explanation for our
+     * loader unit never running: the cache was built before our plist existed,
+     * so launchd could not see it.
      *
-     * Independently confirmed: alephsecurity's xnu-qemu-arm64 notes, doing
-     * this same thing on iOS 12, say "to get the launchd load the programs we
-     * had added before, instead of looking at the instructions in
-     * xpcd_cache.dylib, we need to patch the binary file" -- and they patch a
-     * branch in launchd rather than removing the cache.
+     * HARDWARE SAYS THE FILE IS NOT THERE AT ALL. It is absent on the device,
+     * as it is absent from the stock root filesystem and from the restore
+     * ramdisk. launchd cannot be consulting a cache that does not exist, and
+     * the device plainly boots with all 174 of its own daemons running -- so on
+     * this build the `Bootstrap > Paths` entry in launchd's embedded plist,
+     * which names /System/Library/LaunchDaemons and nothing else, is a
+     * directory it really does walk. A plist dropped there IS seen.
      *
-     * WHICH IS WHY THIS ONLY LOOKS. Deleting the cache is the obvious move and
-     * it is not obviously safe: "No daemons in cache" reads like a dead end
-     * rather than a fallback, and a device that boots with no daemons at all
-     * is a much worse place to be than one that boots without sshd. Nothing on
-     * the stock image rebuilds it either -- there is no /usr/libexec/xpcd, and
-     * no on-disk binary but launchd itself contains the string xpcd_cache --
-     * so there is no evidence a deletion would ever be repaired.
-     *
-     * The one fact that settles what to do next is whether this file exists on
-     * the device at all, and that has never been checked. If it is ABSENT,
-     * launchd cannot be reading it, the cache theory is dead, and our plist is
-     * being ignored for some other reason. If it is PRESENT, it was built
-     * before our plist existed and the question becomes how to get it rebuilt
-     * -- safely. */
+     * Kept as a probe rather than deleted because it is one stat and it is the
+     * fact that rules out an entire family of explanations. It also means the
+     * earlier instinct to DELETE this file would have been destroying
+     * something that was never there -- see docs/HISTORY.md for why deleting
+     * it was written, reconsidered and never shipped. */
     report_path(MNT "/System/Library/Caches/com.apple.xpcd/xpcd_cache.dylib");
     report_path(MNT "/System/Library/Caches/com.apple.xpcd");
 }

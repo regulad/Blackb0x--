@@ -7331,3 +7331,81 @@ TLS *protocol* support. `openssl 0.9.8zg` tops out at TLS 1.0 because the
 remain limited to hosts still accepting TLS 1.0 no matter how good their
 trust store is. Trust and protocol are different problems and only the first
 one is solved here.
+
+## SSH key auth: root is correct, and `ssh-dss` was breaking the push script
+
+Two separate questions, asked together: should `scripts/push_authorized_keys.sh`
+be installing keys for `root` or for `mobile`, and why does key authentication
+not work afterwards?
+
+### root is the right account, and mobile would be a dead end
+
+The "log in as mobile" convention is real but belongs to the **rootless** era
+(iOS 15+, Dopamine/palera1n rootless), where the root filesystem stays sealed
+and the jailbreak lives under `/var/jb`. This device is a 2015-era **rootful**
+untether — there is no rootless split to respect. Evidence, all from the
+packages this project actually installs:
+
+- Cydia's `openssh_6.7p1-13` ships an `sshd_config` that sets only `Protocol`,
+  three `HostKey` lines, `GatewayPorts`, `X11Forwarding`,
+  `UsePrivilegeSeparation no`, `UseDNS no` and the sftp `Subsystem`.
+  `PermitRootLogin`, `PubkeyAuthentication`, `StrictModes` and
+  `AuthorizedKeysFile` are all left commented at their upstream defaults —
+  i.e. root login over SSH is the shipped configuration, not something to
+  enable.
+- Everything this project asks of a shell is root's work: `dpkg -i`, writing
+  `/etc/rc.d`, `launchctl load` of `/System/Library/LaunchDaemons`, reading
+  `/var/mobile/Library/Caches`. `bakeRamdisk()` stages `/var/root/.profile`
+  precisely because root is the account you land in.
+- **There is no escalation path from mobile.** No `sudo` in
+  `package/packages.txt`. The only `su` on the device is `coreutils-bin`'s
+  `/bin/su` (`-r-sr-xr-x root/root`), and the installed `pam` package's
+  `/etc/pam.d/su` carries `auth required pam_wheel.so use_uid group=admin
+  group=wheel` — a *required* line, and `mobile` is in neither group.
+
+So the account was never the problem.
+
+### The actual problem: the client options, in two independent ways
+
+`push_authorized_keys.sh` carried
+`-o HostKeyAlgorithms=+ssh-dss,ssh-rsa` and `-o PubkeyAcceptedAlgorithms=+ssh-dss`.
+
+1. **`ssh-dss` is fatal on a current client, not merely useless.** OpenSSH 10
+   removed DSA outright, so `+ssh-dss` names an algorithm the client does not
+   know rather than one it has disabled. Measured on OpenSSH_10.5p1:
+
+       $ ssh -G -o 'HostKeyAlgorithms=+ssh-dss,ssh-rsa' host
+       command-line line 0: Bad key types '+ssh-dss,ssh-rsa'.
+
+   The client aborts on the option itself, before opening a socket. The script
+   could not run at all.
+
+2. **`ssh-rsa` was missing from `PubkeyAcceptedAlgorithms`**, which is the
+   quieter half and the one that matches "the key didn't take". It was in
+   `HostKeyAlgorithms` (so the transport would have come up) but not in the
+   list of key types the client is willing to *offer*. OpenSSH 8.8 dropped
+   `ssh-rsa` from that default, and the device's sshd predates RFC 8332
+   (rsa-sha2-* arrived in 7.2) so SHA-1 `ssh-rsa` is the only RSA signature it
+   accepts. It also predates the `server-sig-algs` extension (7.2), so the
+   client cannot discover that, skips the key with "no mutual signature
+   algorithm", and falls back to the password prompt — which is
+   indistinguishable from the key never having been installed. Confirmed: an
+   unmodified OpenSSH 10.5 client has no `ssh-rsa` in its default
+   `pubkeyacceptedalgorithms`, and `+ssh-rsa` puts it back in both lists.
+
+Dropping `ssh-dss` costs nothing. `sshd_config` lists `ssh_host_rsa_key`
+alongside `ssh_host_dsa_key` and the bake stages a freshly generated RSA host
+key, so there is always an RSA host key to negotiate against; a DSA *client*
+key is not something a modern `ssh-keygen` can produce in the first place.
+
+### Also fixed while there
+
+- The script now rejects a keys file containing no key type OpenSSH 6.7
+  understands (`ssh-rsa`, `ssh-dss`, `ecdsa-sha2-nistp*`, `ssh-ed25519`).
+  Pushing a FIDO `sk-*` or post-quantum key would otherwise report success and
+  then silently never authenticate.
+- Its closing hint printed a bare `ssh -p <port> root@127.0.0.1`, which fails
+  on this device for reason (1) above. It now prints the full command with both
+  `-o` options.
+- `--help` printed a hardcoded `sed -n '2,42p'` line range that had already
+  drifted past the end of the header; it now prints the leading comment block.

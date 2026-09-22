@@ -27,6 +27,25 @@
 # --port       Local TCP port to forward through iproxy. Defaults to a
 #              randomly chosen high port each run.
 #
+# WHY root AND NOT mobile. Newer jailbreaks tell you to log in as `mobile`,
+# and that advice does not transfer here. It comes from the ROOTLESS era
+# (iOS 15+, Dopamine/palera1n rootless), where the real root filesystem stays
+# sealed and everything lives under /var/jb. This device is a 2015-era
+# ROOTFUL untether: there is no rootless split to respect, and every single
+# thing this project asks of a shell — `dpkg -i`, editing /etc/rc.d,
+# `launchctl load` of system LaunchDaemons, reading /var/mobile's caches — is
+# root's work. Cydia's own sshd_config leaves `PermitRootLogin` at its
+# default of yes, so root over SSH is the configuration as shipped, and
+# /var/root/.profile is staged by the bake precisely because root is the
+# account you land in.
+#
+# Logging in as mobile would also be a dead end rather than a mild
+# inconvenience: there is no `sudo` anywhere in packages.txt, and the only
+# `su` on the device (coreutils-bin's, setuid root) is gated by
+# /etc/pam.d/su's `auth required pam_wheel.so use_uid group=admin group=wheel`
+# — mobile is in neither group. So a mobile session could not escalate at
+# all.
+#
 # The device's root password is Apple's own long-standing default for every
 # iOS/tvOS device, "alpine" (not something this project or Cydia's openssh
 # package sets), unless you've changed it — ssh will prompt for it
@@ -38,8 +57,9 @@
 # The host key for 127.0.0.1:<port> is intentionally never written to your
 # real ~/.ssh/known_hosts either (a throwaway localhost port doesn't
 # identify anything worth remembering across runs/devices). This 2014-era
-# sshd also needs ssh-dss/ssh-rsa explicitly re-enabled (see ssh_opts
-# below) — a modern ssh client refuses both by default.
+# sshd also needs ssh-rsa explicitly re-enabled in TWO separate places (see
+# ssh_opts below) — a modern ssh client refuses it by default both as a host
+# key type and as a key type it will offer for authentication.
 
 set -euo pipefail
 
@@ -55,7 +75,10 @@ while [[ $# -gt 0 ]]; do
         --keys-file) keys_file="$2"; shift 2 ;;
         --port) port="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+            # Print the header block itself rather than a fixed line range,
+            # which silently drifts out of date every time the header is
+            # edited (it already had).
+            awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
             exit 0
             ;;
         *)
@@ -68,6 +91,28 @@ done
 if [[ ! -s "$keys_file" ]]; then
     echo "push_authorized_keys.sh: $keys_file is missing or empty." >&2
     echo "Generate a keypair first (ssh-keygen) and put your public key there." >&2
+    exit 1
+fi
+
+# Refuse to push a file the device's sshd cannot use. OpenSSH 6.7 knows
+# ssh-rsa, ssh-dss, ecdsa-sha2-nistp* and ssh-ed25519 — nothing else. A file
+# of only FIDO/security-key (sk-*) or post-quantum (mldsa) keys would push
+# perfectly, report success, and then never authenticate, with the device
+# falling back to the password prompt and no error anywhere saying why.
+# Matched against the whole line rather than its first field because an
+# authorized_keys entry may legitimately begin with an options list.
+usable_keys=0
+while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    if [[ "$line" =~ (^|[[:space:]])(ssh-rsa|ssh-dss|ssh-ed25519|ecdsa-sha2-nistp(256|384|521))[[:space:]] ]]; then
+        usable_keys=$((usable_keys + 1))
+    fi
+done < "$keys_file"
+if [[ "$usable_keys" -eq 0 ]]; then
+    echo "push_authorized_keys.sh: no key in $keys_file is of a type this device's" >&2
+    echo "sshd (OpenSSH 6.7p1, 2014) supports — it understands only ssh-rsa," >&2
+    echo "ssh-dss, ecdsa-sha2-nistp256/384/521 and ssh-ed25519. Pushing this file" >&2
+    echo "would succeed and then silently never authenticate." >&2
     exit 1
 fi
 
@@ -104,32 +149,95 @@ ssh_opts=(
     -o StrictHostKeyChecking=accept-new
     -o ConnectTimeout=5
     -o LogLevel=ERROR
-    # This device's sshd (OpenSSH 6.7p1, 2014) predates RFC 8332 rsa-sha2-*
-    # and offers a DSA host key (Cydia openssh_6.7p1's own sshd_config: both
-    # ssh_host_dsa_key and ssh_host_rsa_key) — modern OpenSSH clients disable
-    # ssh-dss entirely (since 7.0) and plain ssh-rsa by default (since 8.8),
-    # so without re-enabling both here, the initial handshake itself fails
-    # ("no matching host key type found") before any password prompt.
-    -o HostKeyAlgorithms=+ssh-dss,ssh-rsa
-    -o PubkeyAcceptedAlgorithms=+ssh-dss
+    # This device's sshd is OpenSSH 6.7p1 (2014), which predates RFC 8332:
+    # it cannot sign or verify with rsa-sha2-256/512, only with SHA-1
+    # `ssh-rsa`. Modern clients disabled that by default in 8.8. It must be
+    # re-enabled in BOTH lists, for two unrelated reasons:
+    #
+    #   HostKeyAlgorithms       — the device presents an RSA host key, and
+    #                             without ssh-rsa here the transport never
+    #                             comes up at all ("no matching host key type
+    #                             found"), long before any password prompt.
+    #   PubkeyAcceptedAlgorithms— an RSA key in the file we just pushed is
+    #                             otherwise never even OFFERED on the next
+    #                             login. OpenSSH 6.7 also predates the
+    #                             `server-sig-algs` extension (7.2), so the
+    #                             client cannot discover that SHA-1 is all the
+    #                             server has, skips the key with
+    #                             "no mutual signature algorithm", and falls
+    #                             back to asking for the password — which
+    #                             looks exactly like "the key didn't take".
+    #
+    # DO NOT put ssh-dss back here. It was in both lists and it broke this
+    # script outright: OpenSSH 10 REMOVED DSA entirely, so `+ssh-dss` is not a
+    # disabled algorithm that gets re-enabled, it is an unknown one, and the
+    # client aborts on the option itself — `Bad key types '+ssh-dss'` — before
+    # it opens a socket. Nothing is lost by dropping it: sshd_config lists
+    # ssh_host_rsa_key alongside ssh_host_dsa_key and the bake stages an RSA
+    # host key, so there is always an RSA host key to match, and a DSA *client*
+    # key is not something a modern ssh-keygen can even produce.
+    -o HostKeyAlgorithms=+ssh-rsa
+    -o PubkeyAcceptedAlgorithms=+ssh-rsa
 )
 
+# Wait for the SSH BANNER, not merely for the port to accept a connection.
+# iproxy binds the local port the moment it starts, whether or not there is a
+# device behind it, so a bare connect test passes instantly even with nothing
+# plugged in — and the run then fails several steps later with
+# "kex_exchange_identification: Connection reset by peer", which reads like a
+# protocol problem rather than "no device". A real sshd announces itself
+# ("SSH-2.0-OpenSSH_6.7") as the first thing it sends, so requiring that line
+# tests the thing we actually care about.
 echo "Waiting for the device's sshd (127.0.0.1:$port)..."
 attempts=30
-until (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do
+banner=""
+while :; do
+    banner=$( { exec 3<>"/dev/tcp/127.0.0.1/$port"; IFS= read -r -t 5 line <&3 && printf '%s' "$line"; } 2>/dev/null ) || banner=""
+    [[ "$banner" == SSH-* ]] && break
     attempts=$((attempts - 1))
     if [[ $attempts -le 0 ]]; then
-        echo "push_authorized_keys.sh: couldn't reach sshd on the device after several tries." >&2
-        echo "Make sure the jailbreak has actually finished booting and try again." >&2
+        echo "push_authorized_keys.sh: nothing is answering SSH on the device." >&2
+        echo "iproxy is listening, so this is the device side: check that the Apple TV" >&2
+        echo "is plugged in (USB *and* power) and that the jailbreak has finished" >&2
+        echo "booting — sshd only comes up once openssh's LaunchDaemon is loaded." >&2
         exit 1
     fi
     sleep 2
 done
+echo "Found ${banner%$'\r'}"
 
 echo "Pushing $keys_file (default root password is \"alpine\" unless you changed it)..."
+
+# The chown and the StrictModes check are not belt-and-braces. sshd runs with
+# StrictModes at its default of yes (Cydia's sshd_config leaves it commented
+# out), so it silently ignores authorized_keys — falling through to the
+# password prompt, logging nothing the user will ever see — unless the home
+# directory AND .ssh are owned by root and are not group- or world-writable.
+# /var/root's metadata on this device is not something this script controls:
+# the bake stages a /var tree onto the system partition and the first-boot
+# postinstall merges it with `cp -a`, so a mode or ownership accident anywhere
+# in that path lands here as "the key just doesn't work". Better to assert
+# what we can and say so loudly about what we can't. `stat` is GNU's, from the
+# installed coreutils 8.12, hence -c rather than BSD -f.
 ssh "${ssh_opts[@]}" root@127.0.0.1 \
-    'mkdir -p /var/root/.ssh && chmod 700 /var/root/.ssh && cat > /var/root/.ssh/authorized_keys && chmod 600 /var/root/.ssh/authorized_keys' \
+    'mkdir -p /var/root/.ssh && chmod 700 /var/root/.ssh && cat > /var/root/.ssh/authorized_keys && chmod 600 /var/root/.ssh/authorized_keys && chown -R root:wheel /var/root/.ssh && { home=$(stat -c "%a %U" /var/root 2>/dev/null) || home=""; case "$home" in "") : ;; *" root") case "${home%% *}" in *[2367]?|*?[2367]) echo "WARNING: /var/root is $home — sshd StrictModes will IGNORE the key it just accepted. Fix with: chmod go-w /var/root" >&2 ;; esac ;; *) echo "WARNING: /var/root is $home, not owned by root — sshd StrictModes will IGNORE the key it just accepted. Fix with: chown root:wheel /var/root" >&2 ;; esac; }' \
     < "$keys_file"
 
-echo "Done — future SSH access uses your key, e.g. re-run this script's iproxy forward" \
-     "by hand (\`$iproxy_bin <port> 22${udid:+ $udid}\`) and \`ssh -p <port> root@127.0.0.1\`."
+# Spell the reconnect command out in full. A bare `ssh -p <port> root@127.0.0.1`
+# fails on this device for the same two algorithm reasons ssh_opts documents, so
+# printing the short form would hand the user a command that cannot work.
+cat <<EOF
+Done — future SSH access uses your key. To reconnect later, forward the port:
+
+    $iproxy_bin <port> 22${udid:+ $udid} &
+
+and connect with the legacy algorithms this 2014 sshd needs:
+
+    ssh -p <port> \\
+        -o HostKeyAlgorithms=+ssh-rsa \\
+        -o PubkeyAcceptedAlgorithms=+ssh-rsa \\
+        root@127.0.0.1
+
+(Or put those two options under a \`Host\` block in your ~/.ssh/config and just
+\`ssh <that host>\`.)
+EOF

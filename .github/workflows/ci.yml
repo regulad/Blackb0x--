@@ -948,17 +948,30 @@ jobs:
           cp -R "$real/usr/lib" "$tc/SDKs/$name/usr/lib"
           cp "$real/SDKSettings.plist" "$tc/SDKs/$name/"
 
-          # The two frameworks entrypoint links. Same reasoning as the build
-          # job's copy of these -- see the long comment there. Kept in both
-          # because the two jobs extract independently, and a bake leg that
-          # silently lacked them would fail at the Makefile's FATAL guard
-          # partway through a run that has already paid for an IPSW download.
-          mkdir -p "$tc/SDKs/$name/System/Library/Frameworks" \
+          # THE WHOLE Frameworks TREE PLUS IOSurface, and the "whole" is not
+          # laziness. This leg no longer builds only entrypoint: bakeRamdisk()
+          # now also runs package/build_cainjector.sh and
+          # package/build_appliancetvtweak.sh, which link Security and
+          # Foundation respectively, and Foundation's headers pull in CFNetwork
+          # and CoreServices besides. Listing frameworks by hand meant this
+          # step failed one framework at a time -- on real runs, at the
+          # Makefiles' own FATAL guards, partway through a leg that had already
+          # paid for an IPSW download:
+          #
+          #   cainjector: FATAL -- ... has no .../Security.framework/Security
+          #   appliancetvtweak: FATAL -- ... has no .../Foundation.framework/Foundation
+          #
+          # The entire SDK Frameworks directory is 27 MB (header trees and
+          # linker stubs, not real binaries), so copying it outright costs
+          # almost nothing and ends that class of failure. IOSurface stays
+          # named separately because it is a PRIVATE framework and lives in a
+          # different directory.
+          mkdir -p "$tc/SDKs/$name/System/Library" \
                    "$tc/SDKs/$name/System/Library/PrivateFrameworks"
           cp -R "$real/System/Library/PrivateFrameworks/IOSurface.framework" \
                 "$tc/SDKs/$name/System/Library/PrivateFrameworks/"
-          cp -R "$real/System/Library/Frameworks/CoreFoundation.framework" \
-                "$tc/SDKs/$name/System/Library/Frameworks/"
+          cp -R "$real/System/Library/Frameworks" \
+                "$tc/SDKs/$name/System/Library/Frameworks"
           ln -s "$name" "$tc/SDKs/iPhoneOS.sdk"
 
           detach

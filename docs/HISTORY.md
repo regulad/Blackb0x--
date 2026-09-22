@@ -6996,3 +6996,338 @@ the job cache does not exist either and launchd really does walk
 `Bootstrap > Paths`; the data partition permits only `unlink` and `mkdir`; and
 `jsc` being Apple-signed is the one property that makes the untether's entry
 point possible and ours impossible.
+
+## `apt-get install cydia` needs `--force-overwrite`, and always will
+
+Cydia's real, on-device install failed with dpkg's classic "trying to
+overwrite ... which is different from other instances of package cydia" —
+specifically on `/etc/apt/sources.list.d/saurik.list`.
+
+This isn't a Cydia bug. This project stages `saurik.list` (and
+`bigboss.list`, `regulad.list`, `awkwardtv.list`, `xbmc.list`, and the whole
+`trusted.gpg.d/` set) directly onto the system partition at bake time (see
+`BakeRamdisk.cpp`'s tree merge), so a source list already exists even on a
+device where `apt-get install cydia` never gets a chance to run — the same
+reasoning that makes the local debcache work offline. But dpkg tracks file
+ownership per package, and a file written by the ramdisk merge was never
+unpacked by dpkg, so it has no owner in dpkg's database. When Cydia's own
+package payload tries to unpack its own copy of that exact path, dpkg finds
+a file it doesn't recognize sitting where it wants to write and refuses by
+default — this is deliberate, documented dpkg behavior meant to stop a
+package silently clobbering a file some *other* installed package owns.
+Here there is no other package, only a pre-existing file, but dpkg can't
+tell the two situations apart without being told.
+
+`-o Dpkg::Options::=--force-overwrite` (verified against the real bundled
+dpkg 1.18.10 binary — `overwrite` is a compiled-in force-table entry, so the
+flag is genuinely recognized on this build) tells dpkg the incoming
+package's copy should always win. `postinstall.sh` passes it to every
+apt-get invocation that unpacks anything, not just the cydia install, since
+any package sourced from bigboss/saurik/awkwardtv could just as easily ship
+one of the same bake-time-staged paths.
+
+## SSL errors against `apt.awkwardtv.org` and `ios.regulad.xyz`, and a wrong turn along the way
+
+### The wrong turn: assuming `https -> http` meant no TLS at all
+
+First read of this: `apt7-lib`'s real `data.tar` (not `dpkg-deb -x`, which
+silently resolves symlinks) shows
+
+```
+lrwxrwxrwx  ./usr/lib/apt/methods/https -> http
+```
+
+and a `strings`/`nm` pass over that `http` binary found no `libssl`,
+`OpenSSL`, `curl`, or `SSL_connect`-family symbols anywhere. The conclusion
+drawn from that — recorded here and then in `postinstall.sh`'s own comments
+— was that `https://` on this build is literally cleartext HTTP sent to
+port 443, real TLS never attempted, and that the real curl-linked `https`
+method (package `apt7-ssl`) is simply never staged (true: it genuinely
+`Conflict:`s with `apt7-lib`, and `package/packages.txt` only lists
+`apt7-lib`).
+
+**That conclusion was wrong**, caught by a direct challenge to it: "surely
+the symlink just means the same binary handles both, dispatched by
+argv[0] or by the URI it's given, not that it barely pokes as HTTP?" The
+answer to that turned out to be yes, and checking the right symbols instead
+of the wrong ones makes it unambiguous. This binary doesn't link `libssl`
+because it doesn't need to — it links **CFNetwork**:
+
+```
+_CFReadStreamCreateForHTTPRequest   <- real CFNetwork HTTP(S) stream constructor
+_kCFStreamErrorDomainSSL            <- imported to interpret real TLS handshake errors
+```
+
+`CFReadStreamCreateForHTTPRequest` dispatches on the scheme embedded in the
+`CFURL` it's constructed from — and that URL comes from the acquired URI
+string apt-get sends the method process over its stdin pipe (the method
+protocol's "600 URI Acquire" message), not from argv[0] and not from the
+method binary's filename at all. The `https` symlink existing purely so
+apt-get has a `/usr/lib/apt/methods/https` path to exec is exactly the
+"same binary, dispatched on the URI it's handed" shape — not a stub. And
+`kCFStreamErrorDomainSSL` would have no reason to be imported at all by
+code that never attempts a TLS handshake in the first place. This method
+goes through Apple's own SecureTransport via CFNetwork — a completely
+separate TLS stack from the `openssl_0.9.8zg` userland package this project
+also ships, which this method never touches at all. The previous
+"TLS-1.0-ceiling" reasoning built on top of the wrong conclusion is wrong
+for the same reason: irrelevant, since this method was never bottlenecked
+by that package to begin with.
+
+### What's actually happening (best-supported theory, not fully confirmed)
+
+SecureTransport on this OS era (~iOS 5/6, the base this device's firmware
+descends from) already supports both TLS 1.2 and SNI — both were added
+years before this OS shipped — so a protocol-version ceiling is unlikely to
+be the real blocker. The far more likely cause, and the one that matches
+what was suspected from the very start of this investigation: this device's
+**factory-era root CA trust store** doesn't trust whatever CA issued these
+two hosts' current certificates. Let's Encrypt's `ISRG Root X1` (2015) and
+various CDN-fronted intermediate hierarchies postdate this OS by years;
+this is a well-known old-iOS-vs-modern-CA problem in the wider jailbreak
+community, not something specific to this project.
+
+This is not fully confirmed — confirming it for certain would need the
+literal on-device error line from a real `apt-get update`
+(`/var/.blackb0x/postinstall.err.log` after a run), which hasn't been
+captured verbatim. It's recorded here as the best-supported explanation
+given the evidence actually gathered, not as a settled fact the way the
+`https -> http` finding above is.
+
+### The fix, regardless of the exact mechanism
+
+Both hosts force-redirect plain `http://` to `https://` (`302`/`308`),
+which forecloses the obvious escape valve: `bigboss.list`, `saurik.list`,
+and `xbmc.list` all still work specifically *because* those three continue
+to serve their repos over plain HTTP with no redirect, relying on the
+GPG-signed `Release` file for integrity instead of transport security —
+exactly the model Cydia repos were built around before ubiquitous HTTPS,
+and exactly why it's a safe model to lean on again here regardless of what
+the precise HTTPS failure mode turns out to be.
+
+`apt-get update || true` already tolerates the resulting failure for these
+two sources without aborting the install. The only real fix is on the
+server side, and only one of the two servers is ours to change:
+
+- **`ios.regulad.xyz` is this fork's own repo — done.** Rather than chase
+  the exact cause further, the vhost now serves the real apt paths over
+  plain HTTP with no redirect (verified —
+  `http://ios.regulad.xyz/dists/stable/Release` returns `200` with the exact
+  same `Etag` as the HTTPS copy), so `regulad.list` now reads
+  `deb http://ios.regulad.xyz/ stable main`.
+- **`apt.awkwardtv.org` is third-party infrastructure this project doesn't
+  control**, and pointing `awkwardtv.list` at `http://` would not help even
+  if it could be changed unilaterally: apt's own `http` method genuinely
+  follows redirects (`Acquire::http::AllowRedirect`, on by default —
+  verified directly in the bundled `apt7-lib` method binary's strings,
+  which also carries the real "Redirection loop" guard from apt's real
+  `method/http.cc`), so the request would simply bounce straight back into
+  `https://` and hit whatever the real failure is. Short of asking upstream
+  to add a plain-HTTP path for old-iOS clients, `apt-get update` against it
+  stays a tolerated, permanent failure.
+
+### The practical fallout: nitoTV, and the general fix
+
+`com.nito.nitotv` is the one package in `package/packages.txt` sourced
+exclusively from `apt.awkwardtv.org` — nothing else configured repo also
+carries it. Since `https://` can never actually resolve on-device, apt has
+no Packages index entry for it at all, ever, regardless of network
+conditions — this is not a "no network yet" transient, it's permanent. But
+its `.deb` bytes ARE staged into the real apt archive cache regardless of
+which repo they were originally resolved from (`BakeRamdisk.cpp`'s
+`stageDebcache()` — package resolution at *build* time runs on a machine
+with a working TLS stack, so it never hits this wall; only the on-device
+resolution does).
+
+This is the exact same shape of problem `essential` already had (`Depends:
+cydia`, unresolvable through apt's own bake-time-preinstall path — see
+`misc/prebake_package_blacklist.txt`), just for a different reason. Rather
+than hand-list nitoTV into `package/local_only_debs.txt` next to `essential`
+(which only fixes it by name, one entry at a time), `postinstall.sh` now
+runs a general fallback right after the ordinary `apt-get install` +
+`install -f` pass: walk `/var/cache/apt/archives/*.deb`, and for every
+`.deb` whose package name `dpkg-query -W` doesn't already report `install ok
+installed`, hand it to `dpkg -i --force-overwrite` directly, bypassing apt's
+by-name resolution entirely, then run `apt-get install -f` once more to
+reconcile anything that needed a dependency apt itself already handled.
+This isn't a nitoTV special case — anything else that ever ends up
+archive-only and index-less on a future build gets picked up by the same
+pass automatically.
+
+## `/Applications` never gets stashed: Cydia's real postinst doesn't do it reliably here
+
+`postinstall.sh`'s own comment above the `cydia` install line claimed
+Cydia's postinst relocates `/Applications`, `/usr/include`, and
+`/usr/share` into `/var/stash` on first run. Dispatched a dedicated agent
+to verify that against the real `.deb` rather than keep trusting the
+comment, since the user suspected the GUI Cydia.app binary — which never
+runs in this project's frontrow-only setup — might be the one actually
+doing it.
+
+**The suspicion was half right and half wrong.** `cydia.postinst` is not a
+shell script at all — it's a compiled Mach-O binary (armv6 + arm64,
+135 KB). Its real strings show genuine, native stash-setup logic
+(`/var/db/stash`, `/var/stash`, `mv -t /var/stash /var/db/stash/*`,
+`/usr/libexec/cydia/setnsfpn %s`, `"/var/stash/Applications damaged -- DO
+NOT REBOOT"`), and the only literal path it names besides the generic
+`/var/stash/%s` format string is `Applications` — `/usr/include` and
+`/usr/share` are never mentioned in it at all, so that half of the
+original comment was simply wrong. This logic runs automatically whenever
+dpkg configures the package (i.e. during the existing `apt-get install
+cydia` line) — no GUI launch required, contrary to the suspicion.
+
+But the suspicion's underlying instinct — that the mechanism doesn't
+actually work here — turned out to be right anyway, confirmed directly
+on real hardware: running `/var/lib/dpkg/info/cydia.postinst configure` by
+hand exits without ever producing `/var/stash`. Whatever internal check
+gates the real relocation isn't being satisfied on this device, and since
+`postinst` is a compiled binary, there's no script to read to find out
+which one.
+
+**cydia's own payload also ships `/usr/libexec/cydia/move.sh`** — a
+separate, generic "stash any given directory" shell helper, already relied
+on successfully by `pam` and `pam-modules`' own `preinst` scripts
+(`/usr/libexec/cydia/move.sh /usr/lib/pam`, unconditionally, no check for
+cydia having run first — its own `mv_()` bootstraps `/var/stash` from
+scratch if absent). `cydia`'s postinst does not call `move.sh` itself; it
+reimplements the same idea natively in C, just for `/Applications` alone.
+
+`move.sh`'s own `shift_()` function has exactly the shape of gate that
+would explain a silent no-op: it only stashes a real, non-symlinked
+directory if `du`'s used-size plus a 512 KB margin comes out under `df`'s
+free-space reading for `/var` — and if that arithmetic doesn't come out as
+expected, it does nothing at all, no error, no message. `postinst`
+plausibly has an analogous environment assumption failing the same
+silent way; not worth reverse-engineering which one inside a compiled
+binary when there's a real, already-shipped, already-trusted alternative
+sitting right next to it.
+
+**Fix: call `move.sh` ourselves.** `postinstall.sh` now runs
+
+```sh
+if [ -d /Applications ] && [ ! -L /Applications ]; then
+    /usr/libexec/cydia/move.sh /Applications
+fi
+```
+
+right after the `cydia` install line — the exact same top-level guard
+`shift_()` uses on itself, so this is a no-op on any device where
+postinst's own relocation already worked correctly. Not a
+reimplementation of the stashing logic — reuses the identical mechanism
+`pam`/`pam-modules` already depend on for their own paths. Still unknown:
+which package (if any) is actually responsible for relocating
+`/usr/include`/`/usr/share`, and whether it has the same silent-failure
+problem — worth checking if either ever shows up unstashed on real
+hardware.
+
+## RESOLVED: HTTPS apt works. The trust store was the problem, and it is fixable
+
+`apt-get update` now pulls `apt.awkwardtv.org` normally on real hardware.
+The fix is `cainjector`, and the road to it corrected three separate wrong
+beliefs — two of them this project's own.
+
+### The transport was never broken; trust was
+
+Recorded above as a wrong turn: `/usr/lib/apt/methods/https` being a symlink
+to `http` was read as "this build cannot do TLS at all". It does. That
+binary is CFNetwork-based (`CFReadStreamCreateForHTTPRequest`, imports
+`kCFStreamErrorDomainSSL`), dispatches on the URI scheme handed to it at
+runtime, and does a real handshake through Apple's own SecureTransport,
+linking no `libssl` whatsoever.
+
+What it could not do was validate. This firmware's root store is compiled
+into `Security.framework` (`certsTable.data` + `certsIndex.data`; there is
+no `SystemRootCertificates.keychain` on this OS and
+`/System/Library/Keychains` is empty), frozen at ship date. Measured:
+
+```
+apt.awkwardtv.org
+  leaf  CN=awkwardtv.org
+    <-  C=US, O=Let's Encrypt, CN=YR2
+    <-  C=US, O=ISRG, CN=Root YR
+    <-  C=US, O=Internet Security Research Group, CN=ISRG Root X1
+```
+
+`ISRG Root X1` is from 2015 and the firmware predates it.
+
+### `modify-anchor-certificates`, found by failing loudly
+
+The first real run returned `-34018` (`errSecMissingEntitlement`) for all
+121 certificates. The entitlement's name was not guessed — it is a literal
+in this firmware's own `/usr/libexec/securityd`
+(`Security-57317.40.2`), sitting beside the source path that implements the
+check and the database it guards:
+
+```
+modify-anchor-certificates
+/Library/Keychains/TrustStore.sqlite3
+/SourceCache/securityd/Security-57317.40.2/Security/sec/securityd/SecTrustStoreServer.c
+```
+
+An ad-hoc signature can carry it only because the untether patches AMFI —
+the same property that lets unsigned `bash` and `sshd` run, applied to a
+signature blob rather than to execution.
+
+**Writing that SQLite database directly is ruled out by decision, not by
+difficulty.** Going through Apple's API means securityd owns the schema,
+the locking and the cache invalidation; hand-writing it means this project
+owns all three forever, against an undocumented format, where getting it
+wrong breaks TLS for everything rather than for one repo.
+
+### Two wrong prototypes, caught only because the tool distrusts itself
+
+`cainjector` verifies every write with `SecTrustStoreContains` and exits
+nonzero unless all 121 land. That caught both of this project's own errors:
+
+| written from memory | Apple's actual header |
+|---|---|
+| `OSStatus SecTrustStoreContains(ref, cert, Boolean *out)` | `Boolean SecTrustStoreContains(ref, cert)` |
+| `User=1, Admin=2, System=3` | `System=1, User=2` (no Admin domain) |
+
+The first produced `NOT present after install (Contains -> 1)` 121 times on
+a device where the install had **completely succeeded** — the `1` was the
+true `Boolean` return, and the out-param being checked instead was never
+written. The second was right by accident: passing `2` while calling it
+"admin" selected `User`, which is the only *writable* store ("Only allowed
+for writeble trust stores", per Apple's own header).
+
+Both were invisible to the compiler, the linker, and the runtime. The
+general lesson is the one this file keeps relearning: a tool that reports
+success without checking is worth less than no tool, and the check has to be
+independent of the thing it is checking.
+
+### Three trust stores, not one
+
+Fixing apt did not fix everything, because this device has three separate
+trust stores and they know nothing about each other:
+
+- **Apple's SecureTransport store** — what apt's CFNetwork transport uses.
+  Fixed via `SecTrustStoreSetTrustSettings`.
+- **OpenSSL's** — `OPENSSLDIR` is `/usr/lib/ssl` on this build (a literal in
+  `libcrypto.0.9.8.dylib`). Nothing owned `/usr/lib/ssl/cert.pem`; the
+  `openssl` package ships an empty `/etc/ssl/certs` and no postinst, so it
+  stays empty forever. The PEM goes there. The hashed-directory form is a
+  trap: 0.9.8 hashes subjects with MD5 and modern OpenSSL with SHA-1
+  (`ISRG Root X1` is `6187b673` on-device vs `4042bcee` from the build host),
+  so a rehashed directory would be silently invisible.
+- **curl's** — which is *no* store: `libcurl` imports
+  `_SSL_CTX_load_verify_locations` but not
+  `_SSL_CTX_set_default_verify_paths`, and `curl-config --ca` is empty, so
+  it never consults OpenSSL's defaults. It has to be told, via
+  `CURL_CA_BUNDLE`.
+
+There is no global environment mechanism to tell it once: `/etc/environment`
+is a `pam_env` convention and no `pam_env.so` ships in either the `pam` or
+`pam-modules` package, and this firmware's `launchd` has no reference to
+`/etc/launchd.conf` at all. So it is set twice — in
+`/etc/profile.d/blackb0x-cainjector.sh` for shells (a drop-in, because
+`/etc/profile` belongs to the `profile.d` package) and in the postinstall
+LaunchDaemon's own `EnvironmentVariables` for daemons.
+
+### What this does not fix
+
+TLS *protocol* support. `openssl 0.9.8zg` tops out at TLS 1.0 because the
+0.9.8 branch never implemented anything newer, so `curl` and `openssh`
+remain limited to hosts still accepting TLS 1.0 no matter how good their
+trust store is. Trust and protocol are different problems and only the first
+one is solved here.

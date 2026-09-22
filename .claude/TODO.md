@@ -1423,3 +1423,151 @@ real debcache:
 
 Both still resolve to 68 `.deb` files, and exactly one entry is dropped per
 target rather than two.
+
+## 19. Update the on-device CA trust store; restore Cydia stashing and frontrow picture behavior
+
+Three fresh items, added 2026-09-22 after `docs/HISTORY.md`'s "RESOLVED:
+sshd is alive" entry — the jailbreak works on real hardware now, and this
+project moves from "make it boot" work to install-experience polish.
+
+**Update the on-device CA trust store.** `apt-get update` against
+HTTPS-only apt sources (`apt.awkwardtv.org` currently; `ios.regulad.xyz`
+was worked around by switching it to plain HTTP instead — see
+`docs/HISTORY.md`'s "SSL errors against `apt.awkwardtv.org` and
+`ios.regulad.xyz`" entry) reliably fails with SSL errors on real hardware.
+Best-supported theory, not fully confirmed: this OS-era device's factory
+root CA trust store doesn't trust whatever CA issued these hosts' current
+certificates (e.g. Let's Encrypt's `ISRG Root X1` postdates this OS by
+years).
+
+Confirmed directly against the real decrypted stock rootfs for
+`AppleTV3,2 12H1006` (already cached locally at
+`~/.local/share/blackb0x/ipsw-rootfs/rootfs.raw` — mount with `hdiutil
+attach -readonly -imagekey diskimage-class=CRawDiskImage`):
+
+- There is no `/System/Library/Keychains/SystemRootCertificates.keychain`
+  at all on this OS. The built-in trust store is
+  `Security.framework/certsTable.data` + `certsIndex.data` — a compiled
+  binary format baked into an Apple-signed framework bundle (whose real
+  code lives inside `System/Library/Caches/com.apple.dyld/dyld_shared_cache_armv7`,
+  not as a standalone file). Not something to hand-edit or replace —
+  undocumented format, Apple-signed, high blast radius if gotten wrong.
+- `SecTrustStoreSetTrustSettings` genuinely exists as an exported symbol in
+  this exact build's `Security.framework` (confirmed via `strings` on the
+  real dyld shared cache). This is Apple's own supplementary/admin
+  trust-store API — the same one a Configuration Profile uses to add a
+  custom trusted root without touching the built-in system store at all.
+  Purely additive, no Apple-signed file modified.
+
+**DONE — confirmed working on real hardware.** `apt-get update` now pulls
+`apt.awkwardtv.org` normally. Built as `cainjector/` plus the
+`xyz.regulad.blackb0x.cainjector` package (`package/cainjector-layout/`,
+`package/build_cainjector.sh`), prebaked by `stageCainjectorPackage()` in
+`BakeRamdisk.cpp` — a package whose job is to make HTTPS apt work cannot be
+something apt has to fetch over HTTPS.
+
+It installs the whole Debian `ca-certificates` store (121 Mozilla roots,
+provenance in `cainjector/README.md`), not just the one chain awkwardtv
+needed, so this should hold for years rather than until the next repo moves.
+
+Three findings from getting it working, all recorded in
+`docs/HISTORY.md`:
+
+- **`modify-anchor-certificates` is required**, or every call returns
+  `-34018` (`errSecMissingEntitlement`). The name is a literal in this
+  firmware's own `/usr/libexec/securityd`; the ad-hoc signature carries it
+  because the untether patches AMFI.
+- **Two of the hand-written prototypes were wrong**, and the tool's own
+  `SecTrustStoreContains` verification is the only reason that surfaced as a
+  diagnosis rather than a silent no-op. Settled against Apple's real
+  `SecTrustStore.h`.
+- **OpenSSL and curl are separate trust stores** and were handled too: the
+  PEM goes to `/usr/lib/ssl/cert.pem` (OpenSSL's compiled-in `OPENSSLDIR`),
+  and curl — which never consults OpenSSL's defaults — gets
+  `CURL_CA_BUNDLE` via `/etc/profile.d/blackb0x-cainjector.sh` and the
+  postinstall daemon's own `EnvironmentVariables`.
+
+Still open, and deliberately NOT solved by this: **TLS protocol support.**
+`openssl 0.9.8zg` tops out at TLS 1.0 and no trust work moves that ceiling,
+so `curl`/`openssh` remain limited to hosts that still accept TLS 1.0. Only
+the CFNetwork/SecureTransport consumers (which is what apt uses) get the
+full benefit.
+
+**Restore Cydia's own stashing behavior — DONE.** Investigated with a
+dedicated agent: `cydia.postinst` is a compiled Mach-O binary (armv6 +
+arm64), not a script, and its real strings show it relocates only
+`/Applications` into `/var/stash` itself — `/usr/include`/`/usr/share`
+were never its job (that part of the original comment above the `cydia`
+install line was wrong; still unknown which other package relocates
+those two, if anything currently does). `move.sh` ships in cydia's own
+payload as a separate, generic "stash any given directory" helper, already
+called successfully by `pam`/`pam-modules` on their own paths — cydia's
+postinst does not call it itself.
+
+Confirmed on real hardware that `postinst` genuinely doesn't create the
+stash: running `/var/lib/dpkg/info/cydia.postinst configure` by hand exits
+without producing `/var/stash`. Not worth reverse-engineering which
+internal check is failing inside a compiled binary — `move.sh`'s own
+`shift_()` function has the identical shape of silent-no-op gate (a
+`du`/`df` arithmetic check that just does nothing, no error, if it doesn't
+come out as expected), so postinst likely has an analogous environment
+assumption silently unmet on this device.
+
+Fixed by calling the same real, already-shipped `move.sh` helper directly
+from `postinstall.sh`, right after the `cydia` install line, guarded
+exactly the way `shift_()` guards itself (`/Applications` exists and isn't
+already a symlink) so it's a no-op wherever postinst does work correctly.
+Not a reimplementation — reuses the identical mechanism `pam`/`pam-modules`
+already depend on.
+
+**Confirmed working on real hardware.** `move.sh /Applications` actually
+runs and stashes it — `/Applications` now symlinks to
+`/var/stash/_.CqctQL/Applications` (the random `_.XXXXXX` component is
+expected: real Cydia's own compiled `postinst` uses the identical
+`mktemp -d`-style naming, confirmed from its own strings, so nothing
+should ever depend on that path being fixed — everything is supposed to
+follow the `/Applications` symlink instead). This item is closed.
+
+**Restore frontrow picture behavior — the premise was wrong, and the real
+problem is much bigger than icons.**
+
+This entry originally assumed icon placement had regressed. It had not.
+Placement, permissions, the `Appliances/` symlink, ad-hoc signing and
+reboots were all ruled out one at a time on real hardware, and the actual
+cause is that **this firmware has no `.frappliance` mechanism at all**:
+
+```
+$ strings -a /Applications/AppleTV.app/AppleTV | grep -ci frappliance
+0
+```
+
+Confirmed on the device. Nothing in the shipped binary ever looks at the
+directory both Kodi and nitoTV install into. `BRApplianceManager
+_loadAppliances` gets its list from a bound merchant list — synthesized by
+`BRMerchant.appDefinitions` from Apple's remote vendor bag
+(`_updateMerchantsWithVendorBags:`, `ATVMerchantCoordinator`) — not from any
+directory scan. Apple replaced the AppleTV2-era drop-in model with a
+store/account-driven one, and both packages encode a convention this 2022
+build no longer implements.
+
+What IS still live is the `.appliance` *format*: `+[BRApplianceInfo
+infoForApplianceDescription:]` still takes a plain `NSDictionary` of `FR*`
+keys, and Apple's own `Computers.appliance` etc. remain in the bundle as
+now-unread plists in exactly that shape. So the mechanism can be driven
+from outside.
+
+In progress: `appliancetvtweak/`, a MobileSubstrate tweak that hooks
+`_loadAppliances`, `dlopen`s each `.frappliance`, adds the `BRAppliance`
+protocol at runtime (neither bundle declares it, which is the second gate —
+both already implement `initWithApplianceInfo:`), and feeds the result back
+through `_loadApplianceWithInfo:`. It must be listed in
+`misc/prebake_package_blacklist.txt` for the same reason `cydia` is: it
+depends on MobileSubstrate infrastructure that does not exist in the
+bake-time bootstrap container.
+
+The real unknown is not loading but **survival** — these 2010-2015 classes
+call BackRow API against a 2022 build, so they may load, conform, init, and
+then crash on since-changed internals. Load one by hand and watch for a
+crash before investing further. If that turns out to be a dead end,
+launching Kodi/nitoTV over SSH or from a LaunchDaemon is a legitimate
+fallback, and the main menu is simply not available on this firmware.

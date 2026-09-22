@@ -400,7 +400,16 @@ listing that also holds unrelated payloads.
   real `gpg --verify` of `dists/ios/8.0/Release` against `Release.gpg` —
   "Good signature", fingerprint `4E1B 2D7E A821 9B7E 045A 7540 6D36 863D
   AA31 C175`.
-- `apt/regulad.list` — this fork's own default repo (`https://ios.regulad.xyz/`).
+- `apt/regulad.list` — this fork's own default repo (`http://ios.regulad.xyz/` —
+  plain HTTP on purpose: real-hardware `apt-get update` against the HTTPS
+  vhost reliably produced SSL errors, most likely this OS-era device's old
+  root CA trust store rejecting the vhost's current certificate chain (see
+  `docs/HISTORY.md` for the full investigation, including a wrong turn
+  along the way). Since this is our own repo, sidestepping the question
+  entirely by serving it over plain HTTP was simpler than chasing the exact
+  cause — package integrity here comes from the GPG-signed `Release` file,
+  not transport security, the same model `bigboss.list`/`saurik.list`/
+  `xbmc.list` already rely on).
 - `apt/regulad.gpg.key` — this fork's own signing key, confirmed via
   `gpg --show-keys` (`uid: Parker Wahle (iOS apt repository)
   <regulad@regulad.xyz>`).

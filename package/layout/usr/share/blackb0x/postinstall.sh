@@ -170,13 +170,52 @@ export DEBIAN_FRONTEND=noninteractive
 # install "done" forever.
 apt-get update || true
 
-# cydia itself goes first, on its own — its postinst does its own
-# first-run setup (including its own /var/stash relocation of
-# /Applications, /usr/include, /usr/share, with integrity checks on that
-# state; confirmed directly from the real postinst binary's own strings —
-# see AGENTS.md's "Install-time design"). Nothing else should assume Cydia's own
+# cydia itself goes first, on its own — its postinst is meant to do its own
+# first-run /var/stash relocation of /Applications (a real, compiled Mach-O
+# binary, not a script; confirmed directly from its own strings — see
+# AGENTS.md's "Install-time design"). Nothing else should assume Cydia's own
 # environment exists until that's actually finished.
-apt-get install -y --allow-unauthenticated cydia
+#
+# --force-overwrite is required here specifically. This project's own layout
+# (see BakeRamdisk.cpp's tree merge) lays several of the same paths Cydia's
+# package payload ships directly onto the system partition — most notably
+# etc/apt/sources.list.d/saurik.list, which we stage ourselves so a source
+# list exists even if apt-get install cydia never gets the chance to run.
+# dpkg tracks file ownership per package, and those files were never
+# written by dpkg unpacking anything, so dpkg sees an unowned file already
+# sitting where cydia's payload wants to unpack its own copy and refuses by
+# default ("trying to overwrite ... which is different from other instances
+# of package cydia"). --force-overwrite tells dpkg to take the file anyway,
+# which is exactly right here: cydia's own copy is the one that should win.
+DPKG_FORCE_OVERWRITE=(-o 'Dpkg::Options::=--force-overwrite')
+apt-get install -y --allow-unauthenticated "${DPKG_FORCE_OVERWRITE[@]}" cydia
+
+# --- stash /Applications if cydia's own postinst didn't --------------------
+#
+# It doesn't, reliably, on real hardware. Confirmed directly: running
+# /var/lib/dpkg/info/cydia.postinst configure by hand on a real device exits
+# without ever creating /var/stash. Cydia's real postinst is a compiled
+# Mach-O binary (not a script), so the exact reason it no-ops isn't visible
+# without disassembling it — but /usr/libexec/cydia/move.sh, which cydia's
+# own payload also ships and which pam/pam-modules already call successfully
+# on their own paths (Depends: on cydia being unpacked first, same as here),
+# has the identical shape of gate in its own shift_() function: it only
+# stashes a real, non-symlinked directory if `du`'s used size plus a 512KB
+# margin comes out under `df`'s free-space reading for /var, and simply does
+# nothing at all if that arithmetic doesn't come out as expected — no error,
+# no message. Cydia's postinst likely has the same kind of environment
+# assumption somewhere in it, silently unmet on this device.
+#
+# Rather than reverse-engineer which check is failing inside a compiled
+# binary, just call the same real, already-shipped move.sh helper ourselves
+# — the identical mechanism pam/pam-modules already rely on, not a
+# reimplementation of its logic. Guarded exactly the way move.sh's own
+# shift_() guards itself: only if /Applications is a real directory and not
+# already a symlink, so this is a no-op on any device where cydia's postinst
+# already did its job correctly.
+if [ -d /Applications ] && [ ! -L /Applications ]; then
+	/usr/libexec/cydia/move.sh /Applications
+fi
 
 # Baked in at bake time (see BakeRamdisk.cpp's stagePostinstallScript()),
 # from the exact package-name set scripts/build_deb_cache.py actually
@@ -190,10 +229,71 @@ apt-get install -y --allow-unauthenticated cydia
 # real system.
 PACKAGES=(__BLACKB0X_PACKAGES__)
 
-apt-get install -y --allow-unauthenticated "${PACKAGES[@]}"
-apt-get install -f -y --allow-unauthenticated
+# Same --force-overwrite reasoning as the cydia install above applies to
+# every apt-get invocation that unpacks a payload: any of these packages
+# (saurik's, bigboss's, awkwardtv's own bootstrap packages included) could
+# just as easily ship one of the same sources.list.d/trusted.gpg.d paths we
+# already staged directly onto the system partition at bake time.
+apt-get install -y --allow-unauthenticated "${DPKG_FORCE_OVERWRITE[@]}" "${PACKAGES[@]}"
+apt-get install -f -y --allow-unauthenticated "${DPKG_FORCE_OVERWRITE[@]}"
 
-apt-get upgrade -y --allow-unauthenticated
+# --- direct dpkg -i fallback for archive-only packages -----------------------
+#
+# apt.awkwardtv.org force-redirects plain http:// to https:// (302), and apt
+# genuinely follows redirects (Acquire::http::AllowRedirect, on by default —
+# verified in the bundled apt7-lib method binary's own strings, which also
+# carries the real "Redirection loop" guard from apt's method/http.cc), so
+# awkwardtv.list has to stay https:// — there is no working plain-HTTP path
+# to it at all, unlike bigboss/saurik/xbmc/regulad.
+#
+# https:// itself is not obviously broken here the way an earlier pass at
+# this comment assumed: /usr/lib/apt/methods/https is a symlink to the same
+# http method binary, but that binary is built on CFNetwork
+# (CFReadStreamCreateForHTTPRequest, imports kCFStreamErrorDomainSSL for
+# real handshake-error reporting — confirmed directly from its own undefined
+# symbol table) rather than linking libssl/curl at all, so it dispatches on
+# the URI scheme it's handed at runtime (via the method protocol's own "URI
+# Acquire" message, not argv[0]) and does a genuine TLS handshake through
+# Apple's own SecureTransport for an https:// request — a completely
+# separate TLS stack from the openssl_0.9.8zg userland package, which this
+# method never touches. Whatever is actually failing against
+# apt.awkwardtv.org on real hardware (observed directly: apt-get update
+# against it reliably reports SSL errors) is therefore most likely this
+# OS-era device's old root CA trust store not trusting whatever CA issued
+# that host's current certificate, not a protocol-version ceiling — see
+# docs/HISTORY.md for the full corrected writeup, including where the
+# earlier (wrong) "https is fake" theory came from.
+#
+# Whatever the exact cause, it isn't ours to fix: apt.awkwardtv.org is
+# third-party infrastructure. So apt-get update against it stays a
+# permanent, tolerated failure here, and anything ONLY described by that
+# repo's own Packages index — nitoTV chief among them — can never be
+# resolved by name through the apt-get install above, no matter how long
+# the device waits for a network.
+#
+# Its .deb bytes are staged into the real apt archive cache regardless of
+# which repo they were originally resolved from (see BakeRamdisk.cpp's
+# stageDebcache() — build time runs on a machine with working TLS/trust, so
+# resolution there never hits this wall). So skip apt's by-name resolution
+# entirely for whatever apt itself didn't already claim, and hand dpkg the
+# bytes directly instead — the same real-file-not-real-index situation
+# essential's own local_only_debs.txt entry exists to solve, just
+# generalized instead of hand-listed, so anything else that ever ends up
+# archive-only and index-less gets picked up here too, not just nitoTV.
+TO_DPKG_I=()
+for deb in /var/cache/apt/archives/*.deb; do
+	[ -e "$deb" ] || continue
+	pkg=$(dpkg-deb -f "$deb" Package)
+	if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
+		TO_DPKG_I+=("$deb")
+	fi
+done
+if [ "${#TO_DPKG_I[@]}" -gt 0 ]; then
+	dpkg -i --force-overwrite "${TO_DPKG_I[@]}"
+	apt-get install -f -y --allow-unauthenticated "${DPKG_FORCE_OVERWRITE[@]}"
+fi
+
+apt-get upgrade -y --allow-unauthenticated "${DPKG_FORCE_OVERWRITE[@]}"
 apt-get autoremove -y --allow-unauthenticated
 
 # Neither Kodi's nor nitoTV's frontrow icon needs any help from us.

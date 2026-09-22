@@ -1221,11 +1221,23 @@ jobs:
           cp -R "$real/usr/include" "$tc/SDKs/$name/usr/include"
           cp -R "$real/usr/lib" "$tc/SDKs/$name/usr/lib"
           cp "$real/SDKSettings.plist" "$tc/SDKs/$name/"
-          mkdir -p "$tc/SDKs/$name/System/Library/Frameworks"
-          for fw in CoreFoundation Security Foundation; do
-            cp -R "$real/System/Library/Frameworks/$fw.framework" \
-                  "$tc/SDKs/$name/System/Library/Frameworks/"
-          done
+          # THE WHOLE Frameworks TREE, not a hand-picked list. The first
+          # version of this step copied exactly what the two packages link --
+          # CoreFoundation, Security, Foundation -- and CI failed on
+          # `'CFNetwork/CFNetwork.h' file not found`, because Foundation.h
+          # imports NSURLError.h which imports CFNetwork. A link list is not an
+          # include list: the headers pull in frameworks nothing links against
+          # (CoreServices is another), and each one only surfaces as a build
+          # failure one round at a time.
+          #
+          # It costs almost nothing to stop playing that game: the SDK's entire
+          # System/Library/Frameworks is 27 MB, because these are header trees
+          # and linker stubs rather than real binaries. The bake job's narrower
+          # slice stays as it is -- it builds one freestanding-ish C binary
+          # against two frameworks and has never needed more.
+          mkdir -p "$tc/SDKs/$name/System/Library"
+          cp -R "$real/System/Library/Frameworks" \
+                "$tc/SDKs/$name/System/Library/Frameworks"
           ln -s "$name" "$tc/SDKs/iPhoneOS.sdk"
 
           detach

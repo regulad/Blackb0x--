@@ -1,38 +1,41 @@
-# Blackb0x
+# Blackb0x--
 
-Jailbreak tool for the 2nd/3rd-gen Apple TV, via the checkm8/SHAtter DFU-mode boot
-exploit. Side-loads Cydia + Kodi. A portable CLI port of the original macOS app, no
-GUI.
+Don't eWaste what can still be used! 
+ 
+Jailbreak tool for the 2nd/3rd-gen Apple TV, via the `checkm8`/`SHAtter` DFU-mode boot
+exploit. Side-loads Cydia (frontend nitoTV) + Kodi.
 
-Each device is targeted at the newest firmware Apple ever shipped it:
+![done](pictures/done.png)
+
+Additional features over the original [`blackb0x`](https://github.com/NSSpiral/Blackb0x):
+
+* Works in 2026 with current `apt` repositories
+* Restores Appliance support to `lowtide` (the springboard/pineboard equivalent for Apple TV Software), allowing legacy tweaks and apps to appear on the UI
+* Injects Debian 13 CAs into Apple TV Software, enabling the entire system to connect to current websites using TLS 1.2 (which was already supported)
+* Logs to screen during install process, making it easier to debug
+* Fully working on Apple Silicon (jailbreaking up to macOS 27/Golden Gate; authoring up to macOS 26/Tahoe, see next bullet)
+* Opportunistic use of pre-patched binaries built on CI (eliminates the need to run legacy Xcode through Rosetta 2 nor build huge libraries)
+
+Supported devices:
 
 | device | firmware | notes |
 |---|---|---|
-| Apple TV 3,2 (A1469) | tvOS 8.4.x | untethered (tihmstar's etasonATV); the only model any of this has been run against |
-| Apple TV 3,1 (A1427) | tvOS 8.4.x | untethered; needs an Arduino running [synackuk's checkm8-A5](https://github.com/synackuk/checkm8-a5) to pwn DFU first; `blackb0x` picks up from there |
-| Apple TV 2,1 (A1378) | tvOS 7.1.2 | **tethered** — no untether exists for 7.x, so the boot has to be redone from the Mac after each power cycle |
+| AppleTV3,2 (A1469) | tvOS 8.4.3 (formerly Apple TV Software 7.x) | untethered only (`tihmstar`'s `etasonATV`) |
+| AppleTV3,1 (A1427) | tvOS 8.4.3 (formerly Apple TV Software 7.x) | untethered only; needs an Arduino running [`synackuk`'s `checkm8-A5`](https://github.com/synackuk/checkm8-a5) to pwn DFU first; `blackb0x` picks up from there |
+| AppleTV2,1 (A1378) | tvOS 7.1.2 (formerly Apple TV Software 6.x) | **tethered only** |
 
-The exact build each device targets lives in one table, `kJailbreakTargets[]` in
-`src/Cli.cpp`. Everything else — what CI bakes, what `blackb0x` asks for — reads it
-from there.
-
-**macOS only, Apple Silicon tested.** Everything except the AppleTV3,2 path is
-implemented from protocol analysis rather than confirmed on hardware, and **no
-device has yet come up jailbroken**: the firmware suite bakes for all three models
-and the exploit stage (`blackb0x-pwn`) works on an AppleTV3,2, which is not the
-same thing as a finished jailbreak. `docs/HISTORY.md` tracks where that stands.
-Linux support was removed; the same file has the reasoning.
+**Warning:** AppleTV2,1 support has not been fully validated, please report any issues you encounter to the issues page.
 
 **Tip:** if `blackb0x-pwn` is unreliable over a direct USB-C connection, put a plain
 (non-Thunderbolt) USB hub between the Mac and the Apple TV.
 
-**Important:** the device needs internet access on first boot. Do not power it off
-until Kodi appears.
+Please star this project if it helped you.
 
 ## Requirements
 
-Xcode Command Line Tools, plus Homebrew packages. Which ones depends on what you are
-building.
+Both targets need the Xcode Command Line Tools, plus Homebrew.
+
+### Jailbreaking only
 
 To build and run the jailbreak:
 
@@ -44,6 +47,8 @@ brew install cmake autoconf automake libtool pkg-config gh
 suite instead of baking one. Sign in once with `gh auth login`. Without it you
 can still jailbreak, but you have to bake the firmware yourself, which needs
 root and everything in the next list.
+
+### Development/authoring
 
 To additionally build the authoring tools (firmware baker, vendored apt, tests):
 
@@ -61,17 +66,8 @@ pinned toolchain rather than the stock one:
 
 | Xcode | For | Why |
 |---|---|---|
-| `Xcode_6.4.dmg` | AppleTV3,1 / AppleTV3,2 | `ld64-242.2`, iPhoneOS8.4 SDK |
-| `Xcode_5.1.1.dmg` | AppleTV2,1 | `ld64-236.4`, iPhoneOS7.1 SDK |
-
-**Both columns matter now.** `entrypoint` is a dynamically linked armv7
-binary — the same shape as the `/sbin/launchd` it replaces, which is the
-configuration known to boot on this hardware — so it links that Xcode's
-iPhoneOS SDK, and the pairing above is not interchangeable. Matched is a
-0-phantom-symbol match on both branches; an 8.4 SDK against a 7.1.2 device
-advertises 787 symbols the device does not export, which links clean and dies
-at dyld load with no console to say so. `DEVICE=<model>` is what picks the
-right one.
+| [`Xcode_6.4.dmg`](https://developer.apple.com/services-account/download?path=/Developer_Tools/Xcode_6.4/Xcode_6.4.dmg) | AppleTV3,1 / AppleTV3,2 | `ld64-242.2`, iPhoneOS8.4 SDK |
+| [`Xcode_5.1.1.dmg`](https://developer.apple.com/services-account/download?path=/Developer_Tools/xcode_5.1.1/xcode_5.1.1.dmg) | AppleTV2,1 | `ld64-236.4`, iPhoneOS7.1 SDK |
 
 Put both in **`~/Downloads`** and the bake finds them; whole `.dmg`s are fine
 and are mounted read-only for the build. Point somewhere else with the
@@ -81,16 +77,6 @@ or `XCODE_SEARCH_DIR=<dir>` (a different place to look for the same names).
 Both are read straight from the environment by `entrypoint/Makefile`, so a CI
 job sets one variable and needs nothing else.
 
-The build **fails rather than silently using the system compiler** if neither
-yields a toolchain. That is deliberate: Apple's current `ld` has no native
-32-bit ARM support and quietly delegates to `ld-classic`, a frozen fork
-deprecated since Xcode 15, so a build that fell back would be exactly the
-thing the pin exists to avoid. `XCODE_TOOLCHAIN=system` opts back in on
-purpose. Both DMGs come from `download.developer.apple.com` and need a
-signed-in Apple ID — `entrypoint/README.md` has the URLs, the reason an
-anonymous fetch returns a 257-byte error page with HTTP 200, and how to verify
-what you got.
-
 Almost everything else is vendored under `third_party/` and built from source.
 
 ## Build
@@ -99,11 +85,6 @@ Almost everything else is vendored under `third_party/` and built from source.
 git clone --recurse-submodules https://github.com/regulad/Blackb0x--.git
 cd Blackb0x--
 cmake -S . -B build
-```
-
-Then pick a target:
-
-```sh
 cmake --build build --target jailbreak -j"$(sysctl -n hw.ncpu)"   # blackb0x and blackb0x-pwn
 cmake --build build --target authoring -j"$(sysctl -n hw.ncpu)"   # bake-firmware, vendored apt, tests, xpwntool
 ```
@@ -111,49 +92,16 @@ cmake --build build --target authoring -j"$(sysctl -n hw.ncpu)"   # bake-firmwar
 `sysctl -n hw.ncpu` is the macOS equivalent of `nproc`, which does not exist
 here.
 
-`--recurse-submodules` is required; without it the build fails on missing headers
-(`git submodule update --init --recursive` fixes an existing clone). **Install
-`git-lfs` before cloning** if you want the authoring tools: `debcache/` is stored
-through LFS, and without it you get pointer files instead of packages, which only
-surfaces much later as a bake that cannot read anything. `git lfs pull` fixes it.
-
 `bake-firmware` **must run as root**, including `--only bootchain`. It writes into
 root-owned files on a mounted ramdisk. Its output in `dist/` is handed back to the
 user who invoked `sudo`, so you will not need `sudo` to read or delete your own
-build artifacts. The IPSW download cache is not covered by that; clean it with
-`sudo chown -R "$USER" ~/.local/share/blackb0x` if a root-owned cache gets in the way.
-
-## Firmware
-
-`blackb0x` sends a prepared firmware suite from `dist/`. It never patches anything
-itself. When `dist/` has no suite for the device and build it needs, it resolves one
-in this order and stops at the first that works:
-
-1. **Already in `dist/`.** Nothing is ever re-fetched or re-baked over an existing
-   suite, so a hand-built one always wins.
-2. **Downloaded from CI.** If `gh` is on your `PATH`, it pulls the suite published by
-   `.github/workflows/ci.yml`. No root, no Theos, no apt, no waiting. This is the
-   normal path and needs nothing from the authoring list.
-3. **Baked locally.** With no `gh` but running as root, it shells out to
-   `bake-firmware` and builds the suite itself. Minutes, and the full authoring
-   toolchain.
-
-Neither `gh` nor root is the one combination that cannot work, and it says so, with
-both fixes spelled out.
-
-Point it at a different repository's artifacts with `BLACKB0X_ARTIFACT_REPO`
-(`owner/name`), for a fork or a private mirror.
-
-CI bakes all three devices, one runner each, and publishes each suite as the
-artifact `firmware-<device>` — the name `blackb0x` downloads by. `AppleTV2,1` and
-`AppleTV3,1` used to be excluded because their kernelcaches failed to decrypt; that
-was a real defect in the vendored xpwn's img3 reader and it is fixed.
+build artifacts.
 
 ## Jailbreaking
 
 0. **(3,1 only)** Pwn DFU with the Arduino first.
 1. **(Optional.)** Nothing to do here if you have `gh` — `blackb0x` fetches the
-   firmware it needs on its first run, as described under "Firmware" above. To bake
+   firmware it needs on its first run, as described under "Firmware" above (make sure you have logged into `gh`). To bake
    it yourself instead:
    ```sh
    sudo env "PATH=$PATH" "THEOS=$THEOS" ./build/bake-firmware
@@ -163,17 +111,16 @@ was a real defect in the vendored xpwn's img3 reader and it is fixed.
    `blackb0x` names the exact device and build it wants — and, if it cannot bake
    one itself, spells out the `bake-firmware` command for it. Existing output is
    skipped unless you pass `--force`.
-2. Connect the Apple TV by micro-USB **and** plug in its power cable.
-3. Run `./build/blackb0x`. Add `--dry-run` to preview without touching the device.
-4. Follow the on-screen instructions to enter DFU mode.
-5. Wait 5-10 minutes after install for Kodi to appear on the TV.
-6. **(Optional)** For SSH access, once `blackb0x` reports the jailbreak is running:
-   ```sh
-   scripts/push_authorized_keys.sh
-   ```
-   It tunnels to the device's sshd over `usbmuxd` and installs your
-   `~/.ssh/authorized_keys`, like `ssh-copy-id`. The device's default password is
-   `root`/`alpine`. Needs no root. See its `--help` for options.
+2. Connect the Apple TV by micro-USB **and** plug in its power cable. If you would like to see the jailbreak live, you'll also need to connect an HDMI cable. You may need to file down the top and bottom of the micro-USB-B male and HDMI male terminations respectively to get them to both fit in the confined space.
+4. Run `./build/blackb0x`.
+5. Follow the in-terminal instructions to enter DFU mode.
+6. Let `blackb0x` attempt `checkm8`. This could take a couple of tries. If it fails, you will need to power-cycle your Apple TV.
+7. Once `blackb0x` has succeeded in sending the payload via `checkm8`, you'll see a screen similar to the one below after a minute or two.
+   ![entrypoint](pictures/entrypoint.png)
+8. Once the payload finishes injecting the jailbreak to your Apple TV's storage, your Apple TV should go to the "connect to iTunes for recovery" screen. Remove all cords from the Apple TV, then plug back in **only** power and HDMI.
+9. After you see the home screen, your Apple TV *should* be Jailbroken.
+10. You can now attempt to connect via SSH, user `root`. See `scripts/` for a helper script that pushes your public key to the Apple TV. If you prefer to authenticate with password, the default password is `alpine`.
+11. If `ssh` is working, great! Kodi and nitoTV are being installed in the background, they should appear after a few minutes depending on your internet connection. If you do not have an internet connection, `ssh` will still work over `usbmuxd`, but installing Kodi will be deferred until the next boot.
 
 ## Development
 

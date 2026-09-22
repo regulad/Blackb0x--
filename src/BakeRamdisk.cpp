@@ -3095,6 +3095,137 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
     return ok;
 }
 
+// The CA injector, staged exactly the way stageBlackb0xPackage() stages the
+// main package: build the real .deb, merge its payload into /blackb0x, and
+// register it with a real dpkg status stanza so the device has a record of it
+// rather than a pile of loose files.
+//
+// WHY IT IS PREBAKED RATHER THAN LEFT TO apt. The whole point of this package
+// is to make HTTPS apt sources work. A package that has to be fetched over
+// the network to fix the network is useless on exactly the devices that need
+// it — so it ships in the ramdisk and is installed before anything tries to
+// reach a repository.
+//
+// WHY THE BUILD CALL IS SHAPED DIFFERENTLY from build.sh's. package/build.sh
+// is handed a staging tree because bakeRamdisk() has to assemble one first
+// (postinstall.sh is templated with a resolved package list, and the bundled
+// local repo depends on what the bake resolved). build_cainjector.sh has no
+// such input: its payload is a fixed layout plus a compiled binary plus a
+// vendored certificate store, so it makes its own staging tree and only needs
+// to be told where to put the .deb.
+//
+// ITS POSTINST NEVER RUNS HERE, and that is fine. stageManualDpkgInstall()
+// writes the status stanza directly rather than going through dpkg, so the
+// postinst's `launchctl load` is skipped — which is correct at bake time,
+// since there is no launchd to talk to. That script exists only for a
+// by-hand install on an already-booted device; on a real boot the untether's
+// own `launchctl load /Library/LaunchDaemons` starts the unit.
+static bool stageCainjectorPackage(const fs::path& blackb0xRoot, const std::string& productVersion) {
+    std::string outDir = makeTempDir("blackb0x-cainjector-out-");
+    if (outDir.empty()) {
+        fprintf(stderr, "bakeRamdisk: cannot create cainjector package temp dir\n");
+        return false;
+    }
+
+    bool ok = true;
+    std::error_code ec;
+    std::string debPath = outDir + "/xyz.regulad.blackb0x.cainjector.deb";
+
+    if (!runCommand({resolvePackageRoot() + "/build_cainjector.sh", debPath, productVersion}, ".")) {
+        fprintf(stderr, "bakeRamdisk: package/build_cainjector.sh failed — see stderr above\n");
+        fs::remove_all(outDir, ec);
+        return false;
+    }
+
+    ExtractedDeb extracted = extractDebAndBuildStanza(debPath, "blackb0x-cainjector-install-",
+                                                       "xyz.regulad.blackb0x.cainjector");
+    if (!extracted.ok || extracted.stanza.empty()) {
+        fprintf(stderr, "bakeRamdisk: could not extract/describe the built cainjector .deb\n");
+        if (!extracted.tempDir.empty()) fs::remove_all(extracted.tempDir, ec);
+        fs::remove_all(outDir, ec);
+        return false;
+    }
+
+    for (const auto& entry : fs::directory_iterator(extracted.tempDir, ec)) {
+        std::string name = entry.path().filename().string();
+        if (isDebControlArtifact(name)) continue;
+        ok &= stagePayloadTopLevel(blackb0xRoot, name, entry.path(), /*remapEtc=*/true);
+    }
+
+    // The real on-device paths, which are the .deb's own unprefixed ones --
+    // not the private/-prefixed spellings used inside /blackb0x. The 121
+    // certificates are deliberately NOT enumerated one by one: dpkg's .list
+    // is used here to record what the package owns for auditing, and a
+    // directory entry covers them without putting 121 lines of generated
+    // noise into every bake.
+    std::vector<std::string> ownedPaths = {
+        "/etc/profile.d/blackb0x-cainjector.sh",
+        "/Library/LaunchDaemons/xyz.regulad.blackb0x.cainjector.plist",
+        "/usr/lib/ssl/cert.pem",
+        "/usr/libexec/blackb0x/cainjector",
+        "/usr/share/blackb0x/cainjector/run.sh",
+        "/usr/share/blackb0x/cainjector/certs",
+    };
+    ok &= stageManualDpkgInstall(blackb0xRoot, extracted.stanza, "xyz.regulad.blackb0x.cainjector", ownedPaths);
+
+    fs::remove_all(extracted.tempDir, ec);
+    fs::remove_all(outDir, ec);
+    return ok;
+}
+
+// The Frontrow appliance loader, staged DELIBERATELY DIFFERENTLY from the two
+// packages above, and the difference is the whole point of this comment.
+//
+// stageBlackb0xPackage() and stageCainjectorPackage() both bake-time-install
+// their package: they merge its payload into /blackb0x and then write a real
+// dpkg status stanza saying "installed". That is a force-install, and it is
+// correct for those two because neither depends on anything that does not
+// already exist at that moment.
+//
+// THIS ONE DEPENDS ON mobilesubstrate, which does not exist until apt runs
+// on-device, so it must NOT be force-installed at bake time -- which is
+// exactly why it is on misc/prebake_package_blacklist.txt. Marking it
+// installed while its dependency is absent would be a lie told to dpkg, and
+// the dylib would be sitting on disk with nothing able to load it anyway.
+// Doing both (blacklisting it AND staging it like cainjector) would be
+// self-contradictory; the blacklist wins.
+//
+// So it is staged the way a network-only package is: the built .deb goes into
+// the real on-device apt archive cache and nothing else happens at bake time.
+// postinstall.sh then installs it, by a path that already exists and needs no
+// new machinery -- its `dpkg -i` fallback walks /var/cache/apt/archives/*.deb
+// and installs everything not already installed. Crucially that fallback runs
+// AFTER `apt-get install "${PACKAGES[@]}"`, so mobilesubstrate is genuinely
+// installed by the time this package is unpacked, and the `apt-get install -f`
+// that follows it has nothing left to fix.
+//
+// The one real consequence to know: a device with no network still gets this,
+// because the .deb travels in the ramdisk rather than being fetched. That is
+// the same property the archive cache gives every other staged package, and
+// it is why this is staged at all rather than left to a repo.
+static bool stageAppliancetvtweakPackage(const fs::path& blackb0xRoot, const std::string& productVersion) {
+    std::string outDir = makeTempDir("blackb0x-appliancetvtweak-out-");
+    if (outDir.empty()) {
+        fprintf(stderr, "bakeRamdisk: cannot create appliancetvtweak package temp dir\n");
+        return false;
+    }
+
+    std::error_code ec;
+    const std::string debName = "xyz.regulad.blackb0x.appliancetvtweak.deb";
+    std::string debPath = outDir + "/" + debName;
+
+    if (!runCommand({resolvePackageRoot() + "/build_appliancetvtweak.sh", debPath, productVersion}, ".")) {
+        fprintf(stderr, "bakeRamdisk: package/build_appliancetvtweak.sh failed — see stderr above\n");
+        fs::remove_all(outDir, ec);
+        return false;
+    }
+
+    bool ok = stageFile(blackb0xRoot, varStage("cache/apt/archives/" + debName), debPath, 0, 0, 0644);
+
+    fs::remove_all(outDir, ec);
+    return ok;
+}
+
 // Builds /blackb0x under `parentDir` (a plain host directory — this no
 // longer has to be a mounted HFS+ volume at all; bakeRamdisk() stages this
 // into a host temp dir first specifically so its real size is known
@@ -3148,6 +3279,8 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
     std::vector<std::string> resolvedPackages;
     if (!stageDebcache(blackb0xRoot, productVersion, resolvedPackages)) ok = false;
     if (!stageBlackb0xPackage(blackb0xRoot, productVersion)) ok = false;
+    if (!stageCainjectorPackage(blackb0xRoot, productVersion)) ok = false;
+    if (!stageAppliancetvtweakPackage(blackb0xRoot, productVersion)) ok = false;
     if (!stageVersionBranch(blackb0xRoot, productVersion)) ok = false;
 
     return ok;

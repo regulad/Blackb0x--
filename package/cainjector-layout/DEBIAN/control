@@ -1,0 +1,10 @@
+Package: xyz.regulad.blackb0x.cainjector
+Name: blackb0x CA injector
+Version: __BLACKB0X_VERSION__
+Architecture: iphoneos-arm
+Description: Installs the Debian ca-certificates root store into the device's admin trust store, so HTTPS apt sources with post-2015 certificate chains can validate.
+Maintainer: regulad <parkeredwardwahle2017@gmail.com>
+Author: regulad <parkeredwardwahle2017@gmail.com>
+Section: System
+Depends: firmware (>= 7.0), profile.d
+Tag: role::hacker

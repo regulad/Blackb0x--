@@ -16,3 +16,14 @@ __pycache__/
 # entrypoint/'s compiled output
 /entrypoint/entrypoint
 /entrypoint/obj/
+
+# cainjector/'s compiled output. The source, the vendored CA bundle and the
+# entitlements plist are all checked in; the armv7 binary is reproducible
+# from them with `make -C cainjector` and a pinned Xcode.
+/cainjector/cainjector
+
+# appliancetvtweak/'s compiled output, plus the Substrate framework its
+# Makefile unpacks out of debcache/mobilesubstrate_*.deb to build against.
+# The deb is vendored; the unpacked copy is a build artifact.
+/appliancetvtweak/appliancetvtweak.dylib
+/appliancetvtweak/.substrate/

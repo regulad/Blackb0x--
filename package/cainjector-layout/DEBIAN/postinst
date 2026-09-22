@@ -1,0 +1,36 @@
+#!/bin/sh
+# Load the CA-injector LaunchDaemon.
+#
+# Same shape, and same reasoning, as the main xyz.regulad.blackb0x package's
+# own postinst: deliberately trivial, idempotent, and side-effect-free on a
+# boot where it never runs at all.
+#
+# WHAT LOADS THIS UNIT WITHOUT THIS SCRIPT. The plist lives in
+# /Library/LaunchDaemons, which launchd never scans -- its embedded bootstrap
+# carries only /System/Library/LaunchDaemons. That is deliberate: this
+# package's binary is ad-hoc signed by us, so AMFI rejects it on a clean boot,
+# and a unit in the scanned directory would fire at exactly the moment its
+# program cannot execute. What does load it is the untether's own
+# `launchctl load /Library/LaunchDaemons`, which runs after it has patched
+# AMFI/sandbox/cs_enforcement -- the same path that brings sshd up today. The
+# unit is RunAtLoad, so that load starts it.
+#
+# So this script exists for exactly one case: installing the package by hand
+# on an already-booted, already-untethered device, where waiting for the next
+# boot would be silly. On a fresh boot it is redundant.
+#
+# Keep it that way. Anything that genuinely must happen at install time cannot
+# live here: bakeRamdisk() stages this package by writing its dpkg status
+# stanza directly (stageManualDpkgInstall(), the same treatment the main
+# package gets), so this script never executes at bake time at all. And do NOT
+# add a preinst -- that runs during `dpkg --unpack`, which the baker cannot
+# strip after the fact.
+set -e
+
+PLIST=/Library/LaunchDaemons/xyz.regulad.blackb0x.cainjector.plist
+
+if [ -x /bin/launchctl ] || command -v launchctl >/dev/null 2>&1; then
+    [ -f "$PLIST" ] && launchctl load "$PLIST" 2>/dev/null || true
+fi
+
+exit 0

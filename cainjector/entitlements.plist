@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  WHY THIS EXISTS. Without it, every SecTrustStoreSetTrustSettings() call
+  returns -34018 (errSecMissingEntitlement) on real hardware. Measured, not
+  predicted: the first real run reported
+
+      cainjector: 0001.der: SecTrustStoreSetTrustSettings -> -34018
+      cainjector: 0001.der: NOT present after install (Contains -> 0)
+
+  121 times over. That same log also settled a real open question in this
+  package's favour: the hand-declared prototypes in SecTrustStorePrivate.h are
+  CORRECT. A wrong ABI does not produce a specific, documented errSec code and
+  a clean errSecSuccess from SecTrustStoreContains alongside it; it produces a
+  crash or nonsense. Reads need no entitlement, writes do.
+
+  THE NAME IS NOT GUESSED. It is a literal in this firmware's own
+  /usr/libexec/securityd (Security-57317.40.2), right beside the file that
+  implements the check and the database it guards:
+
+      modify-anchor-certificates
+      /Library/Keychains/TrustStore.sqlite3
+      /SourceCache/securityd/Security-57317.40.2/Security/sec/securityd/SecTrustStoreServer.c
+
+  HOW AN AD-HOC SIGNATURE CARRIES IT AT ALL. It does not, on a stock device --
+  that is the entire point of an entitlement. It works here because the
+  untether patches AMFI/cs_enforcement, which is what would otherwise refuse a
+  binary claiming an entitlement it was never granted. This is the same
+  property that lets unsigned bash and sshd run at all, applied to a signature
+  blob rather than to execution. If a future firmware or a different
+  persistence path leaves AMFI intact, this stops working and cainjector will
+  say so plainly in its own log rather than silently installing nothing.
+
+  IF THIS ROUTE FAILS, DO NOT WRITE THE DATABASE DIRECTLY. securityd's own
+  strings do name the backing store (/Library/Keychains/TrustStore.sqlite3),
+  and this tool does run as root on a device with a patched kernel, so it
+  would be physically possible -- and it is ruled out by decision, not by
+  difficulty. Going through Apple's own API means securityd owns the schema,
+  the locking and the cache invalidation; hand-writing that database means
+  this project owns all three forever, against a format with no documentation
+  and no stability guarantee, on the one device state where getting it wrong
+  breaks TLS for everything rather than for one repo. If the entitlement stops
+  working, find out why it stopped working.
+-->
+<plist version="1.0">
+<dict>
+    <key>modify-anchor-certificates</key>
+    <true/>
+</dict>
+</plist>

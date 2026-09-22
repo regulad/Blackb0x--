@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  THIS UNIT LIVES IN /Library/LaunchDaemons, NOT /System/Library/LaunchDaemons,
+  AND THAT IS LOAD-BEARING.
+
+  launchd's embedded bootstrap on this firmware carries
+  `Bootstrap > Paths = [/System/Library/LaunchDaemons]` -- one directory, and
+  it really is the only one walked at boot. /Library/LaunchDaemons does not
+  exist on stock and launchd never scans it. That sounds like an argument for
+  putting this unit in the system directory, and it is exactly backwards.
+
+  The binary this unit runs is ours, which means it is ad-hoc signed by us,
+  which means AMFI rejects it on a clean boot. A unit in
+  /System/Library/LaunchDaemons would be loaded at the one moment its program
+  cannot possibly execute. This project already learned that the expensive
+  way: docs/HISTORY.md's "sshd never started because launchd does not scan
+  /Library/LaunchDaemons" entry records a loader unit that was impossible
+  exactly when it was needed and redundant exactly when it was possible, and
+  it was deleted outright.
+
+  What actually loads this directory is the untether itself. After
+  etasonuntether's payload takes tfp0 and patches AMFI/sandbox/cs_enforcement,
+  it runs its own `launchctl load /Library/LaunchDaemons` one-liner. So a unit
+  here is loaded AFTER the kernel has been patched -- which is the only point
+  in the boot where an unsigned third-party binary can run at all. sshd comes
+  up by precisely this path today.
+
+  The consequence to be aware of: on a device where the untether has not run
+  (a tethered boot off our own patched kernel, or a device whose persistence
+  is broken), this never fires. That is correct rather than unfortunate --
+  there is no trust store to fix if the jailbreak is not running.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+      <string>xyz.regulad.blackb0x.cainjector</string>
+    <key>ProgramArguments</key>
+      <array>
+        <string>/bin/bash</string>
+        <string>/usr/share/blackb0x/cainjector/run.sh</string>
+      </array>
+    <key>StandardErrorPath</key>
+      <string>/usr/share/blackb0x/cainjector/cainjector.err.log</string>
+    <key>StandardOutPath</key>
+      <string>/usr/share/blackb0x/cainjector/cainjector.out.log</string>
+    <key>RunAtLoad</key>
+      <true/>
+    <key>UserName</key>
+      <string>root</string>
+</dict>
+</plist>

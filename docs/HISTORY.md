@@ -7332,6 +7332,66 @@ remain limited to hosts still accepting TLS 1.0 no matter how good their
 trust store is. Trust and protocol are different problems and only the first
 one is solved here.
 
+## ASL is disabled on this firmware, and `com.apple.syslogd.plist` on disk is decorative
+
+Short version, so nobody spends an evening on it again: **`NSLog` output goes
+nowhere on this device, and you cannot turn it on by editing the plist.**
+
+Apple ships `/System/Library/LaunchDaemons/com.apple.syslogd.plist` with
+
+```
+EnvironmentVariables = { ASL_DISABLE = 1 }
+ProgramArguments     = [ /usr/sbin/syslogd ]        # note: no -bsd_out
+```
+
+so syslogd neither stores messages nor consults `/etc/syslog.conf`, and
+`/var/log/syslog` is never created. That matters because the `syslogd` package
+this project installs (`packages.txt` line 54) ships **exactly one file** —
+that `/etc/syslog.conf`, containing `*.* /var/log/syslog` — and nothing on the
+device reads it. `/usr/bin/syslog`, the ASL client, does not exist on stock and
+is not in `system-cmds` either (checked its file list: `passwd`, `getty`,
+`login`, `sysctl`, …). The binary genuinely supports the feature — `-bsd_out`,
+`bsd_out`, and `/etc/syslog.conf` are all real strings in `/usr/sbin/syslogd` —
+Apple just ships it switched off.
+
+### Editing the plist does not work, and the reason is the useful part
+
+The obvious fix — drop `EnvironmentVariables`, add `-bsd_out 1` — was tried on
+real hardware. `launchctl print system/com.apple.syslogd` kept reporting
+`ASL_DISABLE => 1` and `arguments = { /usr/sbin/syslogd }`, disagreeing with
+the file on disk, through every escalation:
+
+- `launchctl kickstart -k` — restarts the process from the in-memory job
+  definition; does not re-read the file. (`kickstart` **does** exist here,
+  along with `bootstrap`, `enable`, `print`, `blame`. `bootout` does not —
+  this launchctl is an in-between generation with `unbootstrap` instead.)
+- `launchctl unload` + `load` — no effect on a `keepalive`, `OnDemand=false`
+  job that owns the managed `com.apple.system.logger` MachService.
+- `launchctl uncache com.apple.syslogd` — answers **"Command is not yet
+  implemented"**, which is consistent with the earlier finding that this
+  device has no `xpcd_cache.dylib` at all.
+- **A full reboot.** `ASL_DISABLE` still present.
+
+Surviving a reboot while absent from the file is conclusive: **launchd is not
+reading that file for this job.** It is defined in launchd's own embedded
+bootstrap — the same embedded plist whose `Bootstrap > Paths` this project
+already relies on elsewhere — and the on-disk copy is decorative. Changing
+syslogd's configuration would mean patching launchd itself, which is far more
+than a debug log is worth.
+
+The stock file is a 554-byte **binary** plist, `sha256
+56009dbb7a0d6df07e122c63d3d4a10f2e927ec360422f3e25c35d8f83b1da63`; anyone who
+edited it should restore that from the decrypted rootfs rather than
+hand-rebuilding XML.
+
+### The consequence for anything this project ships
+
+A tweak or daemon that reports through `NSLog` reports nowhere. Write to a
+file. `appliancetvtweak` logs to `/usr/share/blackb0x/appliancetvtweak.log`
+for exactly this reason, and that is the pattern to follow — on a platform
+that ships with logging disabled, self-logging is the correct design rather
+than a debugging shortcut.
+
 ## SSH key auth: root is correct, and `ssh-dss` was breaking the push script
 
 Two separate questions, asked together: should `scripts/push_authorized_keys.sh`
@@ -7409,3 +7469,127 @@ key is not something a modern `ssh-keygen` can produce in the first place.
   `-o` options.
 - `--help` printed a hardcoded `sed -n '2,42p'` line range that had already
   drifted past the end of the header; it now prints the leading comment block.
+
+## RESOLVED: Kodi and nitoTV are back on the main menu, via a Substrate tweak
+
+The appliance mechanism this firmware dropped is now driven from outside it.
+`appliancetvtweak` hooks `-[BRApplianceManager _loadAppliances]`, lets the
+original run, and then hands the same loader the appliances the vanished
+directory scan would have found. Confirmed on hardware, icons and all.
+
+Four separate things had to be true at once, and each was found the hard way.
+
+### 1. The mechanism is gone, not broken
+
+`strings /Applications/AppleTV.app/AppleTV | grep -ci frappliance` returns
+**0**, on the real device. Nothing in the shipped binary ever looks at
+`/Applications/AppleTV.app/Appliances`. `_loadAppliances` takes its list from
+a bound MERCHANT list synthesized by `BRMerchant.appDefinitions` out of
+Apple's remote vendor bag — there is no code path from a directory to a
+merchant at all.
+
+So every earlier attempt was addressing a mechanism that does not exist:
+placement, ownership, `Appliances/` symlinks, ad-hoc signing with `ldid`, and
+reboots were each tried and each could not possibly have worked. What IS still
+live is the `.appliance` *format* — `+[BRApplianceInfo
+infoForApplianceDescription:]` still consumes a plain `NSDictionary` of `FR*`
+keys, and Apple's own `Settings.appliance` and friends still sit in the bundle
+as unread plists in exactly that shape. That is the opening the tweak uses.
+
+Two gates had to be cleared: nothing maps the bundle's Mach-O (so the tweak
+`dlopen`s it — `dlopen`, not `NSBundle -load`, because nitoTV's binary is
+`MH_DYLIB` while Kodi's is `MH_BUNDLE`), and neither bundle declares the
+`BRAppliance` protocol its `conformsToProtocol:` check requires, fixed with
+`class_addProtocol()`. That last one is honest rather than a trick: both
+bundles really do implement `initWithApplianceInfo:`, the protocol's actual
+requirement. A key translation was also needed — these 2012-2015 bundles
+declare `NSPrincipalClass` and `CFBundleIdentifier`, while this firmware reads
+`FRPrincipalClass` and `FRApplianceIdentifier`.
+
+### 2. MobileSubstrate was installed but completely inactive
+
+The tweak loaded into nothing, and so had every other tweak on the device:
+ten dylibs in `/Library/MobileSubstrate/DynamicLibraries/`, `mobilesubstrate
+0.9.6301` installed per `dpkg -l`, `launchctl getenv DYLD_INSERT_LIBRARIES`
+empty, and `/etc/rc.d/substrate` absent.
+
+Substrate's own package ships an `extrainst_` (a compiled Mach-O, not a
+script) whose strings name `/usr/libexec/substrate`, `/etc/rc.d/substrate`,
+`DYLD_INSERT_LIBRARIES` and `cynject 1 .../SubstrateLauncher.dylib`. The
+vendored dpkg does support `extrainst_`, but the boot-time half never
+materialised here.
+
+`/etc/rc.d/blackb0x-substrate` (main package) establishes it. **That directory
+works on this device for one reason only:** the untether runs it, in the same
+one-liner that brings up sshd —
+
+```
+ls /Library/LaunchDaemons | while read a; do launchctl load /Library/LaunchDaemons/$a; done;
+ls /etc/rc.d             | while read a; do /etc/rc.d/$a; done;
+```
+
+— which also means the file must be **executable**, since those entries are
+exec'd directly rather than fed to a shell. A 644 file there is skipped in
+silence.
+
+It lives in the main package deliberately: this fixes Substrate for *every*
+tweak, and this project installs mobilesubstrate for everyone.
+
+### 3. Icons need BOTH conventions, in both places
+
+`menuIconForAppliance:` asks the image manager first and falls back to the
+resource bundle, and the two disagree about the filename:
+
+| location | naming | owner |
+|---|---|---|
+| `/Applications/AppleTV.app/NewUI/` | underscores — `com_apple_frontrow_appliance_kodi@1080.png` | `root:wheel` |
+| `/var/mobile/Library/Caches/AppleTV/MainMenu/` | dots — `com.apple.frontrow.appliance.kodi@1080.png` | `mobile:mobile` |
+
+`_imageBaseNameFromAppliance:` replaces `.` with `_` for the bundle lookup;
+the cache keys on the raw identifier, read off the device after clearing it
+and rebooting (it repopulated with `com.apple.tv.UTSVideo@1080.png`,
+`com.redbulltv.appletv@1080.png`). Ownership matters because the UI runs as
+`mobile`. Kodi's own postinst aims at the right directory with the right
+convention and still misses, because it writes `@720` — and this device
+reports 1080, with not a single `@720` in that cache.
+
+### 4. A wrong turn, recorded because it was nearly convincing
+
+When Kodi and nitoTV vanished right after the cache-writing version shipped,
+the obvious conclusion was that writing another subsystem's cache had made the
+UI drop them — a tidy story, complete with a mechanism ("an icon it finds and
+cannot use is worse than no icon"). It was wrong. The real cause was a reboot
+in between, which wiped a hand-set `launchctl setenv DYLD_INSERT_LIBRARIES`,
+leaving Substrate inactive so the tweak never loaded at all. The cache write
+was innocent and got reverted for a symptom it had not caused.
+
+The general shape has now recurred several times in this project: a theory
+that explains the symptom, built on strings or on plausible mechanism, dying
+the moment the actual state is measured. The cheap defence is to check the
+enabling condition first — here, one `launchctl getenv`.
+
+### There is no log, and that is its own finding
+
+Both routes are closed. `NSLog` reaches ASL, which ships disabled
+(`ASL_DISABLE=1`, no `-bsd_out`) in a job launchd defines internally and does
+not re-read from disk — surviving a reboot unchanged. Writing our own file
+failed too: the UI runs as `mobile` and cannot create files under root-owned
+`/usr/share/blackb0x`, and it failed silently by design, which made "no log"
+and "never loaded" indistinguishable and cost a debugging round.
+
+`appliancetvtweak/README.md` documents what to check instead, and the calls
+are kept in the source so the failure points stay marked where they occur.
+
+### Both appliances work
+
+Kodi and nitoTV both render on the main menu, with icons. nitoTV briefly
+looked like a failure and was not one: the hand-run test that proved the
+cache path only ever copied *Kodi's* icon into
+`/var/mobile/Library/Caches/AppleTV/MainMenu/`, so nitoTV was simply missing
+a file nobody had written yet. `blackb0x-appliance-icons` iterates every
+`.frappliance` on the device, so the shipped script has no such gap.
+
+Worth noting as a pattern rather than an incident: a manual test that covers
+one of two cases will read as "one case is broken" unless the gap is stated
+out loud. Two of this session's wrong conclusions — this and the cache-write
+revert — came from treating an untested condition as a tested one.

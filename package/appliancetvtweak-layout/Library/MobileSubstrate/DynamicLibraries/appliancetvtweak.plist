@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MobileSubstrate filter for appliancetvtweak.dylib.
+
+  com.apple.lowtide is the Frontrow UI process -- read straight off
+  /Applications/AppleTV.app/Info.plist's own CFBundleIdentifier in the real
+  decrypted 12H1006 rootfs, not guessed from the app's name. Its
+  CFBundleExecutable is "AppleTV", which is why the process shows up as
+  AppleTV in ps while its bundle identifier says lowtide; the two are not
+  interchangeable and Substrate matches on the identifier.
+
+  SCOPED AS NARROWLY AS POSSIBLE ON PURPOSE. A Bundles filter naming exactly
+  one identifier means this dylib is loaded into exactly one process. That
+  matters more than usual here: this tweak hooks a private method and then
+  dlopen()s third-party code from 2010-2015 into whatever it lands in, and the
+  process it targets is the device's only user interface. The tweak's
+  constructor also bails out silently if BRApplianceManager is absent, so a
+  mis-scoped filter would be inert rather than harmful -- but the filter is
+  the first line of defence and should not be widened.
+-->
+<plist version="1.0">
+<dict>
+    <key>Filter</key>
+    <dict>
+        <key>Bundles</key>
+        <array>
+            <string>com.apple.lowtide</string>
+        </array>
+    </dict>
+</dict>
+</plist>

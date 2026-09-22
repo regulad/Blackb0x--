@@ -3084,7 +3084,8 @@ static bool stageBlackb0xPackage(const fs::path& blackb0xRoot, const std::string
                           "/etc/apt/trusted.gpg.d/regulad.gpg", "/etc/apt/trusted.gpg.d/saurik.gpg",
                           "/etc/apt/trusted.gpg.d/awkwardtv.gpg", "/etc/apt/trusted.gpg.d/bigboss.gpg",
                           "/System/Library/LaunchDaemons/xyz.regulad.blackb0x.postinstall.plist",
-                          "/usr/share/blackb0x/postinstall.sh", "/var/root/.profile"}) {
+                          "/usr/share/blackb0x/postinstall.sh", "/var/root/.profile",
+                          "/etc/rc.d/blackb0x-substrate"}) {
         ownedPaths.push_back(p);
     }
     ok &= stageManualDpkgInstall(blackb0xRoot, extracted.stanza, "xyz.regulad.blackb0x", ownedPaths);

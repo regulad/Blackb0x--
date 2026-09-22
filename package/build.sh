@@ -203,7 +203,12 @@ fi
 # files 0644, then the handful of things that must execute.
 find "$STAGING" -type d -exec chmod 755 {} +
 find "$STAGING" -type f -exec chmod 644 {} +
-for f in DEBIAN/postinst DEBIAN/preinst DEBIAN/prerm DEBIAN/postrm usr/share/blackb0x/postinstall.sh; do
+# etc/rc.d/blackb0x-substrate MUST be executable. The untether runs that
+# directory's contents as programs -- `ls /etc/rc.d | while read a;
+# do /etc/rc.d/$a; done` -- not through a shell, so a 644 file there is
+# skipped silently, with no error anywhere to notice.
+for f in DEBIAN/postinst DEBIAN/preinst DEBIAN/prerm DEBIAN/postrm \
+         usr/share/blackb0x/postinstall.sh etc/rc.d/blackb0x-substrate; do
     [ -f "$STAGING/$f" ] && chmod 755 "$STAGING/$f"
 done
 

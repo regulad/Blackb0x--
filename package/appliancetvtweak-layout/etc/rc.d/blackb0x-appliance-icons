@@ -1,0 +1,145 @@
+#!/bin/bash
+# Install main-menu icons for every third-party .frappliance on the device,
+# under the names this firmware actually looks for.
+#
+# WHY A BOOT SCRIPT AND NOT JUST A POSTINST. Appliances and this tweak are
+# installed independently and in any order -- someone can install Kodi or
+# nitoTV long after this package. A postinst-only version silently gave those
+# appliances no icon until this package was reinstalled, which is the kind of
+# "works on my device" behaviour that is impossible to diagnose later. Running
+# every boot makes the icon set converge on whatever is installed, and the work
+# is a handful of stat()s when there is nothing new to do.
+#
+# ORDERING IS DELIBERATE AND FREE. The untether runs this directory with
+# `ls /etc/rc.d | while read a; do /etc/rc.d/$a; done`, i.e. in ASCII order, so
+# blackb0x-appliance-icons runs before blackb0x-substrate -- icons are on disk
+# before that script restarts the Frontrow UI. Renaming either file breaks that
+# relationship silently, so do not.
+#
+# THE NAMING CONVENTION, traced through BRApplianceIconManager in the real
+# AppleTV binary rather than guessed:
+#
+#   -key                        -> the description's FRApplianceIdentifier
+#   _imageBaseNameFromAppliance -> that identifier, "." replaced by "_"
+#                                  (unless it begins with "merchant.")
+#   _imageNameWithBaseName:     -> baseName + "@" + resourceDisplayHeight
+#   menuIconForAppliance:       -> falls back to
+#                                  [primaryResourceBundle urlForImage:base
+#                                                          ofType:@"png"]
+#
+# So com.apple.frontrow.appliance.kodi resolves to
+# com_apple_frontrow_appliance_kodi@720.png (or @1080) inside AppleTV.app's own
+# resource bundle -- NewUI/. Kodi itself ships
+# com.apple.frontrow.appliance.kodi@720p.png at the bundle root, which is wrong
+# three ways at once: dots rather than underscores, "720p" rather than "720",
+# and the wrong directory. Apple's own five appliances confirm the rule: zero
+# matching files at the bundle root, ten in NewUI/.
+#
+# BOTH HEIGHTS, ALWAYS. The fallback hands the BASE name to
+# urlForImage:ofType: and lets the bundle choose the variant by
+# resourceDisplayHeight -- which depends on what the television negotiated and
+# is not knowable here. Installing both costs a few hundred KB and removes the
+# question.
+#
+# plutil is NOT Apple's here. Stock has none at all; this one comes from
+# com.ericasadun.utilities (packages.txt line 11) and has its own CLI --
+# `-key NAME file` recovers a value. It reads both binary and XML property
+# lists, which is required: Kodi's Info.plist is binary and nitoTV's is XML.
+set -e
+
+NEWUI=/Applications/AppleTV.app/NewUI
+APPLIANCES=/Applications/AppleTV.app/Appliances
+MAINMENU_CACHE=/var/mobile/Library/Caches/AppleTV/MainMenu
+
+[ -d "$NEWUI" ] || exit 0
+[ -d "$APPLIANCES" ] || exit 0
+command -v plutil >/dev/null 2>&1 || exit 0
+
+for bundle in "$APPLIANCES"/*.frappliance; do
+    [ -d "$bundle" ] || continue
+    [ -f "$bundle/AppIcon.png" ] || continue
+    [ -f "$bundle/Info.plist" ] || continue
+
+    # FRApplianceIdentifier first -- it is literally the key the icon manager
+    # reads -- with CFBundleIdentifier as the fallback, which is what both
+    # currently-shipped bundles actually carry.
+    ident=$(plutil -key FRApplianceIdentifier "$bundle/Info.plist" 2>/dev/null | tr -d '"\r' | head -n1)
+    case "$ident" in *.*) : ;; *) ident="" ;; esac
+    if [ -z "$ident" ]; then
+        ident=$(plutil -key CFBundleIdentifier "$bundle/Info.plist" 2>/dev/null | tr -d '"\r' | head -n1)
+    fi
+
+    # Validate before using it as a filename. plutil printing an error, a usage
+    # banner, or nothing at all must never become a stray file inside Apple's
+    # own bundle.
+    case "$ident" in
+        *[!A-Za-z0-9._-]* | "" | *..* ) continue ;;
+        *.* ) : ;;
+        * ) continue ;;
+    esac
+
+    base=$(printf '%s' "$ident" | tr '.' '_')
+
+    # TWO DESTINATIONS, TWO CONVENTIONS, AND BOTH ARE REQUIRED. Confirmed on
+    # real hardware: with the underscored files in NewUI AND the dotted files
+    # in the cache, Kodi and nitoTV render with their icons. Either one alone
+    # is not enough.
+    #
+    #   NewUI/     underscores  com_apple_frontrow_appliance_kodi@1080.png  root:wheel
+    #   MainMenu/  dots         com.apple.frontrow.appliance.kodi@1080.png  mobile:mobile
+    #
+    # Why two: menuIconForAppliance: asks [[self imageManager] imageNamed:...]
+    # before falling back to [primaryResourceBundle urlForImage:base
+    # ofType:@"png"], and those two paths disagree about the filename.
+    # _imageBaseNameFromAppliance: replaces "." with "_" for the bundle lookup,
+    # while the image manager's cache keys on the raw identifier -- read off a
+    # real device, where clearing
+    # /var/mobile/Library/Caches/AppleTV/MainMenu/ and rebooting made the UI
+    # repopulate it with com.apple.tv.UTSVideo@1080.png,
+    # com.redbulltv.appletv@1080.png and friends, dots intact.
+    #
+    # OWNERSHIP IS NOT COSMETIC. The UI runs as `mobile` (UserName in
+    # com.apple.frontrow.plist) and owns that cache directory, so cache entries
+    # are chowned to mobile; NewUI lives inside root-owned AppleTV.app and
+    # stays root:wheel.
+    #
+    # A WRONG TURN WORTH RECORDING: an earlier version of this script deleted
+    # the cache entries, on the theory that writing them had made Kodi and
+    # nitoTV vanish from the menu entirely. They had vanished -- but the cause
+    # was a reboot that wiped a hand-set `launchctl setenv
+    # DYLD_INSERT_LIBRARIES`, leaving Substrate inactive so the tweak never
+    # loaded at all. The cache write was innocent, and removing it was the
+    # wrong fix for a symptom that had nothing to do with it. That is also the
+    # reason /etc/rc.d/blackb0x-substrate exists.
+    #
+    # BOTH HEIGHTS, ALWAYS. The bundle fallback hands the BASE name to
+    # urlForImage:ofType: and lets the bundle pick by resourceDisplayHeight,
+    # which depends on what the television negotiated. This device reports
+    # 1080 -- every entry in its cache is @1080, not one @720 -- but that is a
+    # property of the TV, not the firmware, so both are installed.
+    for height in 720 1080; do
+        # The bundle-resource path: underscores, root-owned, inside AppleTV.app.
+        target="$NEWUI/${base}@${height}.png"
+        # Skip when already current: this runs on every boot, and rewriting
+        # identical files each time earns nothing.
+        if [ ! -f "$target" ] || [ "$bundle/AppIcon.png" -nt "$target" ]; then
+            if cp -f "$bundle/AppIcon.png" "$target" 2>/dev/null; then
+                chown root:wheel "$target" 2>/dev/null || true
+                chmod 644 "$target" 2>/dev/null || true
+            fi
+        fi
+
+        # The image-manager cache: dots, owned by mobile like everything else
+        # the UI writes there.
+        [ -d "$MAINMENU_CACHE" ] || continue
+        cached="$MAINMENU_CACHE/${ident}@${height}.png"
+        if [ ! -f "$cached" ] || [ "$bundle/AppIcon.png" -nt "$cached" ]; then
+            if cp -f "$bundle/AppIcon.png" "$cached" 2>/dev/null; then
+                chown mobile:mobile "$cached" 2>/dev/null || true
+                chmod 644 "$cached" 2>/dev/null || true
+            fi
+        fi
+    done
+done
+
+exit 0

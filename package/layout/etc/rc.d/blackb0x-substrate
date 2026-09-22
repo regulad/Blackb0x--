@@ -1,0 +1,90 @@
+#!/bin/bash
+# Activate MobileSubstrate at boot, and restart the Frontrow UI so it is
+# actually injected into.
+#
+# WHY THIS IS NEEDED AT ALL: SUBSTRATE IS INSTALLED BUT NOT ACTIVE.
+#
+# Measured on real hardware. `dpkg -l` reports mobilesubstrate 0.9.6301
+# installed, /Library/MobileSubstrate/DynamicLibraries/ holds ten dylibs, and
+# not one of them had ever been loaded into anything -- our own tweak logged
+# nothing at all even from a constructor that logs unconditionally as its
+# first statement. `launchctl getenv DYLD_INSERT_LIBRARIES` was empty and
+# /etc/rc.d/substrate did not exist.
+#
+# Substrate's own package ships an `extrainst_` (a compiled Mach-O, not a
+# script) whose job is to set this up: its strings name
+# /usr/libexec/substrate, /etc/rc.d/substrate, DYLD_INSERT_LIBRARIES, and
+# `cynject 1 .../SubstrateLauncher.dylib`. The vendored dpkg does support
+# `extrainst_` (the string is in its binary), so it presumably ran -- but the
+# boot-time half never materialised on this device, and a tweak platform that
+# is inert is indistinguishable from a broken tweak. Rather than debug
+# saurik's installer, establish the boot hook ourselves.
+#
+# WHY /etc/rc.d WORKS HERE, WHICH IS NOT OBVIOUS. Nothing on stock iOS runs
+# /etc/rc.d. What runs it is the untether, in the same one-liner that brings
+# up sshd -- read straight out of misc/untether.bin:
+#
+#   ls /Library/LaunchDaemons | while read a; do launchctl load /Library/LaunchDaemons/$a; done;
+#   ls /etc/rc.d             | while read a; do /etc/rc.d/$a; done;
+#
+# So this file runs on every untethered boot, after AMFI has been patched and
+# after /Library/LaunchDaemons has been loaded. That ordering is the reason
+# the UI restart at the end is necessary rather than rude: com.apple.frontrow
+# is RunAtLoad and has already been running since early boot, so it was
+# spawned before any of this existed.
+#
+# NAMED blackb0x-substrate, NOT substrate. If Substrate's own installer ever
+# does create /etc/rc.d/substrate, both will run, which is harmless -- every
+# step below is idempotent -- and neither will have silently overwritten the
+# other's file.
+#
+# WHY THIS SHIPS IN THE MAIN blackb0x PACKAGE rather than alongside the one
+# tweak that needed it first. This fixes MOBILESUBSTRATE, not appliancetvtweak
+# -- an inert Substrate makes every tweak on the device inert, and this project
+# installs mobilesubstrate for everyone (packages.txt line 38) whether or not
+# they ever install a tweak of ours. Shipping the fix with one consumer would
+# have meant that removing that consumer silently broke every other tweak, and
+# that anyone installing a third-party tweak on a blackb0x device hit the same
+# dead end we spent a debugging session on: ten dylibs installed, none of them
+# ever loaded, and nothing anywhere saying why.
+set -e
+
+SUBSTRATE_DYLIB=/Library/MobileSubstrate/MobileSubstrate.dylib
+FRONTROW_PLIST=/System/Library/LaunchDaemons/com.apple.frontrow.plist
+
+[ -e "$SUBSTRATE_DYLIB" ] || exit 0
+
+# Two mechanisms, deliberately. They are not redundant.
+#
+#   1. launchctl setenv is what was VERIFIED to work on this device: set it,
+#      cycle com.apple.frontrow, and tweaks load. It needs no task port and no
+#      cynject.
+#   2. /usr/libexec/substrate is Substrate's OWN bootstrap -- a one-line
+#      script that runs `cynject 1 .../SubstrateLauncher.dylib`, injecting the
+#      launcher into launchd itself. It is the supported path and does more
+#      than the environment variable does, but it depends on cynject being
+#      able to take pid 1's task port, which is unverified here.
+#
+# So: do the one that is known to work, then attempt the official one and do
+# not care if it fails. `|| true` on the second is the whole point.
+launchctl setenv DYLD_INSERT_LIBRARIES "$SUBSTRATE_DYLIB" || true
+[ -x /usr/libexec/substrate ] && /usr/libexec/substrate >/dev/null 2>&1 || true
+
+# Restart the UI so it is spawned with the environment set above.
+#
+# unload+load rather than `killall AppleTV`: a KeepAlive job that is killed is
+# respawned by launchd from the job definition it already holds, and this
+# project has now been bitten twice by launchd serving a stale in-memory
+# definition (see docs/HISTORY.md on com.apple.syslogd). Re-registering the
+# job is what actually makes it pick up the domain environment.
+#
+# Safe to cycle: com.apple.frontrow is RunAtLoad + KeepAlive, so it comes back
+# on its own. If it does not, the device shows nothing and SSH is the only way
+# in -- which is exactly why the load is unconditional and not guarded behind
+# the unload's exit status.
+if [ -f "$FRONTROW_PLIST" ]; then
+    launchctl unload "$FRONTROW_PLIST" >/dev/null 2>&1 || true
+    launchctl load "$FRONTROW_PLIST" >/dev/null 2>&1 || true
+fi
+
+exit 0

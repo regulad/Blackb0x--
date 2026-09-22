@@ -1,0 +1,10 @@
+Package: xyz.regulad.blackb0x.appliancetvtweak
+Name: blackb0x appliance loader
+Version: __BLACKB0X_VERSION__
+Architecture: iphoneos-arm
+Description: Restores third-party Frontrow appliance loading, so Kodi and nitoTV appear on the Apple TV main menu on firmware whose AppleTV.app no longer scans /Applications/AppleTV.app/Appliances at all.
+Maintainer: regulad <parkeredwardwahle2017@gmail.com>
+Author: regulad <parkeredwardwahle2017@gmail.com>
+Section: System
+Depends: firmware (>= 7.0), mobilesubstrate, com.ericasadun.utilities
+Tag: role::hacker

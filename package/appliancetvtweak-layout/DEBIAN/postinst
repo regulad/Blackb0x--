@@ -1,0 +1,37 @@
+#!/bin/sh
+# Bootstrap the two boot-time scripts so a hand-install behaves like a reboot.
+#
+# Everything this package needs done at runtime happens in /etc/rc.d, which the
+# untether runs on every untethered boot (`ls /etc/rc.d | while read a;
+# do /etc/rc.d/$a; done`, straight out of misc/untether.bin). This script exists
+# only so that installing the package on an already-booted device does not have
+# to wait for the next one.
+#
+# Keep it that way: trivial, idempotent, and side-effect-free where it does not
+# apply. bakeRamdisk() stages this package by writing its dpkg status stanza
+# directly rather than running dpkg, so this never executes at bake time at
+# all -- anything that genuinely must happen at install time cannot live here.
+# And do NOT add a preinst: that runs during `dpkg --unpack`, which the baker
+# cannot strip after the fact.
+set -e
+
+# Icons first, substrate second -- the same order the untether will run them
+# in (ASCII order), and the order that matters: the icons want to be on disk
+# before the substrate script restarts the Frontrow UI.
+if [ -x /etc/rc.d/blackb0x-appliance-icons ]; then
+    /etc/rc.d/blackb0x-appliance-icons || true
+fi
+
+# Ships in the main xyz.regulad.blackb0x package, not this one -- it fixes
+# MobileSubstrate for every tweak on the device, not just this one. Guarded
+# rather than depended on, so this package still installs sanely on a device
+# where the main package is older than that change.
+if [ -x /etc/rc.d/blackb0x-substrate ]; then
+    /etc/rc.d/blackb0x-substrate || true
+elif command -v killall >/dev/null 2>&1; then
+    # Fallback only. Without Substrate active this achieves nothing, but it
+    # costs nothing either and keeps the no-rc.d case behaving sanely.
+    killall AppleTV 2>/dev/null || true
+fi
+
+exit 0

@@ -120,3 +120,37 @@ firmware-sbin
 rtadvd
 pam
 pam-modules
+
+# --- unsatisfiable at bake time because MobileSubstrate is not there ------
+#
+# xyz.regulad.blackb0x.appliancetvtweak is this project's own package, built
+# at bake time by package/build_appliancetvtweak.sh, and it is the first one
+# to land in the same position `cydia` has always been in: its Depends: names
+# something the bootstrap container has no version of at all.
+#
+# Its dependency is `mobilesubstrate`, and that is not incidental. The package
+# ships exactly two files -- a dylib and its Substrate filter plist -- into
+# /Library/MobileSubstrate/DynamicLibraries/. Nothing there means anything
+# until MobileSubstrate itself is installed and injecting; the dylib links
+# /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate and would not
+# even load without it. Bake-time-installing it would mark a package
+# "installed" whose entire function is inert, against a dependency dpkg would
+# correctly report as unmet.
+#
+# So it is NOT staged the way xyz.regulad.blackb0x and
+# xyz.regulad.blackb0x.cainjector are (payload merged + a real status stanza
+# written by stageManualDpkgInstall()). BakeRamdisk.cpp's
+# stageAppliancetvtweakPackage() instead drops the built .deb straight into
+# the on-device apt archive cache and stops there, and postinstall.sh's
+# existing `dpkg -i` fallback installs it on the device -- after
+# `apt-get install "${PACKAGES[@]}"` has put mobilesubstrate in place, which
+# is what makes the dependency real rather than a lie. See that function's own
+# comment for why the two staging shapes cannot both apply to one package.
+#
+# Listing it here is therefore belt-and-suspenders in the same sense the
+# etasonuntether/p0sixspwn entries above are: nothing currently routes this
+# package through computePreinstallEligibleFilenames() at all, because it is
+# not in debcache/ and never resolves through apt at bake time. The entry
+# exists so that if it ever does reach that pass, the answer is already
+# written down instead of rediscovered on hardware.
+xyz.regulad.blackb0x.appliancetvtweak

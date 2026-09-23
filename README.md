@@ -34,7 +34,11 @@ Supported devices:
 **Tip:** if `blackb0x-pwn` is unreliable over a direct USB-C connection, put a plain
 (non-Thunderbolt) USB hub between the Mac and the Apple TV.
 
-Please star this project if it helped you.
+Please star this project if it helped you. Some other tweaks have been developed in tandem with this jailbreak and are available on the built-in repository, you can find them below.
+
+```
+tailscale
+```
 
 ## Requirements
 

@@ -1,0 +1,10 @@
+Package: xyz.regulad.blackb0x.icanhasrez
+Name: blackb0x resolution unlock
+Version: __BLACKB0X_VERSION__
+Architecture: iphoneos-arm
+Description: Lets Settings offer the television's own native resolution. QuartzCore decides whether a (width, height) pair can be a display mode at all from a hardcoded list of ten, so a panel whose native timing is not on it -- 1360x768, for one -- can never be driven natively. Its own "this is the panel's size" escape clause is never reached because the display's native-size fields are left empty; this fills them in from the EDID's preferred timing and lets Apple's stock code do the rest.
+Maintainer: regulad <regulad@regulad.xyz>
+Author: regulad <regulad@regulad.xyz>
+Section: System
+Depends: firmware (>= 7.0), mobilesubstrate
+Tag: role::hacker

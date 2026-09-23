@@ -7577,7 +7577,7 @@ failed too: the UI runs as `mobile` and cannot create files under root-owned
 `/usr/share/blackb0x`, and it failed silently by design, which made "no log"
 and "never loaded" indistinguishable and cost a debugging round.
 
-`appliancetvtweak/README.md` documents what to check instead, and the calls
+`tweaks/appliancetvtweak/README.md` documents what to check instead, and the calls
 are kept in the source so the failure points stay marked where they occur.
 
 ### Both appliances work

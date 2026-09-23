@@ -1,0 +1,43 @@
+#!/bin/sh
+# Make a hand-install behave like a reboot.
+#
+# MobileSubstrate only affects processes started AFTER it is active, and this
+# tweak targets backboardd, which is already running -- it starts at boot and
+# stays up. So installing the package changes nothing visible until backboardd
+# is restarted, and the new resolution does not appear in Settings until the
+# mode list is enumerated again, which is exactly what that restart causes.
+#
+# Keep this trivial, idempotent, and side-effect-free where it does not apply,
+# the same as tweaks/appliancetvtweak/layout/DEBIAN/postinst. bakeRamdisk()
+# stages this package by dropping its .deb into the on-device apt archive
+# cache rather than running dpkg, so this never executes at bake time at all
+# -- anything that genuinely must happen at install time cannot live here.
+# And do NOT add a preinst: that runs during `dpkg --unpack`, which the baker
+# cannot strip after the fact.
+set -e
+
+# Ships in the main xyz.regulad.blackb0x package, not this one -- it fixes
+# MobileSubstrate's DYLD_INSERT_LIBRARIES for every tweak on the device rather
+# than just this one. Guarded rather than depended on, so this package still
+# installs sanely where the main package is older than that change.
+if [ -x /etc/rc.d/blackb0x-substrate ]; then
+    /etc/rc.d/blackb0x-substrate || true
+fi
+
+# Restart the render server so the dylib is actually injected and the mode
+# list is rebuilt.
+#
+# backboardd, NOT AppleTV, and that difference is the whole reason this file
+# is not a copy of appliancetvtweak's. appliancetvtweak hooks BackRow classes
+# that live in the UI process, so restarting AppleTV is what it needs.
+# icanhasrez hooks QuartzCore's resolution table, which is consulted in the
+# render server; restarting the UI would reinject nothing and rebuild nothing.
+#
+# com.apple.backboardd carries KeepAlive, so launchd brings it straight back.
+# The UI follows it down and back up, which looks like a respring and is the
+# expected, and only, visible effect of installing this.
+if command -v killall >/dev/null 2>&1; then
+    killall backboardd 2>/dev/null || true
+fi
+
+exit 0

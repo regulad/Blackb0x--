@@ -210,6 +210,30 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   to gpgv. The `.list` files that used to live here are in `package/layout/`
   now. See `misc/README.md` — at 51KB it is the reverse-engineering writeup,
   not a directory index.
+- `tweaks/` — the MobileSubstrate tweaks, one **self-contained** directory
+  each: source, `Makefile`, `layout/` (the `.deb`'s literal on-device file
+  tree) and its own `build.sh`. Nothing about a tweak lives outside its own
+  directory, so adding or moving one touches no shared path. Every one is
+  built by the same pinned-Xcode recipe `entrypoint/` uses. Both currently here are
+  `Depends: mobilesubstrate`, which is why neither is bake-time-installed:
+  they are on `misc/prebake_package_blacklist.txt` and staged as `.deb`s into
+  the on-device apt archive cache, for `postinstall.sh`'s `dpkg -i` fallback
+  to install after apt has made that dependency real. Each carries a README
+  with the reverse-engineering behind it.
+  - `appliancetvtweak/` — puts Kodi and nitoTV back on the main menu, by
+    hooking `-[BRApplianceManager _loadAppliances]` in **com.apple.lowtide**.
+    This firmware deleted the `.frappliance` directory scan entirely.
+  - `icanhasrez/` — lets Settings offer the television's own native
+    resolution, by hooking one function in QuartzCore from **backboardd**.
+    That function gates every `(width, height)` pair against a hardcoded list
+    of ten, so a panel whose native timing is not on it (1360x768, say) can
+    never be driven natively. It has an escape clause for "the display's own
+    native size" that never fires because those fields are left empty; the
+    tweak fills them in from the EDID's preferred timing and patches nothing.
+  **The two hook different processes and that is load-bearing**, not
+  incidental: the resolution list is enumerated in the render server, and an
+  earlier build that hooked it in the UI installed cleanly and never fired.
+  Each tweak's Substrate filter names exactly the one process it needs.
 - `third_party/` — every vendored dependency (see table below).
 - `docs/HISTORY.md` — the full debugging/decision log.
 

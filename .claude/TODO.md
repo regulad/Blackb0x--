@@ -1556,7 +1556,7 @@ keys, and Apple's own `Computers.appliance` etc. remain in the bundle as
 now-unread plists in exactly that shape. So the mechanism can be driven
 from outside.
 
-In progress: `appliancetvtweak/`, a MobileSubstrate tweak that hooks
+In progress: `tweaks/appliancetvtweak/`, a MobileSubstrate tweak that hooks
 `_loadAppliances`, `dlopen`s each `.frappliance`, adds the `BRAppliance`
 protocol at runtime (neither bundle declares it, which is the second gate —
 both already implement `initWithApplianceInfo:`), and feeds the result back

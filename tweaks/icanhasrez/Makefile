@@ -1,8 +1,9 @@
-# appliancetvtweak -- a MobileSubstrate tweak, built with the same pinned,
+# icanhasrez -- a MobileSubstrate tweak, built with the same pinned,
 # era-matched Xcode toolchain entrypoint/ and cainjector/ use.
 #
-# THIS IS A DELIBERATE COPY of cainjector/Makefile's toolchain discovery,
-# which is itself a copy of entrypoint/Makefile's. entrypoint/Makefile is the
+# THIS IS A DELIBERATE COPY of tweaks/appliancetvtweak/Makefile, which is a copy of
+# cainjector/Makefile's toolchain discovery, which is itself a copy of
+# entrypoint/Makefile's. Four copies now. entrypoint/Makefile is the
 # canonical copy and carries the full reasoning; the short form is that
 # Apple's current `ld` never implemented 32-bit ARM (it detects armv7 and
 # delegates to the deprecated `ld-classic`), and that the Xcode/SDK pairing is
@@ -25,8 +26,8 @@
 # else. That split is unchanged here.
 #
 # WHY NOT LOGOS either: logos.pl does exist ($THEOS/bin/logos.pl) and would
-# work, but it adds a Perl preprocessing pass between source and compiler for
-# a tweak with exactly ONE hook. MSHookMessageEx against substrate.h is the
+# work, but this tweak has no Objective-C hooks at all -- MSHookFunction
+# against a C function is not something Logos generates. MSHookMessageEx against substrate.h is the
 # same thing Logos generates, minus the generator -- and it keeps this
 # Makefile's relationship to its source the same plain `clang in, Mach-O out`
 # that entrypoint/ and cainjector/ have.
@@ -58,7 +59,7 @@ DEVICE ?=
 ifneq ($(strip $(DEVICE)),)
 XCODE_VERSION ?= $(XCODE_FOR_$(strip $(DEVICE)))
 ifeq ($(strip $(XCODE_VERSION)),)
-$(error appliancetvtweak: no pinned Xcode is mapped for DEVICE=$(DEVICE). Add an XCODE_FOR_$(DEVICE) line, or pass XCODE_VERSION= explicitly)
+$(error icanhasrez: no pinned Xcode is mapped for DEVICE=$(DEVICE). Add an XCODE_FOR_$(DEVICE) line, or pass XCODE_VERSION= explicitly)
 endif
 endif
 XCODE_VERSION ?= 6.4
@@ -68,14 +69,14 @@ IOS_MIN_FOR_5.1.1 := 7.1
 
 IOS_MIN ?= $(IOS_MIN_FOR_$(strip $(XCODE_VERSION)))
 ifeq ($(strip $(IOS_MIN)),)
-$(error appliancetvtweak: no iPhoneOS SDK version is mapped for XCODE_VERSION=$(XCODE_VERSION). Add an IOS_MIN_FOR_$(XCODE_VERSION) line, or pass IOS_MIN= explicitly)
+$(error icanhasrez: no iPhoneOS SDK version is mapped for XCODE_VERSION=$(XCODE_VERSION). Add an IOS_MIN_FOR_$(XCODE_VERSION) line, or pass IOS_MIN= explicitly)
 endif
 
 IPHONEOS_SDK ?=
 
 # Where the vendored Substrate deb lives, and where its framework gets
 # unpacked for the build. Overridable so CI can hand over a pre-unpacked one.
-DEBCACHE_DIR ?= $(CURDIR)/../debcache
+DEBCACHE_DIR ?= $(CURDIR)/../../debcache
 SUBSTRATE_DEB ?= $(firstword $(wildcard $(DEBCACHE_DIR)/mobilesubstrate_*.deb))
 SUBSTRATE_DIR := $(CURDIR)/.substrate
 
@@ -97,7 +98,7 @@ CFLAGS := -arch armv7 -marm -fno-stack-protector -Wall -Wextra -O2 \
 # dlopens the file by path) but a dylib with a wrong install name is the kind
 # of thing that goes wrong much later and much less legibly.
 LDFLAGS := -dynamiclib -nostdlib \
-           -install_name /Library/MobileSubstrate/DynamicLibraries/appliancetvtweak.dylib
+           -install_name /Library/MobileSubstrate/DynamicLibraries/icanhasrez.dylib
 
 TWEAK_DYLIBS := \
 	usr/lib/libSystem.B.dylib \
@@ -105,9 +106,9 @@ TWEAK_DYLIBS := \
 	System/Library/Frameworks/CoreFoundation.framework/CoreFoundation \
 	System/Library/Frameworks/Foundation.framework/Foundation
 
-TWEAK_IDENTIFIER := xyz.regulad.blackb0x.appliancetvtweak
+TWEAK_IDENTIFIER := xyz.regulad.blackb0x.icanhasrez
 
-TARGET := appliancetvtweak.dylib
+TARGET := icanhasrez.dylib
 
 define tweak_compile
 set -e; \
@@ -122,7 +123,7 @@ cleanup() { \
 	if [ -n "$$mounted" ]; then \
 		hdiutil detach -quiet "$$mounted" >/dev/null 2>&1 \
 			|| hdiutil detach -quiet -force "$$mounted" >/dev/null 2>&1 \
-			|| echo "appliancetvtweak: warning: could not detach $$mounted" >&2; \
+			|| echo "icanhasrez: warning: could not detach $$mounted" >&2; \
 		rmdir "$$mounted" >/dev/null 2>&1 || true; \
 		mounted=''; \
 	fi; \
@@ -156,7 +157,7 @@ version_ok() { \
 	return 0; \
 }; \
 if [ "$$xt" = system ]; then \
-	echo "appliancetvtweak: XCODE_TOOLCHAIN=system -- building with the stock $(CC), pin bypassed"; \
+	echo "icanhasrez: XCODE_TOOLCHAIN=system -- building with the stock $(CC), pin bypassed"; \
 elif [ "$$xt" = auto ]; then \
 	for c in "$$sd/Xcode_$$xv.app" "$$sd/Xcode-$$xv.app" "$$sd/Xcode_$$xv" "$$sd/xcode_$$xv" \
 	         "/Volumes/Xcode_$$xv" "/Volumes/Xcode-$$xv" "/Volumes/Xcode"; do \
@@ -168,7 +169,7 @@ elif [ "$$xt" = auto ]; then \
 		for d in "$$sd/Xcode_$$xv.dmg" "$$sd/xcode_$$xv.dmg" "$$sd/Xcode-$$xv.dmg"; do \
 			[ -f "$$d" ] || continue; \
 			mounted=`mktemp -d "$${TMPDIR:-/tmp}/blackb0x-tweak-xcode-XXXXXX"`; \
-			echo "appliancetvtweak: attaching $$d read-only"; \
+			echo "icanhasrez: attaching $$d read-only"; \
 			if ! yes | PAGER=cat hdiutil attach -quiet -nobrowse -readonly -noverify -noautoopen \
 			     -mountpoint "$$mounted" "$$d" >/dev/null 2>&1; then \
 				rmdir "$$mounted" >/dev/null 2>&1 || true; mounted=''; continue; \
@@ -181,7 +182,7 @@ elif [ "$$xt" = auto ]; then \
 	fi; \
 	if [ -z "$$tcbin" ]; then \
 		echo "" >&2; \
-		echo "appliancetvtweak: FATAL -- no pinned Xcode $$xv found, and there is no fallback." >&2; \
+		echo "icanhasrez: FATAL -- no pinned Xcode $$xv found, and there is no fallback." >&2; \
 		echo "  Searched \$$XCODE_SEARCH_DIR = $$sd for Xcode_$$xv.app / Xcode_$$xv.dmg," >&2; \
 		echo "  and already-mounted /Volumes/Xcode_$$xv." >&2; \
 		echo "  Same requirement and same fixes as entrypoint/ -- see entrypoint/README.md." >&2; \
@@ -190,7 +191,7 @@ elif [ "$$xt" = auto ]; then \
 	fi; \
 else \
 	tcbin=`resolve "$$xt"` || { \
-		echo "appliancetvtweak: FATAL -- XCODE_TOOLCHAIN=$$xt is not a usable toolchain." >&2; \
+		echo "icanhasrez: FATAL -- XCODE_TOOLCHAIN=$$xt is not a usable toolchain." >&2; \
 		echo "  NOT falling back to the system compiler." >&2; \
 		exit 1; \
 	}; \
@@ -199,7 +200,7 @@ fi; \
 if [ -z "$$sdk" ] && [ -n "$$tcroot" ]; then sdk=`resolve_sdk "$$tcroot"` || sdk=''; fi; \
 if [ -z "$$sdk" ]; then \
 	echo "" >&2; \
-	echo "appliancetvtweak: FATAL -- no iPhoneOS $$iv SDK found, and this build needs one." >&2; \
+	echo "icanhasrez: FATAL -- no iPhoneOS $$iv SDK found, and this build needs one." >&2; \
 	echo "  A current Xcode's iPhoneOS.sdk is arm64e-only; there is nothing in it to" >&2; \
 	echo "  link an armv7 dylib against. Fix: make IPHONEOS_SDK=<path to iPhoneOS$$iv.sdk>" >&2; \
 	echo "" >&2; \
@@ -208,22 +209,22 @@ fi; \
 libs=''; \
 for l in $(TWEAK_DYLIBS); do \
 	[ -f "$$sdk/$$l" ] || { \
-		echo "appliancetvtweak: FATAL -- $$sdk has no $$l." >&2; \
+		echo "icanhasrez: FATAL -- $$sdk has no $$l." >&2; \
 		exit 1; \
 	}; \
 	libs="$$libs $$sdk/$$l"; \
 done; \
 subbin='$(SUBSTRATE_DIR)/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate'; \
 subinc='$(SUBSTRATE_DIR)/Library/Frameworks/CydiaSubstrate.framework/Headers'; \
-[ -f "$$subbin" ] || { echo "appliancetvtweak: FATAL -- no CydiaSubstrate at $$subbin" >&2; exit 1; }; \
+[ -f "$$subbin" ] || { echo "icanhasrez: FATAL -- no CydiaSubstrate at $$subbin" >&2; exit 1; }; \
 if [ -n "$$tcbin" ]; then \
-	echo "appliancetvtweak: pinned toolchain $$tcbin"; \
-	echo "appliancetvtweak: SDK $$sdk (-miphoneos-version-min=$$iv)"; \
+	echo "icanhasrez: pinned toolchain $$tcbin"; \
+	echo "icanhasrez: SDK $$sdk (-miphoneos-version-min=$$iv)"; \
 	set -x; \
 	"$$tcbin/clang" -B"$$tcbin" $(CFLAGS) -isysroot "$$sdk" -I"$$subinc" $(LDFLAGS) \
 		-o '$@' '$<' $$libs "$$subbin"; \
 else \
-	echo "appliancetvtweak: SDK $$sdk (-miphoneos-version-min=$$iv)"; \
+	echo "icanhasrez: SDK $$sdk (-miphoneos-version-min=$$iv)"; \
 	set -x; \
 	$(CC) $(CFLAGS) -isysroot "$$sdk" -I"$$subinc" $(LDFLAGS) \
 		-o '$@' '$<' $$libs "$$subbin"; \
@@ -240,7 +241,7 @@ all: $(TARGET)
 # ecosystem includes.
 $(SUBSTRATE_DIR)/.stamp:
 	@[ -n "$(SUBSTRATE_DEB)" ] || { \
-		echo "appliancetvtweak: FATAL -- no mobilesubstrate_*.deb in $(DEBCACHE_DIR)" >&2; \
+		echo "icanhasrez: FATAL -- no mobilesubstrate_*.deb in $(DEBCACHE_DIR)" >&2; \
 		exit 1; }
 	@rm -rf $(SUBSTRATE_DIR)
 	@mkdir -p $(SUBSTRATE_DIR)
@@ -251,7 +252,7 @@ $(SUBSTRATE_DIR)/.stamp:
 
 substrate: $(SUBSTRATE_DIR)/.stamp
 
-$(TARGET): appliancetvtweak.m $(SUBSTRATE_DIR)/.stamp
+$(TARGET): icanhasrez.m $(SUBSTRATE_DIR)/.stamp
 	@$(tweak_compile)
 	$(LDID) -S -I$(TWEAK_IDENTIFIER) $@
 

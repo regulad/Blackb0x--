@@ -1,12 +1,12 @@
 #!/bin/sh
 # Build the xyz.regulad.blackb0x.appliancetvtweak .deb with Theos's dm.pl.
 #
-# Usage: package/build_appliancetvtweak.sh <output.deb> [version]
+# Usage: tweaks/appliancetvtweak/build.sh <output.deb> [version]
 #
 # Environment:
 #   THEOS               Theos checkout (default $HOME/theos).
 #   TWEAK_DYLIB         prebuilt appliancetvtweak.dylib (default: build it).
-#   XCODE_TOOLCHAIN     passed through to appliancetvtweak/Makefile.
+#   XCODE_TOOLCHAIN     passed through to this tweak's Makefile.
 #   XCODE_SEARCH_DIR    likewise.
 #
 # Mirrors package/build_cainjector.sh exactly -- same dm.pl invocation, same
@@ -17,12 +17,15 @@
 # The split that applies to both: Theos supplies the PACKAGING half (dm.pl,
 # plain Perl, no SDK), and a pinned era-matched Xcode supplies the COMPILATION
 # half. Theos's own SDKs are arm64-only and cannot build either artifact. See
-# appliancetvtweak/Makefile's header for why Logos is not used either.
+# this tweak's Makefile header for why Logos is not used either.
 set -eu
 
 THEOS_DIR="${THEOS:-$HOME/theos}"
+# Everything this script needs is beside it -- the Makefile, the dylib it
+# builds and layout/ -- so there is no repo-root variable at all any more.
+# That is the point of the tweak owning its own build: moving the directory
+# moves the whole thing, and nothing outside it has a path to fix.
 HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(cd "$HERE/.." && pwd)
 
 if [ "$#" -lt 1 ]; then
     echo "usage: $0 <output.deb> [version]" >&2
@@ -38,7 +41,7 @@ if [ ! -x "$THEOS_DIR/bin/dm.pl" ]; then
     exit 1
 fi
 
-LAYOUT="$REPO/package/appliancetvtweak-layout"
+LAYOUT="$HERE/layout"
 [ -f "$LAYOUT/DEBIAN/control" ] || { echo "$0: missing $LAYOUT/DEBIAN/control" >&2; exit 1; }
 
 STAGING=$(mktemp -d "${TMPDIR:-/tmp}/blackb0x-appliancetvtweak-stage-XXXXXX")
@@ -51,8 +54,8 @@ if [ -n "${TWEAK_DYLIB:-}" ]; then
     [ -f "$TWEAK_DYLIB" ] || { echo "$0: TWEAK_DYLIB=$TWEAK_DYLIB does not exist" >&2; exit 1; }
     DYLIB="$TWEAK_DYLIB"
 else
-    make -C "$REPO/appliancetvtweak" >&2
-    DYLIB="$REPO/appliancetvtweak/appliancetvtweak.dylib"
+    make -C "$HERE" >&2
+    DYLIB="$HERE/appliancetvtweak.dylib"
 fi
 
 # Refuse to package something that is not what it claims to be. A tweak built
@@ -64,7 +67,7 @@ case "$(file -b "$DYLIB")" in
     *) echo "$0: $DYLIB is not an armv7 Mach-O dylib ($(file -b "$DYLIB"))" >&2; exit 1 ;;
 esac
 if ! codesign -dv "$DYLIB" >/dev/null 2>&1; then
-    echo "$0: $DYLIB carries no code signature -- appliancetvtweak/Makefile signs with ldid; is ldid installed?" >&2
+    echo "$0: $DYLIB carries no code signature -- this tweak's Makefile signs with ldid; is ldid installed?" >&2
     exit 1
 fi
 

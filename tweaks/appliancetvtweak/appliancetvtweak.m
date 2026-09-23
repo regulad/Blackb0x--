@@ -62,7 +62,7 @@
  * SAFETY POSTURE. This runs inside com.apple.lowtide, which is the device's
  * ONLY user interface. A crash here is a television that shows nothing at
  * all, with no way in but SSH. Every step below is therefore individually
- * guarded and every failure is a logged skip rather than an abort -- one
+ * guarded and every failure is a silent skip rather than an abort -- one
  * broken bundle must never take the menu down with it, and a tweak that
  * silently does nothing is enormously preferable to one that panics lowtide.
  */
@@ -72,28 +72,6 @@
 #import <objc/message.h>
 #import <dlfcn.h>
 #import <substrate.h>
-
-/* THERE IS NO WORKING LOG ON THIS PLATFORM, AND BOTH OPTIONS WERE TRIED.
- *
- * NSLog goes to ASL, and ASL ships DISABLED: Apple's own
- * com.apple.syslogd job carries `EnvironmentVariables = { ASL_DISABLE = 1 }`
- * and no `-bsd_out`, so syslogd neither stores messages nor reads
- * /etc/syslog.conf. Editing the on-disk plist does nothing either -- launchd
- * defines that job internally and the change does not survive, not even a
- * reboot (see docs/HISTORY.md, "ASL is disabled on this firmware").
- *
- * The obvious answer, writing our own file, was implemented and then removed:
- * the UI runs as `mobile` (UserName in com.apple.frontrow.plist) and cannot
- * create a file under root-owned /usr/share/blackb0x. It failed silently by
- * design -- logging must never break the menu -- which made "no log file" and
- * "tweak never loaded" indistinguishable, and cost a debugging round.
- *
- * So the calls below go to NSLog and, today, nowhere. They are kept rather
- * than deleted because they document every failure point in the load path at
- * the exact spot it can fail, and because a future logging route is then one
- * line here instead of a rewrite. A mobile-writable path (somewhere under
- * /var/mobile) is the obvious candidate if this is ever needed again. */
-#define ATVT_LOG(fmt, ...) NSLog(@"[appliancetvtweak] " fmt, ##__VA_ARGS__)
 
 static NSString * const kAppliancesDir = @"/Applications/AppleTV.app/Appliances";
 
@@ -120,7 +98,6 @@ static NSDictionary *descriptionForBundle(NSString *bundlePath, NSDictionary *in
         principal = [info objectForKey:@"NSPrincipalClass"];
     }
     if (![principal isKindOfClass:[NSString class]] || [principal length] == 0) {
-        ATVT_LOG(@"%@: no FRPrincipalClass or NSPrincipalClass -- skipping", bundlePath);
         return nil;
     }
     [desc setObject:principal forKey:@"FRPrincipalClass"];
@@ -133,7 +110,6 @@ static NSDictionary *descriptionForBundle(NSString *bundlePath, NSDictionary *in
         identifier = [info objectForKey:@"CFBundleIdentifier"];
     }
     if (![identifier isKindOfClass:[NSString class]] || [identifier length] == 0) {
-        ATVT_LOG(@"%@: no usable appliance identifier -- skipping", bundlePath);
         return nil;
     }
     [desc setObject:identifier forKey:@"FRApplianceIdentifier"];
@@ -153,7 +129,6 @@ static NSDictionary *descriptionForBundle(NSString *bundlePath, NSDictionary *in
             fallback = [[bundlePath lastPathComponent] stringByDeletingPathExtension];
         }
         [desc setObject:fallback forKey:@"FRApplianceName"];
-        ATVT_LOG(@"%@: no name key in Info.plist, using '%@'", bundlePath, fallback);
     }
 
     /* Both bundles already set FRHideIfNoCategories=false, which is the only
@@ -168,7 +143,7 @@ static NSDictionary *descriptionForBundle(NSString *bundlePath, NSDictionary *in
 }
 
 /* Map the bundle's Mach-O and make its principal class satisfy <BRAppliance>.
- * Returns the class, or Nil (having logged why) on any failure. */
+ * Returns the class, or Nil on any failure. */
 static Class loadPrincipalClass(NSString *bundlePath, NSDictionary *desc, NSDictionary *info) {
     NSString *principal = [desc objectForKey:@"FRPrincipalClass"];
 
@@ -184,7 +159,6 @@ static Class loadPrincipalClass(NSString *bundlePath, NSDictionary *desc, NSDict
         NSString *binPath = [bundlePath stringByAppendingPathComponent:exec];
 
         if (![[NSFileManager defaultManager] fileExistsAtPath:binPath]) {
-            ATVT_LOG(@"%@: no executable at %@ -- skipping", bundlePath, binPath);
             return Nil;
         }
 
@@ -193,14 +167,11 @@ static Class loadPrincipalClass(NSString *bundlePath, NSDictionary *desc, NSDict
          * actually call must not abort the load of the whole image. */
         void *handle = dlopen([binPath fileSystemRepresentation], RTLD_LAZY | RTLD_GLOBAL);
         if (handle == NULL) {
-            ATVT_LOG(@"%@: dlopen failed: %s", bundlePath, dlerror());
             return Nil;
         }
 
         cls = NSClassFromString(principal);
         if (cls == Nil) {
-            ATVT_LOG(@"%@: dlopen succeeded but class '%@' is still not registered "
-                     @"-- wrong principal class name?", bundlePath, principal);
             return Nil;
         }
     }
@@ -212,24 +183,19 @@ static Class loadPrincipalClass(NSString *bundlePath, NSDictionary *desc, NSDict
      * compares against. */
     Protocol *brAppliance = objc_getProtocol("BRAppliance");
     if (brAppliance == NULL) {
-        ATVT_LOG(@"BRAppliance protocol not found in this process -- is this really lowtide?");
         return Nil;
     }
 
     if (!class_conformsToProtocol(cls, brAppliance)) {
         if (!class_addProtocol(cls, brAppliance)) {
-            ATVT_LOG(@"%@: class_addProtocol(BRAppliance) failed on %@", bundlePath, principal);
             return Nil;
         }
-        ATVT_LOG(@"%@: added <BRAppliance> to %@", bundlePath, principal);
     }
 
     /* The protocol's real requirement. If this is missing, conformsToProtocol:
      * would pass because we just made it, and then the loader would crash on
      * an unrecognized selector -- inside the only UI process on the device. */
     if (![cls instancesRespondToSelector:@selector(initWithApplianceInfo:)]) {
-        ATVT_LOG(@"%@: %@ does not implement initWithApplianceInfo: -- refusing to load it",
-                 bundlePath, principal);
         return Nil;
     }
 
@@ -241,45 +207,35 @@ static void injectAppliances(id manager) {
 
     BOOL isDir = NO;
     if (![fm fileExistsAtPath:kAppliancesDir isDirectory:&isDir] || !isDir) {
-        ATVT_LOG(@"%@ does not exist -- nothing to inject", kAppliancesDir);
         return;
     }
 
-    NSError *err = nil;
-    NSArray *entries = [fm contentsOfDirectoryAtPath:kAppliancesDir error:&err];
+    NSArray *entries = [fm contentsOfDirectoryAtPath:kAppliancesDir error:NULL];
     if (entries == nil) {
-        ATVT_LOG(@"cannot list %@: %@", kAppliancesDir, err);
         return;
     }
 
     Class applianceInfoClass = NSClassFromString(@"BRApplianceInfo");
     if (applianceInfoClass == Nil) {
-        ATVT_LOG(@"BRApplianceInfo not found -- wrong process, doing nothing");
         return;
     }
     SEL infoSel = @selector(infoForApplianceDescription:);
     if (![applianceInfoClass respondsToSelector:infoSel]) {
-        ATVT_LOG(@"+[BRApplianceInfo infoForApplianceDescription:] missing -- firmware changed?");
         return;
     }
     SEL loadSel = @selector(_loadApplianceWithInfo:);
     if (![manager respondsToSelector:loadSel]) {
-        ATVT_LOG(@"-[BRApplianceManager _loadApplianceWithInfo:] missing -- firmware changed?");
         return;
     }
 
-    NSUInteger loaded = 0, seen = 0;
-
     for (NSString *entry in entries) {
         if (![[entry pathExtension] isEqualToString:@"frappliance"]) continue;
-        seen++;
 
         NSString *bundlePath = [kAppliancesDir stringByAppendingPathComponent:entry];
         NSString *plistPath = [bundlePath stringByAppendingPathComponent:@"Info.plist"];
 
         NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:plistPath];
         if (![info isKindOfClass:[NSDictionary class]]) {
-            ATVT_LOG(@"%@: unreadable Info.plist -- skipping", bundlePath);
             continue;
         }
 
@@ -291,26 +247,18 @@ static void injectAppliances(id manager) {
 
         id applianceInfo = ((id (*)(id, SEL, id))objc_msgSend)(applianceInfoClass, infoSel, desc);
         if (applianceInfo == nil) {
-            ATVT_LOG(@"%@: infoForApplianceDescription: returned nil -- bad description dict",
-                     bundlePath);
             continue;
         }
 
         @try {
             ((void (*)(id, SEL, id))objc_msgSend)(manager, loadSel, applianceInfo);
-            loaded++;
-            ATVT_LOG(@"%@: loaded", entry);
         } @catch (NSException *ex) {
             /* These classes call BackRow API from 2010-2015 against a 2022
              * build. Surviving the load is genuinely not guaranteed, and an
              * exception here must not take lowtide with it. */
-            ATVT_LOG(@"%@: EXCEPTION during _loadApplianceWithInfo: -- %@: %@",
-                     entry, [ex name], [ex reason]);
         }
     }
 
-    ATVT_LOG(@"injected %lu of %lu .frappliance bundle(s)",
-             (unsigned long)loaded, (unsigned long)seen);
 }
 
 static void hooked_loadAppliances(id self, SEL _cmd) {
@@ -322,7 +270,7 @@ static void hooked_loadAppliances(id self, SEL _cmd) {
         @try {
             injectAppliances(self);
         } @catch (NSException *ex) {
-            ATVT_LOG(@"EXCEPTION in injectAppliances -- %@: %@", [ex name], [ex reason]);
+            /* Leave the stock menu intact if injection fails. */
         }
     }
 }
@@ -330,51 +278,17 @@ static void hooked_loadAppliances(id self, SEL _cmd) {
 __attribute__((constructor))
 static void appliancetvtweak_init(void) {
     @autoreleasepool {
-        /* LOG UNCONDITIONALLY, FIRST THING, BEFORE ANY CHECK CAN BAIL.
-         *
-         * This line exists to make the absence of a log file MEAN something.
-         * An earlier version returned silently when BRApplianceManager was
-         * missing -- reasonable on its own terms (a mis-scoped filter should
-         * be inert, not noisy) -- with the result that "no log file" was
-         * indistinguishable between two completely different failures:
-         * Substrate never injected us at all, or it did and we bailed. Those
-         * have opposite fixes, and on real hardware that ambiguity cost a
-         * debugging round.
-         *
-         * With this line, the rule is unambiguous: NO FILE AT ALL means the
-         * dylib was never loaded into anything, full stop. Anything else, we
-         * ran and the file says how far we got.
-         *
-         * The process name is included because the Substrate filter matches
-         * on bundle identifier (com.apple.lowtide) while everything else on
-         * this platform -- ps, killall -- speaks in executable names
-         * (AppleTV). Printing what we actually landed in removes the guessing
-         * if the filter is ever wrong. */
-        ATVT_LOG(@"loaded into pid %d (%@)", (int)getpid(),
-                 [[NSProcessInfo processInfo] processName] ?: @"?");
-
         Class managerClass = NSClassFromString(@"BRApplianceManager");
         if (managerClass == Nil) {
-            /* Now a logged skip rather than a silent one. Still not an error:
-             * the filter should keep us out of other processes. But if this
-             * fires inside lowtide itself, it is a real finding -- it would
-             * mean the class is not registered by the time an inserted
-             * dylib's constructor runs, and the hook would have to move to a
-             * later point (dlopen of the right image, or a first-call
-             * trampoline) rather than the constructor. */
-            ATVT_LOG(@"BRApplianceManager not found in this process -- not hooking");
             return;
         }
 
         SEL sel = @selector(_loadAppliances);
         if (!class_getInstanceMethod(managerClass, sel)) {
-            ATVT_LOG(@"-[BRApplianceManager _loadAppliances] not found -- firmware changed, "
-                     @"not hooking");
             return;
         }
 
         MSHookMessageEx(managerClass, sel,
                         (IMP)&hooked_loadAppliances, (IMP *)&orig_loadAppliances);
-        ATVT_LOG(@"hooked -[BRApplianceManager _loadAppliances]");
     }
 }

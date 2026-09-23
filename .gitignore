@@ -22,8 +22,9 @@ __pycache__/
 # from them with `make -C cainjector` and a pinned Xcode.
 /cainjector/cainjector
 
-# appliancetvtweak/'s compiled output, plus the Substrate framework its
-# Makefile unpacks out of debcache/mobilesubstrate_*.deb to build against.
-# The deb is vendored; the unpacked copy is a build artifact.
-/appliancetvtweak/appliancetvtweak.dylib
-/appliancetvtweak/.substrate/
+# tweaks/'s compiled output, plus the Substrate framework each Makefile
+# unpacks out of debcache/mobilesubstrate_*.deb to build against. The deb is
+# vendored; the unpacked copy is a build artifact. Globbed rather than listed
+# per tweak so a third one needs no edit here.
+/tweaks/*/*.dylib
+/tweaks/*/.substrate/

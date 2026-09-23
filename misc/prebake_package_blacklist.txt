@@ -124,7 +124,7 @@ pam-modules
 # --- unsatisfiable at bake time because MobileSubstrate is not there ------
 #
 # xyz.regulad.blackb0x.appliancetvtweak is this project's own package, built
-# at bake time by package/build_appliancetvtweak.sh, and it is the first one
+# at bake time by tweaks/appliancetvtweak/build.sh, and it is the first one
 # to land in the same position `cydia` has always been in: its Depends: names
 # something the bootstrap container has no version of at all.
 #
@@ -154,3 +154,17 @@ pam-modules
 # exists so that if it ever does reach that pass, the answer is already
 # written down instead of rediscovered on hardware.
 xyz.regulad.blackb0x.appliancetvtweak
+
+# xyz.regulad.blackb0x.icanhasrez is the second package in that position, and
+# for the identical reason: it ships one dylib plus its Substrate filter into
+# /Library/MobileSubstrate/DynamicLibraries/, Depends: mobilesubstrate, and is
+# inert until MobileSubstrate is installed and injecting. stageIcanhasrezPackage()
+# stages it the same way -- .deb into the on-device apt archive cache, installed
+# later by postinstall.sh's `dpkg -i` fallback, after `apt-get install
+# "${PACKAGES[@]}"` has made the dependency real.
+#
+# It differs from appliancetvtweak in exactly one respect that does not matter
+# here: its dylib is injected into backboardd rather than the UI process, so
+# its postinst restarts backboardd. The postinst never runs at bake time either
+# way, which is the whole point of both entries.
+xyz.regulad.blackb0x.icanhasrez

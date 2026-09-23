@@ -3215,8 +3215,44 @@ static bool stageAppliancetvtweakPackage(const fs::path& blackb0xRoot, const std
     const std::string debName = "xyz.regulad.blackb0x.appliancetvtweak.deb";
     std::string debPath = outDir + "/" + debName;
 
-    if (!runCommand({resolvePackageRoot() + "/build_appliancetvtweak.sh", debPath, productVersion}, ".")) {
-        fprintf(stderr, "bakeRamdisk: package/build_appliancetvtweak.sh failed — see stderr above\n");
+    if (!runCommand({resolveTweakRoot() + "/appliancetvtweak/build.sh", debPath, productVersion}, ".")) {
+        fprintf(stderr, "bakeRamdisk: tweaks/appliancetvtweak/build.sh failed — see stderr above\n");
+        fs::remove_all(outDir, ec);
+        return false;
+    }
+
+    bool ok = stageFile(blackb0xRoot, varStage("cache/apt/archives/" + debName), debPath, 0, 0, 0644);
+
+    fs::remove_all(outDir, ec);
+    return ok;
+}
+
+// The resolution unlock, staged EXACTLY like stageAppliancetvtweakPackage()
+// above and for exactly the same reason, which is why this comment is short:
+// it Depends: mobilesubstrate, that does not exist until apt runs on-device,
+// so it must not be force-installed at bake time. It is on
+// misc/prebake_package_blacklist.txt for that reason and staged as a .deb in
+// the on-device apt archive cache, to be picked up by postinstall.sh's
+// `dpkg -i` fallback after mobilesubstrate is genuinely installed.
+//
+// The one thing worth saying that is NOT shared with appliancetvtweak: this
+// package's dylib is injected into backboardd rather than into the UI, so its
+// postinst restarts backboardd rather than AppleTV. Nothing about that
+// changes the bake -- the postinst never runs here -- but it is the reason
+// the two layouts are not interchangeable.
+static bool stageIcanhasrezPackage(const fs::path& blackb0xRoot, const std::string& productVersion) {
+    std::string outDir = makeTempDir("blackb0x-icanhasrez-out-");
+    if (outDir.empty()) {
+        fprintf(stderr, "bakeRamdisk: cannot create icanhasrez package temp dir\n");
+        return false;
+    }
+
+    std::error_code ec;
+    const std::string debName = "xyz.regulad.blackb0x.icanhasrez.deb";
+    std::string debPath = outDir + "/" + debName;
+
+    if (!runCommand({resolveTweakRoot() + "/icanhasrez/build.sh", debPath, productVersion}, ".")) {
+        fprintf(stderr, "bakeRamdisk: tweaks/icanhasrez/build.sh failed — see stderr above\n");
         fs::remove_all(outDir, ec);
         return false;
     }
@@ -3282,6 +3318,7 @@ static bool stageBlackb0xTree(const std::string& parentDir, const std::string& p
     if (!stageBlackb0xPackage(blackb0xRoot, productVersion)) ok = false;
     if (!stageCainjectorPackage(blackb0xRoot, productVersion)) ok = false;
     if (!stageAppliancetvtweakPackage(blackb0xRoot, productVersion)) ok = false;
+    if (!stageIcanhasrezPackage(blackb0xRoot, productVersion)) ok = false;
     if (!stageVersionBranch(blackb0xRoot, productVersion)) ok = false;
 
     return ok;

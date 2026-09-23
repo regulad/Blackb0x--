@@ -149,6 +149,17 @@ std::string resolvePackagePath(const std::string& relativePath);
 // and packages.txt live. $BLACKB0X_PACKAGE_ROOT if set, otherwise "package".
 std::string resolvePackageRoot();
 
+// The tweaks/ directory -- one subdirectory per MobileSubstrate tweak, each
+// self-contained: source, Makefile, layout/ and its own build.sh.
+// $BLACKB0X_TWEAKS_ROOT if set, otherwise "tweaks".
+//
+// Separate from resolvePackageRoot() because the tweaks are separate packages
+// with separate lifecycles, not payload of xyz.regulad.blackb0x: each builds
+// its own .deb and each is staged into the on-device apt archive cache rather
+// than merged into /blackb0x (see misc/prebake_package_blacklist.txt for why
+// neither can be bake-time-installed).
+std::string resolveTweakRoot();
+
 // Resolves `relativePath` against the bake-time asset root:
 // $BLACKB0X_MISC_DIR if set, otherwise "misc" relative to the current
 // working directory. Five consumers, nothing else:

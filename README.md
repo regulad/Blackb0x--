@@ -13,6 +13,7 @@ Additional features over the original [`blackb0x`](https://github.com/NSSpiral/B
 
 * Works in 2026 with current `apt` repositories
 * Restores Appliance support to `lowtide` (the springboard/pineboard equivalent for Apple TV Software), allowing legacy tweaks and apps to appear on the UI
+* Restores additional resolution modes to Settings
 * Injects Debian 13 CAs into Apple TV Software, enabling the entire system to connect to current websites
 * `apt-get` configured to use the system SSL handlers (enables TLS 1.2 support, which a vast majority of the internet still supports)
 * Logs to screen during install process, making it easier to debug

@@ -951,7 +951,7 @@ jobs:
           # THE WHOLE Frameworks TREE PLUS IOSurface, and the "whole" is not
           # laziness. This leg no longer builds only entrypoint: bakeRamdisk()
           # now also runs package/build_cainjector.sh and
-          # package/build_appliancetvtweak.sh, which link Security and
+          # each tweaks/*/build.sh, which link Security and
           # Foundation respectively, and Foundation's headers pull in CFNetwork
           # and CoreServices besides. Listing frameworks by hand meant this
           # step failed one framework at a time -- on real runs, at the
@@ -959,7 +959,7 @@ jobs:
           # paid for an IPSW download:
           #
           #   cainjector: FATAL -- ... has no .../Security.framework/Security
-          #   appliancetvtweak: FATAL -- ... has no .../Foundation.framework/Foundation
+          #   <tweak>: FATAL -- ... has no .../Foundation.framework/Foundation
           #
           # The entire SDK Frameworks directory is 27 MB (header trees and
           # linker stubs, not real binaries), so copying it outright costs
@@ -1086,7 +1086,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: macos-15
     env:
-      # Fixed, not matrixed. cainjector and appliancetvtweak are armv7 against
+      # Fixed, not matrixed. cainjector and the tweaks/ dylibs are armv7 against
       # the iPhoneOS 8.4 SDK regardless of which Apple TV installs them, and
       # 6.4 is the Xcode that carries it (see entrypoint/Makefile's table).
       # The 5.1.1/7.1 pairing exists for entrypoint, which is spliced into a
@@ -1095,7 +1095,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # LFS, because appliancetvtweak/Makefile unpacks CydiaSubstrate out
+          # LFS, because tweaks/*/Makefile unpacks CydiaSubstrate out
           # of debcache/mobilesubstrate_*.deb and package/build.sh copies
           # local_only_debs.txt's entries into the bundled local repo. Both are
           # LFS-backed. No submodules: nothing here builds C++.
@@ -1123,7 +1123,7 @@ jobs:
         run: |
           set -eu
           if [ -z "${XCODE_MIRROR_TOKEN:-}" ]; then
-            echo "secrets.PAT is empty. cainjector and appliancetvtweak are armv7" \
+            echo "secrets.PAT is empty. cainjector and the tweaks/ dylibs are armv7" \
                  "binaries and cannot be built without a pinned Xcode, and" \
                  "regulad/xcode is private, so there is nothing to fall back to." >&2
             exit 1
@@ -1298,8 +1298,11 @@ jobs:
           package/build_cainjector.sh \
             "$out/xyz.regulad.blackb0x.cainjector_${VERSION}_iphoneos-arm.deb" "$VERSION"
 
-          package/build_appliancetvtweak.sh \
+          tweaks/appliancetvtweak/build.sh \
             "$out/xyz.regulad.blackb0x.appliancetvtweak_${VERSION}_iphoneos-arm.deb" "$VERSION"
+
+          tweaks/icanhasrez/build.sh \
+            "$out/xyz.regulad.blackb0x.icanhasrez_${VERSION}_iphoneos-arm.deb" "$VERSION"
 
       # Assert what the repo actually depends on, rather than trusting that
       # three scripts exiting 0 means three usable packages. Each of these has
@@ -1324,18 +1327,19 @@ jobs:
             }
           done
 
-          # The two compiled payloads: armv7 Mach-O, and signed. An unsigned
+          # The three compiled payloads: armv7 Mach-O, and signed. An unsigned
           # binary installs and then silently never runs, which is the single
           # most expensive failure mode this project has hit.
           work="$RUNNER_TEMP/deb-check"
           rm -rf "$work"
-          for d in *cainjector*.deb *appliancetvtweak*.deb; do
+          for d in *cainjector*.deb *appliancetvtweak*.deb *icanhasrez*.deb; do
             ex="$work/$(basename "$d" .deb)"
             mkdir -p "$ex"
             dpkg-deb -x "$d" "$ex"
             found=0
             for bin in "$ex/usr/libexec/blackb0x/cainjector" \
-                       "$ex/Library/MobileSubstrate/DynamicLibraries/appliancetvtweak.dylib"; do
+                       "$ex/Library/MobileSubstrate/DynamicLibraries/appliancetvtweak.dylib" \
+                       "$ex/Library/MobileSubstrate/DynamicLibraries/icanhasrez.dylib"; do
               [ -f "$bin" ] || continue
               found=1
               file -b "$bin" | grep -q arm_v7 || {

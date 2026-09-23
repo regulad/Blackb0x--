@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MobileSubstrate filter for icanhasrez.dylib. ONE process, and it is not the
+  one you would guess.
+
+  backboardd is the render server -- its LaunchDaemon
+  (/System/Library/LaunchDaemons/com.apple.backboardd.plist) vends
+  com.apple.CARenderServer among its MachServices -- and the display mode list
+  is enumerated there. That is measured, not assumed: an earlier build hooked
+  the same QuartzCore function inside com.apple.lowtide, logged a clean
+  install with a matching prologue signature, and then never fired once,
+  because lowtide's CADisplay receives an already-built list over IPC.
+
+  Executables rather than Bundles because backboardd is a plain executable at
+  /usr/libexec/backboardd with no bundle identifier to match on. lowtide is
+  deliberately NOT here: nothing in this tweak is of any use in the UI
+  process, and every additional process a dylib is injected into is
+  additional risk for no return.
+
+  DO NOT WIDEN THIS. backboardd crashing takes the whole display stack down,
+  which is a strictly worse failure than lowtide crashing. What makes it
+  acceptable at all is the dylib's own discipline: it verifies a 16-byte
+  prologue signature before touching anything, writes the display's
+  native-size fields only when they are empty, and never accepts a resolution
+  other than the one the attached display's own EDID asks for. Deleting this
+  plist over SSH disables everything, and is the recovery path.
+-->
+<plist version="1.0">
+<dict>
+    <key>Filter</key>
+    <dict>
+        <key>Executables</key>
+        <array>
+            <string>backboardd</string>
+        </array>
+    </dict>
+</dict>
+</plist>

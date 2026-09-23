@@ -62,7 +62,7 @@ loader would crash on an unrecognized selector.
 This runs inside `com.apple.lowtide`, the device's **only** user interface. A
 crash here is a television that shows nothing, reachable only by SSH. So:
 Apple's own `_loadAppliances` always runs first and completely; every step is
-individually guarded; every failure is a logged skip rather than an abort; the
+individually guarded; every failure is a silent skip rather than an abort; the
 `_loadApplianceWithInfo:` call is wrapped in `@try`; and the Substrate filter
 names exactly one bundle identifier.
 
@@ -73,12 +73,12 @@ init, and then crash later on since-changed internals.
 ## Building
 
 ```sh
-make -C appliancetvtweak                            # armv7 dylib, ldid-signed
-package/build_appliancetvtweak.sh out.deb 1.0       # the .deb
+make -C tweaks/appliancetvtweak                            # armv7 dylib, ldid-signed
+tweaks/appliancetvtweak/build.sh out.deb 1.0        # the .deb
 ```
 
 Needs a **pinned, era-matched Xcode** for the same reasons `entrypoint/` and
-`cainjector/` do — see `appliancetvtweak/Makefile`'s header. Theos supplies
+`cainjector/` do — see `tweaks/appliancetvtweak/Makefile`'s header. Theos supplies
 only the packaging half (`dm.pl`); its own SDKs are arm64-only and cannot
 build this. Logos is deliberately not used for a single hook — `MSHookMessageEx`
 against `substrate.h` is what Logos would have generated anyway.
@@ -99,16 +99,8 @@ drops the built `.deb` into the on-device apt archive cache;
 
 ## Diagnosing it (there is no log)
 
-**This firmware has no working log, and both routes were tried.** `NSLog`
-goes to ASL, which ships disabled — Apple's `com.apple.syslogd` job carries
-`EnvironmentVariables = { ASL_DISABLE = 1 }` and no `-bsd_out`, and editing
-the on-disk plist changes nothing because launchd defines that job internally
-(it survives a reboot unchanged; see `docs/HISTORY.md`). Writing our own file
-was implemented and removed: the UI runs as `mobile` and cannot create files
-under root-owned `/usr/share/blackb0x`, and it failed *silently* by design, so
-"no log" and "tweak never loaded" became indistinguishable.
-
-So diagnose from the filesystem and the menu instead:
+The shipped tweak has no diagnostic logging. Diagnose from the filesystem
+and the menu:
 
 | symptom | meaning |
 |---|---|
@@ -117,6 +109,3 @@ So diagnose from the filesystem and the menu instead:
 | appliance present, no icon | the icon files are missing or misnamed — see the two conventions above, and check both `NewUI/` and the `MainMenu` cache |
 | one appliance present, the other missing | that bundle specifically failed to load: its principal class, its `dlopen`, or an exception during `_loadApplianceWithInfo:`. `%orig` runs first, so the stock menu and any working appliance survive |
 | stock menu intact, nothing of ours | the hook never installed: `BRApplianceManager` absent (wrong process) or the Substrate filter did not match `com.apple.lowtide` |
-
-If a real log is ever needed again, the fix is a `mobile`-writable path under
-`/var/mobile` and one line in `ATVT_LOG`.

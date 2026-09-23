@@ -130,6 +130,13 @@ std::string resolvePackageRoot() {
     return "package";
 }
 
+std::string resolveTweakRoot() {
+    if (const char* override_ = getenv("BLACKB0X_TWEAKS_ROOT")) {
+        return std::string(override_);
+    }
+    return "tweaks";
+}
+
 void chownToSudoCaller(const std::string& path) {
     const char* uidStr = getenv("SUDO_UID");
     const char* gidStr = getenv("SUDO_GID");

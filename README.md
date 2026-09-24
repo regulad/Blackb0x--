@@ -11,8 +11,11 @@ exploit. Side-loads Cydia (frontend nitoTV) + Kodi.
 
 Additional features over the original [`blackb0x`](https://github.com/NSSpiral/Blackb0x):
 
-* Works in 2026 with current `apt` repositories
-* Restores Appliance support to `lowtide` (the springboard/pineboard equivalent for Apple TV Software), allowing legacy tweaks and apps to appear on the UI
+* Works in 2026 with current `apt` repositories; features custom `apt` repository with backports
+  * Includes working `tailscale` implementation (to my knowledge, first VPN ever made for the Apple TV 2/3)
+* Custom backport plugin repository for Kodi Helix ([download here](http://kodi.regulad.xyz/helix/repository.regulad.helix/repository.regulad.helix-1.0.0.zip))
+  * Jellyfin "Lite" available for streaming video & audio (uses hardware acceleration on the ATV, can achieve 768p30)
+* Restores ATV2 Appliance support to `lowtide` (the springboard/pineboard equivalent for Apple TV Software), allowing legacy tweaks and apps to appear on the UI
 * Restores additional resolution modes to Settings
 * Injects Debian 13 CAs into Apple TV Software, enabling the entire system to connect to current websites
 * `apt-get` configured to use the system SSL handlers (enables TLS 1.2 support, which a vast majority of the internet still supports)
@@ -35,11 +38,7 @@ Supported devices:
 **Tip:** if `blackb0x-pwn` is unreliable over a direct USB-C connection, put a plain
 (non-Thunderbolt) USB hub between the Mac and the Apple TV.
 
-Please star this project if it helped you. Some other tweaks have been developed in tandem with this jailbreak and are available on the built-in repository, you can find them below.
-
-```
-tailscale
-```
+Please star this project if it helped you.
 
 ## Requirements
 

@@ -22,7 +22,7 @@ Additional features over the original [`blackb0x`](https://github.com/NSSpiral/B
 * Logs to screen during install process, making it easier to debug
 * GPL compliance (all unlicensed code from Blackb0x was either rewritten or properly vendored and attributed as a submodule)
 * Fully declarative payload configuration
-* First-class Apple Silicon Mac support (jailbreaking up to macOS 27/Golden Gate; authoring up to macOS 26/Tahoe, see next bullet)
+* First-class Apple Silicon Mac support (Rosetta 2 required for authoring pipeline; pre-built patches can be used for macOS > 27/Golden Gate)
 * Opportunistic use of pre-patched binaries built on GHA CD pipeline (eliminates the need to run legacy Xcode through Rosetta 2 nor build huge libraries)
 
 Supported devices:

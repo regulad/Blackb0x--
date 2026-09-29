@@ -7593,3 +7593,95 @@ Worth noting as a pattern rather than an incident: a manual test that covers
 one of two cases will read as "one case is broken" unless the gap is stated
 out loud. Two of this session's wrong conclusions — this and the cache-write
 revert — came from treating an untested condition as a tested one.
+
+## `Cli.cpp` was never valid C++17: a lambda capturing a structured binding, and why only an old toolchain said so
+
+The mirror image of "Build-system fixes needed to compile 2019–2020-era code on
+a 2025 toolchain" near the top of this file. That section is about old vendored
+code meeting a new compiler. This is **our own first-party code meeting an old
+one**, which is the direction that gets no attention until someone tries it.
+
+`cmake --build build --target jailbreak` on a Big Sur-era toolchain failed with
+`src/Cli.cpp` rejected — the lambda on what was then line 1263 holding a
+`reference to local binding declared in enclosing function`, pointing back at
+the `for` on 1256:
+
+```c++
+for (const auto& [name, remotePath] : manifest->loadedByIBootComponents) {
+    ...
+    downloadAndPatch(name.c_str(), remotePath,
+                      [&](const std::string& path) { patcher.addLoadedByIBootComponent(name, path); });
+}
+```
+
+### Root cause: the code was ill-formed all along
+
+C++17 as published does **not** permit a lambda to capture a structured
+binding. The permission arrived with **P1091R3**, and Clang implemented it in
+**Clang 16** — then applied it *retroactively, as a defect report*, so every
+Clang ≥16 accepts this at `-std=c++17` silently, with no warning even under
+`-Wall -Wextra -pedantic`. Clang 12/13 (the Xcode 12.5/13 toolchains, i.e. Big
+Sur) implement the rule as written and reject it as a hard error.
+
+`CMakeLists.txt:26` has asked for `CMAKE_CXX_STANDARD 17` the whole time. The
+host is Apple clang 21. So the dialect was pinned correctly, the code violated
+it, and the compiler's retroactive generosity hid that for as long as nobody
+built with anything older.
+
+**The transferable rule: "it compiles" is not evidence of conformance when the
+compiler is newer than the standard it is being asked to target.** A DR applied
+retroactively is indistinguishable, from the build log, from code that was
+always legal. This project has hit the same epistemic shape on hardware over and
+over — a theory that survives only because the one measurement that could
+falsify it was never taken. Here the missing measurement is an old compiler.
+
+### The fix
+
+Iterate the `std::pair` and bind ordinary references:
+
+```c++
+for (const auto& component : manifest->loadedByIBootComponents) {
+    const std::string& name = component.first;
+    const std::string& remotePath = component.second;
+    ...
+}
+```
+
+`name` is then a plain local variable, capturable under every standard, and the
+loop body is otherwise untouched. The comment left at the site says why it must
+not be tidied back — because the visually identical loop in
+`BakeFirmware.cpp:458` *can* use a structured binding perfectly legally, having
+no lambda, and the difference between the two is not self-evident.
+
+### The audit, which is the part worth keeping
+
+All seven structured-binding sites in `src/` were checked, not just the one that
+failed. Only `Cli.cpp` fed a binding into a lambda; `BakeFirmware.cpp:458`,
+`DeviceManager.cpp:1870`, `BakeRamdisk.cpp:1696`/`1717`, `PatcherPatch.cpp:239`
+and `BakeIboot.cpp:133` all use theirs directly and are fine at C++17.
+
+`src/` was then grepped for the other things a Big Sur libc++/Clang would
+reject at `-std=c++17` — `starts_with`/`ends_with`/`contains`, `std::span`,
+`std::format`, `std::ranges`, `bit_cast`, `erase_if`, `to_array`, `midpoint`,
+`source_location`, `[[likely]]`/`[[unlikely]]`, `[=, this]`, `consteval`,
+`constinit`, `co_await`, `<=>`. **Zero hits.** Nothing else of this class is
+queued up behind the fix.
+
+### What is verified, and what is not
+
+Verified: `cmake --build build --target jailbreak` compiles `Cli.cpp` and links
+both `blackb0x` and `blackb0x-pwn` clean on Apple clang 21. (The
+`ld: warning: ignoring duplicate libraries: 'deps/lib/libwolfssl.a'` is
+pre-existing and unrelated.)
+
+**Not verified: the build has not been re-run on an actual Clang 12/13 host** —
+none was available. The diagnosis rests on the standard's wording and Clang's
+release history, and the fix uses a construct that is uncontroversially legal in
+C++11 onward, so the confidence is high, but it is reasoned rather than measured
+and should be read that way.
+
+That leaves the real gap open: **no compiler in this project's CI is old enough
+to catch this class of defect**, so the next such regression will be found the
+same way this one was — by a person on an old machine. A legacy-toolchain CI leg
+is the only thing that actually closes it; until one exists, treat the C++17 pin
+as an unenforced promise rather than a checked one.

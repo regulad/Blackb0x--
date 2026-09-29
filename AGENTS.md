@@ -61,6 +61,16 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   existed in the original app; don't re-point one of those at a different commit
   without redoing the OSINT (see `docs/HISTORY.md`'s "Version pinning" section for the
   method, if a pin ever needs revisiting).
+- **Legacy host toolchains must keep working, and `-std=c++17` (`CMakeLists.txt`) means
+  C++17 as published — not "whatever the newest clang accepts at `-std=c++17`."** The
+  two are not the same: a compiler newer than its target standard applies later defect
+  reports retroactively and accepts non-conforming code silently, with no warning even
+  under `-Wall -Wextra -pedantic`. A real instance shipped and only failed on a Big
+  Sur-era Clang — a lambda capturing a structured binding, legal only from P1091R3
+  (Clang 16) onward. Nothing in CI is old enough to catch this class, so **it is on you
+  when writing `src/`**: no C++20 library or language features, and see
+  `docs/HISTORY.md`'s "`Cli.cpp` was never valid C++17" for the audit and the full list
+  of what was checked.
 
 ## Repo layout
 

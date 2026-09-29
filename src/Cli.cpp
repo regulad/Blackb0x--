@@ -1253,7 +1253,17 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // Info.IsLoadedByiBoot, matching idevicerestore's own generic
     // iteration instead of a fixed component list.
     // Same bake-first, download-as-fallback rule as RestoreLogo above.
-    for (const auto& [name, remotePath] : manifest->loadedByIBootComponents) {
+    // Deliberately NOT `for (const auto& [name, remotePath] : ...)`, unlike the
+    // identical loop in BakeFirmware.cpp: the lambda below captures `name`, and
+    // capturing a structured binding is ill-formed in C++17 as published (the
+    // permission arrived with P1091R3, which Clang only implemented in 16 and
+    // then applied retroactively). Clang 12/13 rejects it outright -- "reference
+    // to local binding declared in enclosing function" -- so this built on a
+    // current toolchain and failed on a Big Sur-era one. Plain references are
+    // ordinary local variables and capture everywhere; don't "tidy" this back.
+    for (const auto& component : manifest->loadedByIBootComponents) {
+        const std::string& name = component.first;
+        const std::string& remotePath = component.second;
         const std::string baked = "dist/" + name + bakedSuffix;
         if (fs::exists(baked)) {
             patcher.addLoadedByIBootComponent(name, baked);

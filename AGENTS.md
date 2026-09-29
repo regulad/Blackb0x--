@@ -16,8 +16,10 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
 
 - **CLI-only, macOS-only.** No GUI — dropped, not dual-maintained. Linux support was
   removed outright (checkm8 never worked there; see "Current status" below and
-  `docs/HISTORY.md`), and `CMakeLists.txt` hard-fails off Apple. Apple Silicon is the
-  tested host.
+  `docs/HISTORY.md`), and `CMakeLists.txt` hard-fails off Apple. **Two tested hosts,
+  and both are load-bearing:** `arm64` on macOS 26 Tahoe (primary) and `x86_64` on
+  macOS 11 Big Sur (the floor — and the reason for the C++17 conformance rule below,
+  since its clang is the only one in reach that enforces the standard as published).
 - **Every third-party dependency is a git submodule under `third_party/`, built from
   source, statically linked.** Not FetchContent, not system packages, no exceptions —
   see the "vendored dependencies" table below and `CMakeLists.txt`'s

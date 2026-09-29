@@ -44,6 +44,22 @@ Please star this project if it helped you.
 
 Both targets need the Xcode Command Line Tools, plus Homebrew.
 
+### Tested hosts
+
+Verified working on both ends of the range Apple currently spans:
+
+| host | macOS | notes |
+|---|---|---|
+| Apple Silicon (`arm64`) | 26 Tahoe | primary development host |
+| Intel (`x86_64`) | 11 Big Sur | oldest verified host, and the oldest toolchain |
+
+Both architectures and both OS vintages are supported, not just the new one.
+Big Sur is the floor that matters in practice, because its `clang` is old enough
+to reject C++ that every newer compiler accepts — if you are changing anything
+under `src/`, see the C++17 conventions note in
+[`AGENTS.md`](AGENTS.md) before assuming a clean local build means a portable
+one.
+
 ### Jailbreaking only
 
 To build and run the jailbreak:

@@ -314,7 +314,7 @@ bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildI
     // to catch "someone edited ramdisk/ and forgot to re-bake" -- that whole
     // system is gone (fragile, and it only ever guessed at staleness). Use
     // bake-firmware --force to rebuild an output that already exists.
-    const std::string patchedDMG = "dist/RestoreRamDisk-" + deviceModel + "_" + buildID + ".dmg";
+    const std::string patchedDMG = resolveDistPath("RestoreRamDisk-" + deviceModel + "_" + buildID + ".dmg");
     return !fs::exists(patchedDMG);
 }
 
@@ -466,13 +466,10 @@ bool Patcher::useStockKernel(const std::string& path, bool /*stockRecovery*/) {
 // whether bake-firmware has already produced the dist/ entry this firmware
 // needs, and tells the user to run it if not.
 bool Patcher::patchRamdisk() {
-    const FirmwareKeyPair* k = keyFor("RestoreRamdisk");
-    if (!k) {
-        fprintf(stderr, "patchRamdisk: no RestoreRamdisk keys loaded\n");
-        return false;
-    }
-
-    const std::string patchedDMG = "dist/RestoreRamDisk-" + deviceModel_ + "_" + buildID_ + ".dmg";
+    // No keyFor("RestoreRamdisk") gate: nothing here decrypts, so keys are
+    // irrelevant, and the old check only ever fired on a .keys file that
+    // failed to load -- misreporting that as a missing key (issue #2).
+    const std::string patchedDMG = resolveDistPath("RestoreRamDisk-" + deviceModel_ + "_" + buildID_ + ".dmg");
     if (!fs::exists(patchedDMG)) {
         // dist/ may have *something* in it (or, since Cli.cpp's runCli() can
         // now self-bake on demand, may still be entirely empty at this
@@ -534,7 +531,7 @@ bool Patcher::useStockRamdisk(const std::string& path, bool /*stockRecovery*/) {
 // something: everything else in the chain (checkm8, iBSS, iBEC, boot-args,
 // kernelcache, DeviceTree, RestoreLogo) is bit-for-bit the same run.
 bool Patcher::useDiagnosticRamdisk(const std::string& component) {
-    const std::string diagDMG = "dist/" + component + "-" + deviceModel_ + "_" + buildID_ + ".dmg";
+    const std::string diagDMG = resolveDistPath(component + "-" + deviceModel_ + "_" + buildID_ + ".dmg");
     if (!fs::exists(diagDMG)) {
         // Hard stop, same as patchRamdisk(). The distinctive failure here is
         // "the suite was baked, but without --diagnostic-ramdisks", which is

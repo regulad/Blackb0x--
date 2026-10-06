@@ -20,18 +20,55 @@
 
 namespace fs = std::filesystem;
 
+static std::string resolveOwnExecutableDir();
+
+// The checkout root: the nearest directory at or above blackb0x's own
+// executable that contains `.git`. Anchored on the executable, not the
+// current working directory, so `cd build && ./blackb0x` finds keys/ and
+// dist/ the same as running from the root does (issue #2). Computed once.
+// Empty if the executable isn't inside a checkout, in which case every
+// resolveRepoPath() below falls back to a CWD-relative path, as before.
+std::string resolveRepoRoot() {
+    static const std::string root = [] {
+        const std::string dir = resolveOwnExecutableDir();
+        if (dir.empty()) return std::string();
+        for (fs::path p = dir;; p = p.parent_path()) {
+            std::error_code ec;
+            if (fs::exists(p / ".git", ec)) return p.string();
+            if (p == p.parent_path()) break;
+        }
+        return std::string();
+    }();
+    return root;
+}
+
+std::string resolveRepoPath(const std::string& relativePath) {
+    const std::string root = resolveRepoRoot();
+    return root.empty() ? relativePath : root + "/" + relativePath;
+}
+
+std::string resolveDistPath(const std::string& relativePath) {
+    std::string dist;
+    if (const char* override_ = getenv("BLACKB0X_DIST_DIR")) {
+        dist = override_;
+    } else {
+        dist = resolveRepoPath("dist");
+    }
+    return relativePath.empty() ? dist : dist + "/" + relativePath;
+}
+
 std::string resolveRamdiskPath() {
     if (const char* override_ = getenv("BLACKB0X_RAMDISK_DIR")) {
         return std::string(override_);
     }
-    return "Blackb0x/ramdisk";
+    return resolveRepoPath("Blackb0x/ramdisk");
 }
 
 std::string resolveImageKeyPath(const std::string& relativePath) {
     if (const char* override_ = getenv("BLACKB0X_IMAGEKEYS_DIR")) {
         return std::string(override_) + "/" + relativePath;
     }
-    return "keys/" + relativePath;
+    return resolveRepoPath("keys/" + relativePath);
 }
 
 // Shared by resolvePwnPath()/resolveBakeFirmwarePath()/
@@ -120,21 +157,21 @@ std::string resolvePackagePath(const std::string& relativePath) {
     if (const char* override_ = getenv("BLACKB0X_PACKAGE_DIR")) {
         return std::string(override_) + "/" + relativePath;
     }
-    return "package/layout/" + relativePath;
+    return resolveRepoPath("package/layout/" + relativePath);
 }
 
 std::string resolvePackageRoot() {
     if (const char* override_ = getenv("BLACKB0X_PACKAGE_ROOT")) {
         return std::string(override_);
     }
-    return "package";
+    return resolveRepoPath("package");
 }
 
 std::string resolveTweakRoot() {
     if (const char* override_ = getenv("BLACKB0X_TWEAKS_ROOT")) {
         return std::string(override_);
     }
-    return "tweaks";
+    return resolveRepoPath("tweaks");
 }
 
 void chownToSudoCaller(const std::string& path) {
@@ -163,21 +200,21 @@ std::string resolveDebcachePath() {
     if (const char* override_ = getenv("BLACKB0X_DEBCACHE_DIR")) {
         return std::string(override_);
     }
-    return "debcache";
+    return resolveRepoPath("debcache");
 }
 
 std::string resolveMiscPath(const std::string& relativePath) {
     if (const char* override_ = getenv("BLACKB0X_MISC_DIR")) {
         return std::string(override_) + "/" + relativePath;
     }
-    return "misc/" + relativePath;
+    return resolveRepoPath("misc/" + relativePath);
 }
 
 std::string resolveEntrypointPath() {
     if (const char* override_ = getenv("BLACKB0X_ENTRYPOINT_DIR")) {
         return std::string(override_);
     }
-    return "entrypoint";
+    return resolveRepoPath("entrypoint");
 }
 
 std::string decryptedDMGFor(const std::string& path) {

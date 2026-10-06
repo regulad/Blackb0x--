@@ -2457,7 +2457,7 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
         outResult = cached;
         return false;
     }
-    bool ok = runCommand({"python3", "scripts/build_deb_cache_apt.py", "--output-dir", tempDir,
+    bool ok = runCommand({"python3", resolveRepoPath("scripts/build_deb_cache_apt.py"), "--output-dir", tempDir,
                            "--apt-tools", aptToolsDir, "--firmware-version", firmwareVersion,
                            "--allow-drops"});
     if (!ok) {

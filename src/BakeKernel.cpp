@@ -51,7 +51,7 @@ static void usage() {
 int main(int argc, char** argv) {
     std::string device;
     std::string build;
-    std::string outDir = "dist";
+    std::string outDir = resolveDistPath();
     bool force = false;
     size_t uncompressedSize = 0;  // 0 = normal; else trim the kernel to this before re-compress
 

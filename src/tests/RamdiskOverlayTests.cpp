@@ -33,7 +33,8 @@ static void expect(bool condition, const std::string& description) {
 
 static void testResolveRamdiskPathDefault() {
     unsetenv("BLACKB0X_RAMDISK_DIR");
-    expect(resolveRamdiskPath() == "Blackb0x/ramdisk", "resolveRamdiskPath() defaults to Blackb0x/ramdisk");
+    expect(resolveRamdiskPath() == resolveRepoPath("Blackb0x/ramdisk"),
+           "resolveRamdiskPath() defaults to Blackb0x/ramdisk under the checkout root");
 }
 
 static void testResolveRamdiskPathOverride() {
@@ -45,8 +46,8 @@ static void testResolveRamdiskPathOverride() {
 static void testResolveImageKeyPathDefault() {
     unsetenv("BLACKB0X_IMAGEKEYS_DIR");
     expect(resolveImageKeyPath("AppleTV2,1/AppleTV2,1_10A406e.keys") ==
-               "keys/AppleTV2,1/AppleTV2,1_10A406e.keys",
-           "resolveImageKeyPath defaults under keys/");
+               resolveRepoPath("keys/AppleTV2,1/AppleTV2,1_10A406e.keys"),
+           "resolveImageKeyPath defaults under keys/ in the checkout root");
 }
 
 static void testResolveImageKeyPathOverride() {
@@ -58,13 +59,33 @@ static void testResolveImageKeyPathOverride() {
 
 static void testResolveDebcachePathDefault() {
     unsetenv("BLACKB0X_DEBCACHE_DIR");
-    expect(resolveDebcachePath() == "debcache", "resolveDebcachePath() defaults to debcache");
+    expect(resolveDebcachePath() == resolveRepoPath("debcache"),
+           "resolveDebcachePath() defaults to debcache under the checkout root");
 }
 
 static void testResolveDebcachePathOverride() {
     setenv("BLACKB0X_DEBCACHE_DIR", "/tmp/some-debs-override", 1);
     expect(resolveDebcachePath() == "/tmp/some-debs-override", "resolveDebcachePath honors BLACKB0X_DEBCACHE_DIR");
     unsetenv("BLACKB0X_DEBCACHE_DIR");
+}
+
+// The test binary is built inside the checkout, so the walk up from its own
+// executable must land on a directory holding .git -- and must not depend on
+// the current working directory, which is the whole point (issue #2).
+static void testResolveRepoRoot() {
+    const std::string root = resolveRepoRoot();
+    expect(!root.empty() && fs::exists(fs::path(root) / ".git"),
+           "resolveRepoRoot() finds the checkout containing the test binary");
+    expect(fs::path(root).is_absolute(), "resolveRepoRoot() is absolute, not CWD-relative");
+}
+
+static void testResolveDistPath() {
+    unsetenv("BLACKB0X_DIST_DIR");
+    expect(resolveDistPath() == resolveRepoPath("dist"), "resolveDistPath() defaults to dist under the checkout root");
+    expect(resolveDistPath("x.dmg") == resolveRepoPath("dist") + "/x.dmg", "resolveDistPath() joins its argument");
+    setenv("BLACKB0X_DIST_DIR", "/tmp/some-dist-override", 1);
+    expect(resolveDistPath("x.dmg") == "/tmp/some-dist-override/x.dmg", "resolveDistPath honors BLACKB0X_DIST_DIR");
+    unsetenv("BLACKB0X_DIST_DIR");
 }
 
 static void testDecryptedDMGFor() {
@@ -189,6 +210,8 @@ int main() {
     testResolveImageKeyPathOverride();
     testResolveDebcachePathDefault();
     testResolveDebcachePathOverride();
+    testResolveRepoRoot();
+    testResolveDistPath();
     testDecryptedDMGFor();
     testOverlayHasRequiredFiles();
     testDebcacheHasRequiredFiles();

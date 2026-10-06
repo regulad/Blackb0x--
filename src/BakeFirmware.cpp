@@ -644,13 +644,13 @@ static RamdiskOutcome bakeRamdiskForTarget(const std::string& device, const std:
     std::vector<PlannedRamdisk> planned;
     // Same flat convention as the bootchain half above, and the same Apple
     // manifest key: RestoreRamDisk, not "Ramdisk".
-    planned.push_back({RamdiskVariant::Full, "dist/RestoreRamDisk" + tupleSuffix, "ramdisk"});
+    planned.push_back({RamdiskVariant::Full, resolveDistPath("RestoreRamDisk" + tupleSuffix), "ramdisk"});
     if (diagnostics) {
         planned.push_back({RamdiskVariant::DiagRepack,
-                           "dist/" + std::string(diagramdisk::kRepackComponent) + tupleSuffix,
+                           resolveDistPath(std::string(diagramdisk::kRepackComponent) + tupleSuffix),
                            "diag repack"});
         planned.push_back({RamdiskVariant::DiagBinary,
-                           "dist/" + std::string(diagramdisk::kBinaryComponent) + tupleSuffix,
+                           resolveDistPath(std::string(diagramdisk::kBinaryComponent) + tupleSuffix),
                            "diag binary"});
         // Last of the four, and the most expensive of the diagnostics: it
         // stages the whole /blackb0x overlay, so it pays the same debcache
@@ -658,7 +658,7 @@ static RamdiskOutcome bakeRamdiskForTarget(const std::string& device, const std:
         // ones deliberately -- a run that dies partway still leaves the real
         // image plus the two images that cost almost nothing to produce.
         planned.push_back({RamdiskVariant::DiagOverlay,
-                           "dist/" + std::string(diagramdisk::kOverlayComponent) + tupleSuffix,
+                           resolveDistPath(std::string(diagramdisk::kOverlayComponent) + tupleSuffix),
                            "diag overlay"});
     }
 
@@ -874,7 +874,7 @@ int main(int argc, char** argv) {
     bool diagnosticRamdisks = false;
     std::string deviceFilter;
     std::string buildFilter;
-    std::string bootchainOut = "dist";
+    std::string bootchainOut = resolveDistPath();
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--force") == 0) {
@@ -1057,8 +1057,8 @@ int main(int argc, char** argv) {
 
     if (doRamdisk) {
         std::error_code distEc;
-        fs::create_directories("dist", distEc);
-        if (distEc && !fs::is_directory("dist")) {
+        fs::create_directories(resolveDistPath(), distEc);
+        if (distEc && !fs::is_directory(resolveDistPath())) {
             fprintf(stderr, "\n%s: cannot create dist/: %s\n", kProg, distEc.message().c_str());
             return 1;
         }

@@ -7,16 +7,33 @@
 //  — replaces every [[NSBundle mainBundle] pathForResource:...] call site in
 //  the original. Proper install-prefix resolution (CMAKE_INSTALL_DATADIR,
 //  /usr/share/blackb0x) is Phase 7 work; for now this checks an override env
-//  var, then falls back to a path relative to the current working
-//  directory, which is sufficient for running the CLI from a build/dev tree.
+//  var, then falls back to a path under the checkout root (see
+//  resolveRepoRoot() below), which is sufficient for running the CLI from a
+//  build/dev tree.
 //
 
 #pragma once
 
 #include <string>
 
+// The checkout root: the nearest directory at or above blackb0x's own
+// executable that contains `.git`. Anchored on the executable rather than the
+// current working directory, so running from build/ (or anywhere else) finds
+// the same keys/ and dist/ as running from the root. Empty if the executable
+// isn't inside a checkout.
+std::string resolveRepoRoot();
+
+// `relativePath` under resolveRepoRoot(), or `relativePath` itself (relative
+// to the current working directory) if there is no checkout root. Every
+// "otherwise X" default below goes through this.
+std::string resolveRepoPath(const std::string& relativePath);
+
+// The baked firmware directory, or `relativePath` within it:
+// $BLACKB0X_DIST_DIR if set, otherwise resolveRepoPath("dist").
+std::string resolveDistPath(const std::string& relativePath = "");
+
 // Resolves the ramdisk overlay root: $BLACKB0X_RAMDISK_DIR if set,
-// otherwise "Blackb0x/ramdisk" relative to the current working directory.
+// otherwise resolveRepoPath("Blackb0x/ramdisk").
 // The whole tree mirrors the destination ramdisk's own filesystem layout,
 // merged in with a single `cp -a` (one unconditional path — no more
 // SSH-only vs full-Cydia split, see docs/HISTORY.md).
@@ -24,7 +41,7 @@ std::string resolveRamdiskPath();
 
 // Resolves `relativePath` (e.g. "AppleTV2,1/AppleTV2,1_10A406e.keys") against
 // the per-firmware decryption key root: $BLACKB0X_IMAGEKEYS_DIR if set,
-// otherwise "keys" relative to the current working directory.
+// otherwise resolveRepoPath("keys").
 // Kept separate from resolveRamdiskPath() above — these aren't shipped to
 // the device like everything under ramdisk/, they're only ever read locally.
 std::string resolveImageKeyPath(const std::string& relativePath);
@@ -35,8 +52,8 @@ std::string resolveImageKeyPath(const std::string& relativePath);
 // otherwise the "blackb0x-pwn" alongside
 // blackb0x's own executable, which is reliable
 // regardless of the current working directory the CLI happens to be invoked
-// from — unlike resolveRamdiskPath() above, a CWD-relative fallback would
-// break as soon as someone runs it from outside the build tree.
+// from — a CWD-relative fallback would break as soon as someone runs it from
+// outside the build tree.
 std::string resolvePwnPath();
 
 // Resolves the path to the `bake-firmware` binary (see CMakeLists.txt --
@@ -118,7 +135,7 @@ void chownToSudoCaller(const std::string& path);
 std::string resolveAptToolsDir();
 
 // Resolves the checked-in .deb cache root: $BLACKB0X_DEBCACHE_DIR if set,
-// otherwise "debcache" relative to the current working directory.
+// otherwise resolveRepoPath("debcache").
 // bakeRamdisk()'s stageDebcache() (BakeRamdisk.cpp) copies exactly the
 // resolved subset from here into the overlay at bake time — not the whole
 // (append-only, never-pruned) directory. The destination is apt's own archive
@@ -136,8 +153,8 @@ std::string resolveDebcachePath();
 // package's own source tree, laid out at the FINAL on-device paths
 // (etc/apt/..., var/root/.profile, System/Library/LaunchDaemons/...), matching
 // what real Cydia .debs ship (checked: the vendored packages use ./etc/, not
-// ./private/etc/). $BLACKB0X_PACKAGE_DIR if set, otherwise "package/layout"
-// relative to the current working directory, same convention as
+// ./private/etc/). $BLACKB0X_PACKAGE_DIR if set, otherwise
+// resolveRepoPath("package/layout"), same convention as
 // resolveMiscPath() below.
 //
 // These files used to live loose under misc/ and be staged one
@@ -146,7 +163,8 @@ std::string resolveDebcachePath();
 std::string resolvePackagePath(const std::string& relativePath);
 
 // The package/ directory itself (not its layout/ subtree) -- where build.sh
-// and packages.txt live. $BLACKB0X_PACKAGE_ROOT if set, otherwise "package".
+// and packages.txt live. $BLACKB0X_PACKAGE_ROOT if set, otherwise
+// resolveRepoPath("package").
 std::string resolvePackageRoot();
 
 // The tweaks/ directory -- one subdirectory per MobileSubstrate tweak, each
@@ -161,8 +179,8 @@ std::string resolvePackageRoot();
 std::string resolveTweakRoot();
 
 // Resolves `relativePath` against the bake-time asset root:
-// $BLACKB0X_MISC_DIR if set, otherwise "misc" relative to the current
-// working directory. Five consumers, nothing else:
+// $BLACKB0X_MISC_DIR if set, otherwise resolveRepoPath("misc").
+// Five consumers, nothing else:
 //   untether.bin / dirhelper       -> staged onto the device by stageBlackb0xTree()
 //   apt/net.tihmstar.gpg           -> staged as an on-device apt keyring
 //   prebake_package_blacklist.txt  -> read by computePreinstallEligibleFilenames()
@@ -181,8 +199,8 @@ std::string resolveMiscPath(const std::string& relativePath);
 
 // Resolves the entrypoint/ source directory (the freestanding ARMv6
 // replacement for /sbin/launchd — see entrypoint/README.md):
-// $BLACKB0X_ENTRYPOINT_DIR if set, otherwise "entrypoint" relative to the
-// current working directory. bakeRamdisk() builds this fresh on
+// $BLACKB0X_ENTRYPOINT_DIR if set, otherwise
+// resolveRepoPath("entrypoint"). bakeRamdisk() builds this fresh on
 // every bake rather than shipping a precompiled binary — see that
 // directory's own README for why (freestanding, no libSystem, needs
 // cctools-port's real Apple ld64 port; nothing to check in that a normal

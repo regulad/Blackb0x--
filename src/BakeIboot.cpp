@@ -81,7 +81,7 @@ static void usage() {
 int main(int argc, char** argv) {
     std::string device;
     std::string build;
-    std::string outDir = "dist";
+    std::string outDir = resolveDistPath();
     bool force = false;
     std::string bootArgs = bootargs::kRamdiskBootArgs;
     std::string tetherBootArgs = bootargs::kTetherBootArgs;

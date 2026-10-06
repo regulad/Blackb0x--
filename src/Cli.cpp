@@ -864,11 +864,11 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
                                 const std::string& extraRamdisk = "") {
     const std::string suffix = "-" + deviceModel + "_" + buildID;
     auto present = [&]() {
-        if (!fs::exists("dist/Manifest" + suffix + ".txt") ||
-            !fs::exists("dist/RestoreRamDisk" + suffix + ".dmg")) {
+        if (!fs::exists(resolveDistPath("Manifest" + suffix + ".txt")) ||
+            !fs::exists(resolveDistPath("RestoreRamDisk" + suffix + ".dmg"))) {
             return false;
         }
-        if (!extraRamdisk.empty() && !fs::exists("dist/" + extraRamdisk + suffix + ".dmg")) {
+        if (!extraRamdisk.empty() && !fs::exists(resolveDistPath(extraRamdisk + suffix + ".dmg"))) {
             return false;
         }
         return true;
@@ -885,7 +885,7 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
                artifactRepo().c_str(), artifact.c_str());
         fflush(stdout);
         std::error_code mkEc;
-        fs::create_directories("dist", mkEc);
+        fs::create_directories(resolveDistPath(), mkEc);
 
         // Download into a SCRATCH directory and move the files over, rather
         // than unpacking straight into dist/.
@@ -904,7 +904,7 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
         // Staging and moving is also simply more correct: the move is
         // overwrite-by-default, so a re-fetch refreshes a partial or stale
         // dist/ in place instead of demanding it be empty first.
-        const fs::path scratch = fs::path("dist") / ".fetch-tmp";
+        const fs::path scratch = fs::path(resolveDistPath()) / ".fetch-tmp";
         fs::remove_all(scratch, mkEc);
         fs::create_directories(scratch, mkEc);
 
@@ -931,7 +931,7 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
             std::error_code moveEc;
             for (const auto& entry : fs::directory_iterator(scratch, moveEc)) {
                 if (moveEc || !entry.is_regular_file()) continue;
-                const fs::path dest = fs::path("dist") / entry.path().filename();
+                const fs::path dest = fs::path(resolveDistPath()) / entry.path().filename();
                 // rename() first: same filesystem, atomic, cheap. It fails
                 // across devices, so fall back to a copy that overwrites.
                 std::error_code renameEc;
@@ -1171,7 +1171,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // OS suite; that flag is gone and the two were equal in every other mode.
     const std::string bakedSuffix = "-" + device.deviceModel + "_" + manifest->realBuildID;
     auto takeBaked = [&](const char* label, const std::string& name, auto&& setter) {
-        const std::string path = "dist/" + name + bakedSuffix;
+        const std::string path = resolveDistPath(name + bakedSuffix);
         if (!fs::exists(path)) {
             fprintf(stderr,
                     "%s: no baked component at %s.\n"
@@ -1220,7 +1220,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // required component with no download path at all, which is exactly why
     // that route failed with a hard "missing DeviceTree". Same
     // bake-first/download-fallback shape as RestoreLogo just below.
-    const std::string bakedDeviceTree = "dist/DeviceTree" + bakedSuffix;
+    const std::string bakedDeviceTree = resolveDistPath("DeviceTree" + bakedSuffix);
     if (fs::exists(bakedDeviceTree)) {
         patcher.setDeviceTreePath(bakedDeviceTree);
     } else {
@@ -1239,8 +1239,8 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     // Preferred from the bake, which publishes it verbatim, and downloaded only
     // as a fallback -- a dist/ produced before bake-firmware started publishing
     // the unmodified components will not have it.
-    if (fs::exists("dist/RestoreLogo" + bakedSuffix)) {
-        patcher.setRestoreLogoPath("dist/RestoreLogo" + bakedSuffix);
+    if (fs::exists(resolveDistPath("RestoreLogo" + bakedSuffix))) {
+        patcher.setRestoreLogoPath(resolveDistPath("RestoreLogo" + bakedSuffix));
     } else {
         downloadAndPatch(
             "RestoreLogo", manifest->restoreLogoPath,
@@ -1264,7 +1264,7 @@ std::optional<PatchedComponents> downloadAndPatchComponents(Patcher& patcher, co
     for (const auto& component : manifest->loadedByIBootComponents) {
         const std::string& name = component.first;
         const std::string& remotePath = component.second;
-        const std::string baked = "dist/" + name + bakedSuffix;
+        const std::string baked = resolveDistPath(name + bakedSuffix);
         if (fs::exists(baked)) {
             patcher.addLoadedByIBootComponent(name, baked);
             continue;
@@ -1613,8 +1613,8 @@ int runCli(const CliOptions& options) {
     {
         bool haveAnyRamdisk = false;
         std::error_code ec;
-        if (fs::exists("dist", ec) && fs::is_directory("dist", ec)) {
-            for (const auto& entry : fs::directory_iterator("dist", ec)) {
+        if (fs::exists(resolveDistPath(), ec) && fs::is_directory(resolveDistPath(), ec)) {
+            for (const auto& entry : fs::directory_iterator(resolveDistPath(), ec)) {
                 if (ec) break;
                 if (entry.path().extension() == ".dmg") {
                     haveAnyRamdisk = true;

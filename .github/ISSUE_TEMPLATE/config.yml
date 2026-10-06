@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Build and usage instructions
+    url: https://github.com/regulad/Blackb0x--/blob/master/README.md
+    about: Requirements, building, and the jailbreak steps. Please check here before filing.
+  - name: Contributing guide
+    url: https://github.com/regulad/Blackb0x--/blob/master/CONTRIBUTING.md
+    about: What a useful report includes, and the AI use disclosure policy.
+  - name: Code of conduct reports
+    url: https://github.com/regulad/Blackb0x--/blob/master/CODE_OF_CONDUCT.md
+    about: Please don't file conduct reports as public issues. See the Code of Conduct for how to report privately.

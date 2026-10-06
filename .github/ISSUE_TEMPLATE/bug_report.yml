@@ -1,0 +1,175 @@
+name: Bug report
+description: Something went wrong while building, baking firmware, jailbreaking, or after the jailbreak.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Hardware-dependent bugs can only be fixed with precise details, so please fill in every field you can.
+        See [CONTRIBUTING.md](https://github.com/regulad/Blackb0x--/blob/master/CONTRIBUTING.md) for what makes a useful report.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I followed the README's requirements and build steps.
+          required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what you expected to happen instead.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where did it fail?
+      options:
+        - Building (cmake / compile / link)
+        - blackb0x / blackb0x-pwn (DFU, checkm8, sending the payload)
+        - Install on the Apple TV (on-screen install log, boot)
+        - After jailbreak (Cydia / nitoTV, Kodi, apt, tweaks)
+        - bake-firmware / bake-iboot / bake-kernel (authoring)
+        - Firmware download (prebuilt suite via gh, IPSW)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: Apple TV model
+      options:
+        - AppleTV3,2 (A1469)
+        - AppleTV3,1 (A1427)
+        - AppleTV2,1 (A1378)
+        - Not applicable (build or authoring only)
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Apple TV firmware version
+      description: The software version on the Apple TV, plus the build ID if blackb0x printed one. Write "N/A" for build-only issues.
+      placeholder: e.g. tvOS 8.4.3
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host-arch
+    attributes:
+      label: Host Mac architecture
+      options:
+        - Apple Silicon (arm64)
+        - Intel (x86_64)
+    validations:
+      required: true
+
+  - type: input
+    id: host-macos
+    attributes:
+      label: Host macOS version
+      description: Output of `sw_vers -productVersion`.
+      placeholder: e.g. 26.0.1
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Blackb0x-- commit
+      description: Output of `git rev-parse HEAD` in the checkout you built.
+    validations:
+      required: true
+
+  - type: textarea
+    id: toolchain
+    attributes:
+      label: Toolchain (for build or authoring issues)
+      description: Output of `clang --version` and `cmake --version`. For authoring issues, also say which old Xcode(s) you used and whether you're running under Rosetta 2.
+      render: text
+
+  - type: dropdown
+    id: firmware-source
+    attributes:
+      label: Firmware suite source
+      options:
+        - Prebuilt, fetched by blackb0x through gh
+        - Baked locally with bake-firmware
+        - Not applicable
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware setup
+      description: How the Apple TV is connected. For example, direct USB-C or through a USB hub (which hub?), whether HDMI and power were connected, and for an AppleTV3,1 whether the Arduino (checkm8-A5) pwned DFU first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran, in order, with flags. Say how many attempts you made and whether you power-cycled the Apple TV between them.
+      placeholder: |
+        1. ./build/blackb0x
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Full terminal output
+      description: Paste the whole output as text, not just the last few lines. **Screenshots of a terminal are not accepted**; they can't be searched or quoted, and issues that only have one will be asked for the text. This field is already rendered as a ``` code block, so don't add backticks. Remove anything private, like ECIDs or UDIDs, if you prefer.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: screen
+    attributes:
+      label: What the TV showed
+      description: If anything appeared on the TV, like the on-screen install log, an Apple logo, or a black screen, describe it or attach a photo.
+
+  - type: dropdown
+    id: ai-use
+    attributes:
+      label: AI use disclosure
+      description: Did you use AI tools for this report, or for the diagnosis or code it's about? Using AI is allowed. Not disclosing it isn't.
+      options:
+        - No AI used
+        - AI assisted (I wrote it, AI helped with parts)
+        - Mostly AI-generated
+    validations:
+      required: true
+
+  - type: textarea
+    id: ai-details
+    attributes:
+      label: AI use details
+      description: Which tool(s), and what each one did, e.g. wrote this text, suggested the cause, wrote a patch, or explained the logs. If you used none, write "None".
+      placeholder: e.g. "Claude Code read the logs and suggested the USB hub cause. I wrote the report myself."
+    validations:
+      required: true
+
+  - type: textarea
+    id: unsure
+    attributes:
+      label: Things I'm unsure of / haven't verified
+      description: |
+        List anything in this report you're guessing at, didn't check yourself, or got from an AI without verifying, such as a suspected cause, the exact firmware version, or whether it happens every time.
+        If there's genuinely nothing, write "nothing". That's a fine answer. Please don't guess to fill this in. "I haven't checked X" is more useful than a confident guess.
+    validations:
+      required: true

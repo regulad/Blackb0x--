@@ -1,0 +1,90 @@
+name: Feature request
+description: Suggest a new feature or an improvement.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before suggesting a change to how the project is built or structured (e.g. Linux support, a GUI, or system dependencies), please read the conventions in [AGENTS.md](https://github.com/regulad/Blackb0x--/blob/master/AGENTS.md). Several of those were decided on purpose, and [docs/HISTORY.md](https://github.com/regulad/Blackb0x--/blob/master/docs/HISTORY.md) explains why.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before filing
+      options:
+        - label: I searched existing issues and this hasn't already been requested.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to happen. Include any implementation ideas if you have them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you've looked at, if any.
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: Which Apple TV models does this affect?
+      multiple: true
+      options:
+        - AppleTV3,2 (A1469)
+        - AppleTV3,1 (A1427)
+        - AppleTV2,1 (A1378)
+        - Host tooling only (no specific device)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you be willing to work on this?
+      options:
+        - "Yes"
+        - Maybe, with guidance
+        - "No"
+
+  - type: dropdown
+    id: ai-use
+    attributes:
+      label: AI use disclosure
+      description: Did you use AI tools to write this request or to come up with the proposal? Using AI is allowed. Not disclosing it isn't.
+      options:
+        - No AI used
+        - AI assisted (I wrote it, AI helped with parts)
+        - Mostly AI-generated
+    validations:
+      required: true
+
+  - type: textarea
+    id: ai-details
+    attributes:
+      label: AI use details
+      description: Which tool(s), and what each one did, e.g. wrote this text, proposed the design, or researched feasibility. If you used none, write "None".
+    validations:
+      required: true
+
+  - type: textarea
+    id: unsure
+    attributes:
+      label: Things I'm unsure of / haven't verified
+      description: |
+        List anything here you're guessing at or haven't checked, e.g. whether it's feasible on this hardware or firmware, or whether a library or package you mention actually works there. Include claims you got from an AI and didn't verify.
+        If there's genuinely nothing, write "nothing". That's a fine answer. Please don't guess to fill this in.
+    validations:
+      required: true

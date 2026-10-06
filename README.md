@@ -68,8 +68,9 @@ To build and run the jailbreak:
 brew install cmake autoconf automake libtool pkg-config gh
 ```
 
-`gh` is GitHub's CLI, and it is what lets `blackb0x` fetch a prebuilt firmware
-suite instead of baking one. Sign in once with `gh auth login`. Without it you
+`gh` is GitHub's CLI, and it is what lets `blackb0x` fetch CI's firmware patches
+and rebuild the suite from Apple's own IPSW instead of baking one. No Apple
+firmware is redistributed; only binary patches against it are. Sign in once with `gh auth login`. Without it you
 can still jailbreak, but you have to bake the firmware yourself, which needs
 root and everything in the next list.
 

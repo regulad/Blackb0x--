@@ -64,3 +64,6 @@
 [submodule "third_party/idevicerestore"]
 	path = third_party/idevicerestore
 	url = https://github.com/libimobiledevice/idevicerestore.git
+[submodule "third_party/bsdiff"]
+	path = third_party/bsdiff
+	url = https://github.com/mendsley/bsdiff.git

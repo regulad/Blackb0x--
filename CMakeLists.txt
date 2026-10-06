@@ -139,6 +139,21 @@ Cflags: -I\${includedir} -include ${DEPS_INCLUDE}/wolfssl/options.h
 # bracket CBPatch.c's Apple-only Mach-O includes, and the portable_macho.h that
 # stood in for them, existed solely to build on Linux. With Linux support
 # removed they are dead weight, so this is plain upstream at a pinned commit.
+# bsdiff/bspatch (mendsley/bsdiff, BSD-2-Clause): the patch format the
+# firmware suite is published in -- see src/FirmwarePatch.hpp. Plain upstream
+# at a pinned commit, compiled straight from the submodule like the patchers
+# below; its two files are a library already (the CLI main()s sit behind
+# BSDIFF_EXECUTABLE/BSPATCH_EXECUTABLE, which stay undefined). bspatch is
+# linked into blackb0x, bsdiff only matters to make-patches, but the pair is
+# a few hundred lines and keeping them together keeps the format in one place.
+add_library(bsdiff STATIC
+    third_party/bsdiff/bsdiff.c
+    third_party/bsdiff/bspatch.c
+    # Upstream's headers name a parameter `new`, so they only compile as C;
+    # this is the C++-includable front for them. See its header.
+    src/BsdiffGlue.c)
+target_include_directories(bsdiff PUBLIC third_party/bsdiff src)
+
 add_executable(CBPatcher
     third_party/CBPatcher/CBPatcher.c
     third_party/CBPatcher/CBPatch.c
@@ -1183,25 +1198,30 @@ add_executable(blackb0x
     src/Patcher.cpp
     src/Personalize.cpp
     # First-party AES-CBC decrypt of a stock iBSS, for the checkm8 boot_client()
-    # route only (Patcher::useStockIBSS()). Uses wolfSSL, not xpwn -- the one
-    # deliberate, narrow decryption in blackb0x. See its own header.
+    # route only (Patcher::useStockIBSS()). Uses wolfSSL, not xpwn. See its
+    # own header.
     src/StockIBSSCrypt.cpp
+    # Rebuilds dist/ from CI's patch bundle plus Apple's own IPSW (unwrap,
+    # bspatch, re-wrap) -- see FirmwarePatch.hpp. Img3Crypt.cpp is the IMG3
+    # unwrap/re-wrap it does that with, shared with the bake tools.
+    src/FirmwarePatch.cpp
+    src/Img3Crypt.cpp
     src/ResourcePath.cpp)
 
-target_include_directories(blackb0x PRIVATE third_party/xpwn/includes)
+target_include_directories(blackb0x PRIVATE third_party/xpwn/includes ${DEPS_INCLUDE})
 
 # NOTE: CBPatcher and iBoot32Patcher are deliberately absent here -- both are
-# GPLv3 and are fork/exec'd as separate binaries instead of linked. See their
+# fork/exec'd as separate binaries instead of linked. See their
 # add_executable() blocks above.
-# No blackb0x_xpwntool and no xpwn here: the jailbreak binary does zero
-# decryption now. Everything that calls xpwntool's decrypt() -- patchiBSS()/
-# patchiBEC()/patchKernel() and bake-firmware's ramdisk baking -- lives in
-# PatcherPatch.cpp/BakeRamdisk.cpp, compiled into bake-firmware only. blackb0x
-# consumes bake-firmware's already-encrypted dist/ output verbatim. It still
-# links idevicerestore_img3, which is only img3 signature-stitching for
-# --stock-securerom personalization (Personalize.cpp), not decryption, and is
-# a standalone static lib with no xpwn dependency of its own.
+# xpwn IS linked, for Img3Crypt.cpp's unwrap/re-wrap only: blackb0x rebuilds
+# dist/ from Apple's IPSW plus CI's patch bundle (FirmwarePatch.cpp) because
+# CI no longer publishes Apple's firmware itself. It patches nothing on its
+# own -- no patcher runs here; the patches were made and verified at bake
+# time. idevicerestore_img3 is separate: img3 signature-stitching for
+# --stock-securerom personalization (Personalize.cpp).
 target_link_libraries(blackb0x PRIVATE
+    xpwn
+    bsdiff
     idevicerestore_img3
     deps::irecovery
     deps::imobiledevice_glue
@@ -1482,6 +1502,45 @@ add_dependencies(bake-iboot
     libplist_ext libfragmentzip_ext libgeneral_ext
     wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
 
+# ---------------------------------------------------------------------------
+# make-patches — turns a finished bake in dist/ into the patch bundle CI
+# publishes instead of dist/ itself (MakePatches.cpp, FirmwarePatch.cpp)
+#
+# Rootless, and execs nothing: unwrap/re-wrap through Img3Crypt.cpp, bsdiff
+# in-process. Patcher.cpp/StockIBSSCrypt.cpp come along only because
+# Img3Crypt.cpp uses Patcher.cpp's img3ValidateFile().
+# ---------------------------------------------------------------------------
+add_executable(make-patches
+    src/MakePatches.cpp
+    src/FirmwarePatch.cpp
+    src/IPSW.cpp
+    src/IPSWDownloader.cpp
+    src/Patcher.cpp
+    src/Img3Crypt.cpp
+    src/StockIBSSCrypt.cpp
+    src/ResourcePath.cpp)
+
+target_include_directories(make-patches PRIVATE third_party/xpwn/includes ${DEPS_INCLUDE})
+
+target_link_libraries(make-patches PRIVATE
+    xpwn
+    bsdiff
+    deps::plist
+    deps::fragmentzip
+    deps::general
+    deps::curl
+    deps::wolfssl
+    ZLIB::ZLIB)
+
+target_link_libraries(make-patches PRIVATE
+    "-framework CoreFoundation"
+    "-framework Security"
+    "-framework SystemConfiguration")
+
+add_dependencies(make-patches
+    libplist_ext libfragmentzip_ext libgeneral_ext
+    wolfssl_ext curl_ext bzip2_ext libpng_ext zlib_ext)
+
 
 # ---------------------------------------------------------------------------
 # apt — a HOST BUILD TOOL, never linked into anything this project ships
@@ -1647,5 +1706,5 @@ add_custom_target(jailbreak
     COMMENT "Built the jailbreak binaries (blackb0x and blackb0x-pwn)")
 
 add_custom_target(authoring
-    DEPENDS bake-firmware bake-kernel bake-iboot apt blackb0x_tests xpwntool iBoot32Patcher CBPatcher
-    COMMENT "Built the authoring tools (bake-firmware, bake-kernel, bake-iboot, vendored apt, tests, xpwntool)")
+    DEPENDS bake-firmware bake-kernel bake-iboot make-patches apt blackb0x_tests xpwntool iBoot32Patcher CBPatcher
+    COMMENT "Built the authoring tools (bake-firmware, bake-kernel, bake-iboot, make-patches, vendored apt, tests, xpwntool)")

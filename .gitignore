@@ -7,6 +7,8 @@ __pycache__/
 # bake-firmware's output (see src/BakeFirmware.cpp) —
 # locally-produced artifacts, not something to check in.
 /dist/
+# make-patches output: the bundle CI publishes instead of dist/.
+/patches/
 
 # entrypoint/'s build assets (Apple's own SDK, etc.) — Apple's copyrighted
 # material, reproducible locally per entrypoint/assets/README.md, not

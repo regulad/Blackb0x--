@@ -94,6 +94,11 @@ bool ramdiskBakeNeeded(const std::string& deviceModel, const std::string& buildI
 // have made the one check that decides whether an image can boot invisible to
 // the binary that actually sends images to the device.
 bool img3ValidateFile(const std::string& path, const char* context);
+// Whether img3ValidateFile() prints its one-line "img3: ... OK" summary on
+// success (failures always print in full). On by default, for the bake tools;
+// FirmwarePatch.cpp's assembleSuite() turns it off while blackb0x rebuilds
+// dist/, since it hash-checks every image anyway and the CLI stays terse.
+void img3SetReportSuccess(bool report);
 bool img3FileHasMagic(const std::string& path);
 
 // ---------------------------------------------------------------------------

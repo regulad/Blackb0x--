@@ -29,8 +29,9 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   and Apple's own system frameworks.** Verify with `otool -L build/blackb0x` after
   any dependency change (`ldd` is the Linux spelling and does not exist here). The
   real, verified output is six lines: CoreFoundation, IOKit, Security,
-  SystemConfiguration, `libSystem.B.dylib`, `libc++.1.dylib`. `bake-firmware` is
-  the same list minus IOKit, which it has no reason to link — it talks to no USB
+  SystemConfiguration, `libSystem.B.dylib`, `libc++.1.dylib` — unchanged by
+  `blackb0x` linking xpwn/bsdiff, which are static. `bake-firmware` and
+  `make-patches` are the same list minus IOKit, which it has no reason to link — it talks to no USB
   device. `blackb0x-pwn` is CoreFoundation, IOKit and `libSystem` only, since it
   links neither wolfSSL nor curl. Nothing should ever appear from `/opt/homebrew`
   or `/usr/local`; that would mean a vendored dependency resolved against a system
@@ -80,7 +81,8 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   `Console.hpp`/`.cpp`, `DeviceManager.hpp`/`.cpp`, `IPSW.hpp`/`.cpp`,
   `IPSWDownloader.hpp`/`.cpp`, `Patcher.hpp`/`.cpp`, `PatcherPatch.cpp`,
   `Img3Crypt.hpp`/`.cpp`, `StockIBSSCrypt.hpp`/`.cpp`, `Personalize.hpp`/`.cpp`,
-  `ResourcePath.hpp`/`.cpp`, `BakeRamdisk.hpp`/`.cpp`, `BakeFirmware.cpp`.
+  `ResourcePath.hpp`/`.cpp`, `BakeRamdisk.hpp`/`.cpp`, `BakeFirmware.cpp`,
+  `FirmwarePatch.hpp`/`.cpp`, `MakePatches.cpp`, `BsdiffGlue.h`/`.c`.
   **`Patcher` is split across two TUs by whether the method patches.**
   `Patcher.cpp` is the no-patch half (baked-component loaders, the `dist/`
   existence check, `useStock*`, and bookkeeping) and links no xpwn `decrypt()`
@@ -89,9 +91,12 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   call `decrypt()` (first-party glue in `src/Img3Crypt.cpp`, built over xpwn's
   public API) and fork/exec the GPL patch tools, and is compiled into
   `bake-firmware` ONLY. The upshot, and the invariant to keep:
-  **the `blackb0x` jailbreak binary links no xpwn and no GPL patch/decrypt
-  code** — not `blackb0x_xpwntool`, not `xpwn`, not the patch tools — and
-  consumes bake-firmware's already-encrypted `dist/` output verbatim.
+  **the `blackb0x` jailbreak binary patches nothing and runs no patch tool** —
+  it sends a `dist/` suite exactly as baked. It *does* link `xpwn` (through
+  `Img3Crypt.cpp`) and `bsdiff`, for one job only: rebuilding `dist/` from CI's
+  patch bundle plus Apple's own IPSW (`FirmwarePatch.cpp`'s `assembleSuite()`),
+  because Apple's firmware is never published — see "Where the firmware comes
+  from" below. Every file it rebuilds must hash-match what the bake produced.
   Everything except the raw iBSS reaches its loader still encrypted and
   img3-wrapped, because iBoot32Patcher defeats only iBoot's
   signature/ticket/KASLR checks, never its img3 parse or AES-decrypt. The
@@ -121,10 +126,9 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   (`xpwntool.{c,h}`, `idevicerestore_img3.{c,h}`, `libplist_compat.c`); all three
   were eliminated in favour of the real submodules:
   - `xpwntool.{c,h}` → first-party `src/Img3Crypt.cpp`, our own `decrypt()` glue
-    over `third_party/xpwn`'s public `AbstractFile` API, compiled into
-    bake-firmware only. GPL-3.0 (derives from / links GPL-3.0 xpwn). Do NOT add
-    it, `xpwn`, or any decrypt path to `blackb0x`'s link line — the jailbreak
-    binary does no decryption. It needs a per-source `${DEPS_INCLUDE}/wolfssl`
+    over `third_party/xpwn`'s public `AbstractFile` API, compiled into the bake
+    tools and, for `FirmwarePatch.cpp`'s IMG3 unwrap/re-wrap only, `blackb0x`.
+    GPL-3.0 (derives from / links GPL-3.0 xpwn). It needs a per-source `${DEPS_INCLUDE}/wolfssl`
     include + `wolfssl/options.h` force-include (set on the bake-firmware
     target), because `<xpwn/nor_files.h>` reaches a bare `<openssl/aes.h>` that
     only resolves to wolfSSL's compat shim.
@@ -267,6 +271,7 @@ statically linked. **Forked** means: patched on our own branch, pushed, pointed 
 | `xpwn` | **regulad/xpwn**@`legacy` | Yes — a wolfSSL AES-CBC buffer over-read fix in `img3.c`, plus disabling the legacy-libusb-0.1-only `pwnmetheus2` subdirectory |
 | `wolfssl`, `curl`, `libzip`, `libpng`, `bzip2`, `zlib` | upstream | No — current HEAD or latest stable tag; none of these existed in the original app |
 | `apt` | **regulad/apt**@`blackb0x`, off Debian's `apt` 2.9.4 tag | Yes — Procursus' own Darwin portability patch set (nine diffs plus `apt-key.diff`, and the three source moves its `makefiles/apt.mk` performs: `private-output.cc`/`algorithms.cc` to `.mm` because both reach into Foundation, and `memrchr.cc` copied into `ftparchive/`), plus one fix of our own: `cacheset.h`'s `Container_iterator` arithmetic operators are `const` now. That last one is not in Procursus' set — `Container_iterator` claims `random_access_iterator_tag`, libc++ on macOS 26 takes it at its word and evaluates `__first - difference_type(1)` on a *const* iterator inside `std::sort`, and six translation units failed to compile without it. **A host build tool, never linked into anything** — it exists so bake-time dependency resolution can use a real solver instead of `scripts/build_deb_cache_experimental_no_container.py`. Needs Homebrew's `berkeley-db@5`, `openssl@3`, `xxhash`, `lz4`, `xz`, `gettext`, `dpkg` (for `Dpkg.pm` on `PERL5LIB`) and julian-klode's `triehash` on `PATH` |
+| `bsdiff` | mendsley/bsdiff (upstream, pinned) | No — plain upstream, BSD-2-Clause. Compiled straight from the submodule into the `bsdiff` static library (linked by `blackb0x` and `make-patches`) — the format CI publishes firmware in, see "Where the firmware comes from". Its headers name a parameter `new`, so they compile only as C; `src/BsdiffGlue.{h,c}` is the C++-includable front rather than a fork. Not historically pinned — it is new, and was taken at upstream HEAD |
 | `CBPatcher` | zzanehip/CBPatcher (upstream, pinned) | No — plain upstream. **Built as a separate EXECUTABLE and fork/exec'd, never linked**, same GPL-3.0 reason as `iBoot32Patcher` below: it was a static library on blackb0x's own link line until that was noticed, which the in-tree copy's missing LICENSE file helped hide. No fork needed — upstream already ships a `main()` whose CLI (`<infile> <outfile> <version> [--nosb]`, nukesb defaulting to 1) is a drop-in for the `patch_kernel()` call this used to link. The old local delta (an `#ifdef __APPLE__` around CBPatch.c's Apple-only Mach-O includes, plus `portable_macho.h` standing in for them) existed only to build on Linux and died with Linux support |
 | `iBoot32Patcher` | **regulad/iBoot32Patcher**@`blackb0x`, off zzanehip/iBoot32Patcher | Yes — two real bug fixes: `patch_kaslr()` fell off the end of a non-void function on every *successful* branch (garbage return read non-zero on x86_64, 0 on arm64, so a real macOS run treated a successful KASLR patch as a hard failure), and `iBootPatcher()` tested its `RSA` argument twice so the `debug` argument was dead and `patch_debug_enabled()` ran whenever the RSA patch was asked for. **Built as a separate EXECUTABLE and fork/exec'd, never linked** — it is GPL-3.0-or-later and blackb0x declares no license, so linking would make blackb0x a GPLv3 derivative. Do not "simplify" it back into a static library |
 
@@ -408,14 +413,30 @@ same fix would apply, but that is a cache rather than build output.
   already exists. If it doesn't, `Cli.cpp` spawns `bake-firmware --only ramdisk` for
   that one tuple in the background. Re-running is cheap: any output that already
   exists is skipped unless you pass `--force`.
-**Where the firmware comes from.** `blackb0x` patches nothing and downloads no
-IPSW on the normal path; it sends a suite out of `dist/`. When one is missing,
-`ensureBakedFirmware()` (`Cli.cpp`) resolves it in a fixed order and stops at the
-first that works: already present, then `gh run download` of the artifact
-`.github/workflows/ci.yml` publishes, then — only if running as root — shelling
+**Where the firmware comes from.** `blackb0x` patches nothing; it sends a suite
+out of `dist/`. When one is missing, `ensureBakedFirmware()` (`Cli.cpp`) resolves
+it in a fixed order and stops at the first that works: already present, then
+rebuilding it from CI's patch bundle, then — only if running as root — shelling
 out to `bake-firmware`. Neither `gh` nor root is the one case that cannot work,
 and it errors with both fixes spelled out rather than a bare failure.
 `$BLACKB0X_ARTIFACT_REPO` overrides which repository's artifacts are pulled.
+
+**Apple's firmware is never published, only patches against it.** CI bakes
+`dist/` as always, then `make-patches` (`src/MakePatches.cpp`,
+`src/FirmwarePatch.hpp`) turns it into a bundle: one mendsley/bsdiff patch per
+modified component, taken between the stock and patched *payloads* inside the
+IMG3 (the decompressed kernel, the HFS+ ramdisk, the raw bootloader), plus a
+`Patches-<device>_<build>.plist` index of SHA-256s at each stage. Components sent
+unmodified (DeviceTree, RestoreLogo) carry no patch — the index says "take
+Apple's". `blackb0x` downloads the `firmware-patches-<device>` artifact, fetches
+each stock image from Apple's IPSW, unwraps (decrypting with `keys/` where
+needed), patches, re-wraps with the stock image as template exactly as the bake
+did, and refuses any file whose hash differs from the bake's. Re-wrapping is
+deterministic, so the rebuilt `dist/` is byte-identical to CI's — verified for
+all three targets, including AppleTV2,1's encrypted images, and re-verified on
+every CI run by `make-patches --check`. Bootloader and kernel patches are a few
+hundred bytes; the ramdisk patch is ~25 MB, and that is the overlay itself:
+none of its literal (bsdiff "extra") data appears in Apple's stock ramdisk.
 
 Nothing is ever re-fetched or re-baked over an existing `dist/` entry, so a
 hand-built suite always wins. This replaced a background `bake-firmware` spawn
@@ -978,8 +999,11 @@ explicitly now (even `LC_MAIN` `entryoff`, plus a 4-byte encoding at `_main`)
 because the hand-rolled `rsbcs` that used to make ARM mode self-enforcing is
 gone. `bake` runs on every push (plus the schedule
 and manual dispatch, but never on a pull request, since it runs the branch's
-code under sudo), one runner per device, and publishes `dist/` as artifacts so
-end users never need root or the authoring toolchain.
+code under sudo), one runner per device, and publishes a patch bundle per
+device (never `dist/` itself — see "Where the firmware comes from") so end
+users never need root or the authoring toolchain. A step after `make-patches`
+refuses the upload if `patches/` holds anything but `.bsdiff` files and the two
+indexes.
 
 Artifacts refresh on the 23rd of every month.
 
@@ -988,7 +1012,7 @@ extra images are pure diagnostics and cost it two more ramdisk bakes per leg.
 That is not thoroughness: a bake needs root, Theos, apt, afsctool and the
 pinned Xcode and takes ~30 minutes, which is exactly the set of requirements
 this job exists to keep off end users' machines — so CI is the *only* way the
-owner can obtain them. They ride along in the `firmware-<device>` artifact and
+owner can obtain them. They rode along in the old `firmware-<device>` artifact and
 the post-bake check asserts both exist and are under the 64 MiB ceiling.
 
 **The vendored dependency builds are cached** (`actions/cache`), because they

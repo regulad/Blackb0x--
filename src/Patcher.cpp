@@ -153,6 +153,8 @@ bool img3FileHasMagic(const std::string& path) {
     return read4 && memcmp(magic, "3gmI", 4) == 0;
 }
 
+static bool g_img3ReportSuccess = true;
+
 bool img3ValidateFile(const std::string& path, const char* context) {
     if (!context) context = "(unspecified)";
 
@@ -295,11 +297,15 @@ bool img3ValidateFile(const std::string& path, const char* context) {
                           actual, expected);
     }
 
-    printf("img3: %s OK (%s: ident '%s', len %llu, fullSize %u, sizeNoPack %u, sigCheckArea %u, tags: %s)\n",
-           fs::path(path).filename().string().c_str(), context, ident.c_str(), (unsigned long long)len, fullSize,
-           sizeNoPack, sigCheckArea, chain.c_str());
+    if (g_img3ReportSuccess) {
+        printf("img3: %s OK (%s: ident '%s', len %llu, fullSize %u, sizeNoPack %u, sigCheckArea %u, tags: %s)\n",
+               fs::path(path).filename().string().c_str(), context, ident.c_str(), (unsigned long long)len,
+               fullSize, sizeNoPack, sigCheckArea, chain.c_str());
+    }
     return true;
 }
+
+void img3SetReportSuccess(bool report) { g_img3ReportSuccess = report; }
 
 // See Patcher.hpp's own comment on why this is a free function, not a
 // Patcher method -- patchRamdisk() below is just its first caller.

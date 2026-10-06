@@ -18,6 +18,7 @@
 
 #include "Console.hpp"
 #include "DeviceManager.hpp"
+#include "FirmwarePatch.hpp"
 #include "IPSW.hpp"
 #include "IPSWDownloader.hpp"
 #include "Patcher.hpp"
@@ -827,9 +828,11 @@ static std::string artifactRepo() {
 //
 //   1. Already baked. Nothing to do -- and nothing is ever re-fetched or
 //      re-baked over an existing suite, so a hand-built dist/ always wins.
-//   2. `gh` on PATH. Download the suite .github/workflows/ci.yml already
-//      published. This is the normal end-user path and is the entire reason
-//      that pipeline exists: no root, no Theos, no apt, no ~30-minute bake.
+//   2. `gh` on PATH. Download the patch bundle .github/workflows/ci.yml
+//      published and rebuild the suite from it plus Apple's own IPSW
+//      (FirmwarePatch.hpp). This is the normal end-user path and is the
+//      entire reason that pipeline exists: no root, no Theos, no apt, no
+//      ~30-minute bake.
 //   3. Running as root. Bake locally, which needs the whole authoring
 //      toolchain but no network beyond Apple's own servers.
 //
@@ -857,9 +860,10 @@ static std::string artifactRepo() {
 // Patcher's baked-component load, as a missing file with no explanation of
 // why it is missing or how to get it.
 //
-// Including the variant here makes a stale dist/ re-fetch instead, which is
-// correct: `gh run download` unpacks the whole artifact and CI publishes the
-// diagnostics alongside everything else, so one fetch satisfies both.
+// Including the variant here makes a stale dist/ fail the presence test
+// rather than pass it. CI publishes no patches for the diagnostics, so the
+// fetch below cannot supply one; the message after it says to bake it
+// locally.
 static bool ensureBakedFirmware(const std::string& deviceModel, const std::string& buildID,
                                 const std::string& extraRamdisk = "") {
     const std::string suffix = "-" + deviceModel + "_" + buildID;
@@ -880,30 +884,20 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
     fflush(stdout);
 
     if (commandExistsOnPath("gh")) {
-        const std::string artifact = "firmware-" + deviceModel;
-        printf("Fetching the prebuilt suite published by CI (%s, artifact %s)...\n",
+        // CI publishes PATCHES, not firmware: Apple's images are rebuilt here
+        // from Apple's own IPSW plus the bundle (see FirmwarePatch.hpp), so
+        // nothing of Apple's is redistributed. dist/ ends up byte-identical to
+        // what CI baked -- assembleSuite() checks every file's hash.
+        const std::string artifact = "firmware-patches-" + deviceModel;
+        printf("Fetching the firmware patches published by CI (%s, artifact %s)...\n",
                artifactRepo().c_str(), artifact.c_str());
         fflush(stdout);
         std::error_code mkEc;
-        fs::create_directories(resolveDistPath(), mkEc);
 
-        // Download into a SCRATCH directory and move the files over, rather
-        // than unpacking straight into dist/.
-        //
-        // `gh run download` has no --clobber/--force and REFUSES to run when
-        // any file it would write already exists -- it fails with "already
-        // exists" naming whichever component it hit first. Unpacking directly
-        // into dist/ therefore only works on a genuinely empty dist/, which is
-        // exactly the case that stopped being the common one when the presence
-        // test started requiring the diagnostic ramdisks: a dist/ from before
-        // they existed now correctly fails present(), reaches this download,
-        // and then collides with its own older files. The user's only recourse
-        // was `rm -rf dist`, which is not something this tool should make
-        // anyone do.
-        //
-        // Staging and moving is also simply more correct: the move is
-        // overwrite-by-default, so a re-fetch refreshes a partial or stale
-        // dist/ in place instead of demanding it be empty first.
+        // Download into a SCRATCH directory, never straight into dist/.
+        // `gh run download` has no --clobber/--force and refuses to run when
+        // any file it would write already exists, and the bundle is an input
+        // to assembleSuite(), not part of dist/ itself.
         const fs::path scratch = fs::path(resolveDistPath()) / ".fetch-tmp";
         fs::remove_all(scratch, mkEc);
         fs::create_directories(scratch, mkEc);
@@ -923,39 +917,18 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
         argv.insert(argv.end(), {"--repo", artifactRepo(), "-n", artifact, "-D", scratch.string()});
         fflush(stdout);
 
-        // It unpacks the artifact's contents directly into -D, and the
-        // artifact is the flat dist/ layout already, so no rearranging.
-        bool fetched = runForeground(argv);
-
-        if (fetched) {
-            std::error_code moveEc;
-            for (const auto& entry : fs::directory_iterator(scratch, moveEc)) {
-                if (moveEc || !entry.is_regular_file()) continue;
-                const fs::path dest = fs::path(resolveDistPath()) / entry.path().filename();
-                // rename() first: same filesystem, atomic, cheap. It fails
-                // across devices, so fall back to a copy that overwrites.
-                std::error_code renameEc;
-                fs::rename(entry.path(), dest, renameEc);
-                if (renameEc) {
-                    std::error_code copyEc;
-                    fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing, copyEc);
-                    if (copyEc) {
-                        fprintf(stderr, "Could not place %s into dist/: %s\n",
-                                entry.path().filename().string().c_str(), copyEc.message().c_str());
-                    }
-                }
-            }
-        }
+        bool fetched = runForeground(argv) &&
+                       fwpatch::assembleSuite(scratch.string(), resolveDistPath(), deviceModel, buildID);
         fs::remove_all(scratch, mkEc);
 
         if (fetched && present()) {
-            printf("Downloaded a complete suite for %s %s.\n", deviceModel.c_str(), buildID.c_str());
+            printf("Rebuilt a complete suite for %s %s.\n", deviceModel.c_str(), buildID.c_str());
             return true;
         }
         fprintf(stderr,
-                "The published artifact did not yield a complete suite for %s %s.\n"
-                "  It may not have been baked for this device/build yet -- see the bake matrix in\n"
-                "  .github/workflows/ci.yml.\n",
+                "Could not rebuild a complete suite for %s %s from CI's patches.\n"
+                "  Either it has not been baked for this device/build yet (see the bake matrix in\n"
+                "  .github/workflows/ci.yml), or Apple's image did not match -- see above.\n",
                 deviceModel.c_str(), buildID.c_str());
         // The common case for this message is now a diagnostic image, not a
         // missing device. CI stopped passing --diagnostic-ramdisks once the
@@ -975,7 +948,7 @@ static bool ensureBakedFirmware(const std::string& deviceModel, const std::strin
         fprintf(stderr,
                 "\nCannot obtain a firmware suite for %s %s. Two ways forward:\n"
                 "\n"
-                "  Download one built by CI (no root, no toolchain):\n"
+                "  Rebuild it from CI's patches (no root, no toolchain):\n"
                 "    install GitHub's CLI and sign in --  brew install gh && gh auth login\n"
                 "    then re-run this command.\n"
                 "\n"

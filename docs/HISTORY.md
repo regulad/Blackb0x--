@@ -7685,3 +7685,86 @@ to catch this class of defect**, so the next such regression will be found the
 same way this one was — by a person on an old machine. A legacy-toolchain CI leg
 is the only thing that actually closes it; until one exists, treat the C++17 pin
 as an unenforced promise rather than a checked one.
+
+## Apple's firmware stopped being published: CI ships patches, blackb0x rebuilds the suite
+
+Until this change the `bake` job uploaded `dist/` as the `firmware-<device>`
+artifact, and `blackb0x` downloaded it with `gh run download`. Nothing of
+Apple's was ever committed to git, but that artifact was a full set of Apple's
+firmware images — patched iBSS/iBEC/kernelcache/ramdisk and verbatim
+DeviceTree/RestoreLogo — downloadable by any signed-in GitHub user for 90
+days. That is redistribution, so it was replaced before it could become a
+problem.
+
+### The scheme
+
+CI still bakes `dist/` exactly as before. `make-patches` then derives a bundle
+from it, and only the bundle is uploaded (`firmware-patches-<device>`):
+
+- one mendsley/bsdiff patch per modified component, taken between the stock and
+  patched **payloads** — the bytes inside the IMG3 container, after decryption
+  and (for the kernelcache) LZSS decompression, i.e. exactly what
+  `Img3Crypt.cpp`'s plain unwrap produces;
+- `Patches-<device>_<build>.plist`: per component, its source path in the IPSW,
+  its mode (`rewrap`, `raw` for the AppleTV3 iBSS that checkm8 uploads as
+  plaintext, or `verbatim`), its `.keys` entry, and SHA-256s of the stock IMG3,
+  the stock payload and the finished `dist/` file;
+- the bake's own `Manifest-<tuple>.txt`.
+
+`blackb0x` (`fwpatch::assembleSuite()`) reverses it: fetch each stock image from
+Apple's IPSW through the existing libfragmentzip downloader, check its hash,
+unwrap, check the payload hash (a wrong or missing key fails here, by name),
+bspatch, re-wrap with the stock image as template exactly as the bake did, and
+place the file into `dist/` only if its hash matches the bake's. The component
+list is copied last, so a partial run never looks like a complete suite.
+
+Patching inside the IMG3 rather than the file is what keeps the patches small
+and Apple-free: for an encrypted image a whole-file diff would be the entire
+ciphertext, and for the kernelcache the LZSS stream changes far beyond the
+patched bytes.
+
+### Measured
+
+`make-patches --check` against run 36516731418's artifacts, with an empty IPSW
+cache so every stock image came from Apple:
+
+| | AppleTV3,2 12H1006 | AppleTV3,1 12H1006 | AppleTV2,1 11D258 |
+|---|---|---|---|
+| iBSS | 101 B (raw) | 103 B | 103 B |
+| iBEC / iBECTether | 402 / 412 B | 405 / 407 B | 297 / 308 B |
+| KernelCache | 247 B | 249 B | 257 B |
+| DeviceTree, RestoreLogo | verbatim | verbatim | verbatim |
+| RestoreRamDisk | 25.5 MB | 25.5 MB | 25.5 MB |
+
+All three rebuilt **byte-identically**, AppleTV2,1's AES-encrypted images
+included — re-wrapping is deterministic (same payload, template, key/IV and
+LZSS code), and the output hash makes that a checked fact on every run.
+
+The ramdisk patch is large because the overlay is. Its bsdiff stream was taken
+apart to check what it carries: of the 25.4 MB of literal ("extra") data, none of
+7,043 non-zero 256-byte samples occurs anywhere in Apple's 16.6 MB stock
+payload, and the 19 MB diff region is 99.5% zero bytes (a diff region stores
+new-minus-old, not either input). The bundle carries the project's own content,
+not Apple's.
+
+### Decisions
+
+- **mendsley/bsdiff for both directions**, not xpwn's built-in BSDIFF40
+  `patch()`. That would have made applying free, but nothing vendored can
+  *produce* BSDIFF40 (macOS ships `bspatch` and no `bsdiff`), and one library on
+  both sides keeps the format in one place. Its headers use `new` as a
+  parameter name and only compile as C, hence `BsdiffGlue.{h,c}` rather than a
+  fork.
+- **`blackb0x` now links xpwn.** The old invariant ("the jailbreak binary links
+  no xpwn") existed to keep decryption out of the shipped binary; it is
+  incompatible with not shipping Apple's bytes, and the owner explicitly
+  accepted the link. What survives is the part that mattered: `blackb0x` runs
+  no patch tool and makes no patch decisions — every file it writes must match
+  a hash the bake recorded. Licensing is unchanged: the project is AGPL-3.0 and
+  was already a combined work with GPL-3.0 wolfSSL. `otool -L` is unchanged too.
+- **No new Homebrew packages.** xpwn, bzip2 and libpng build with CMake from
+  their submodules; `blackb0x` already depended on the bzip2/libpng builds.
+  Verified with a clean `--target jailbreak` build in a fresh build directory.
+- **Breaking for old binaries**: a `blackb0x` from before this change asks for
+  `firmware-<device>`, which is no longer published, and fails with the
+  existing "could not obtain a suite" message. Rebuilding from source fixes it.

@@ -4,7 +4,10 @@
 # apt or a ~30-minute bake to jailbreak a device. bake-firmware produces
 # dist/, blackb0x consumes it, and the two halves have completely different
 # dependency sets -- see CMakeLists.txt's `jailbreak`/`authoring` targets.
-# This publishes dist/ so the authoring half never has to run on their machine.
+# dist/ is Apple's firmware, though, so it is never published. make-patches
+# turns it into a patch bundle (src/FirmwarePatch.hpp) and that is what gets
+# uploaded; blackb0x rebuilds dist/ from it plus Apple's own IPSW, so the
+# authoring half never has to run on their machine.
 name: CI
 
 on:
@@ -514,7 +517,7 @@ jobs:
           set -eux
           # Nothing from Homebrew or /usr/local may reach the final binaries --
           # every dependency is vendored and statically linked.
-          for bin in build/blackb0x build/blackb0x-pwn build/bake-firmware; do
+          for bin in build/blackb0x build/blackb0x-pwn build/bake-firmware build/make-patches; do
             if otool -L "$bin" | grep -qE '/opt/homebrew|/usr/local'; then
               echo "$bin links something outside the system frameworks" >&2
               otool -L "$bin" >&2
@@ -1049,17 +1052,49 @@ jobs:
           # real ramdisk by construction, so one at or over the ceiling would
           # mean the bake did something nobody predicted.
 
+      # dist/ is Apple's firmware and is never uploaded. make-patches derives
+      # the bundle that replaces it: a bsdiff per modified component, taken
+      # between the stock and patched payloads inside the IMG3, plus an index
+      # of hashes. Rootless, and it reads dist/ only. --check then rebuilds
+      # the whole suite from the bundle and Apple's IPSW into an empty
+      # directory -- the exact code path blackb0x runs -- and fails unless
+      # every file is byte-identical to this bake.
+      - name: Make the patch bundle
+        run: |
+          ./build/make-patches --device '${{ matrix.device }}' \
+                               --build '${{ steps.target.outputs.build }}' \
+                               --dist dist --out patches --check
+
+      # What gets published must be ours alone: patches, the index, and the
+      # component list. Anything else in patches/ means a firmware file found
+      # its way in, and the upload is refused rather than trusted.
+      - name: Check the bundle carries no firmware
+        run: |
+          set -eux
+          suffix="-${{ matrix.device }}_${{ steps.target.outputs.build }}"
+          test -s "patches/Patches${suffix}.plist"
+          test -s "patches/Manifest${suffix}.txt"
+          stray=$(find patches -mindepth 1 \( -type d -o \( -type f ! -name '*.bsdiff' ! -name 'Patches-*.plist' ! -name 'Manifest-*.txt' \) \) -print)
+          if [ -n "$stray" ]; then
+            echo "patches/ holds something other than patches:" >&2
+            echo "$stray" >&2
+            exit 1
+          fi
+          ls -l patches
+
       # The artifact name is a contract with ensureBakedFirmware() (Cli.cpp),
-      # which runs `gh run download -n "firmware-<deviceModel>"` -- device only,
-      # no build ID. Do not fold the build into it: one name per device is what
-      # blackb0x asks for, the three device names cannot collide, and keeping
-      # the name stable is what lets the target build move without breaking
-      # every installed copy of blackb0x. The suite inside is what identifies
-      # the build, through its Manifest-<device>_<build>.txt entry.
+      # which runs `gh run download -n "firmware-patches-<deviceModel>"` --
+      # device only, no build ID. Do not fold the build into it: one name per
+      # device is what blackb0x asks for, the three device names cannot
+      # collide, and keeping the name stable is what lets the target build
+      # move without breaking every installed copy of blackb0x. The bundle
+      # inside is what identifies the build, through its
+      # Patches-<device>_<build>.plist index. (It was `firmware-<device>`,
+      # holding dist/ itself, before firmware stopped being published.)
       - uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ matrix.device }}
-          path: dist/
+          name: firmware-patches-${{ matrix.device }}
+          path: patches/
           # Longer than the monthly refresh, so a failed scheduled run still
           # leaves the previous set downloadable.
           retention-days: 90

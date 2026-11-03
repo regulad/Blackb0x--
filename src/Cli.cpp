@@ -785,10 +785,20 @@ static std::string captureCommand(const std::string& command) {
 // ambiguity entirely. `--status success` matters as much as the ordering: the
 // newest run may be in progress or may have failed, and half a bake is not
 // something to hand a device.
+//
+// So does which runs are candidates at all. Unfiltered, `gh run list` spans
+// every workflow in the repository, and the newest success was an
+// auto-assign-issues run -- triggered by the very issue reporting this --
+// which carries no artifacts (issue #4). Restricting to ci.yml is not enough
+// on its own either: its `bake` job is skipped for pull_request events, so a
+// green PR run has no artifacts too. Hence the workflow filter plus the event
+// filter, over enough runs that a burst of PR runs cannot crowd out the last
+// push/schedule/dispatch one.
 static std::string newestSuccessfulRunId(const std::string& repo) {
     return captureCommand("gh run list --repo " + repo +
-                          " --status success --limit 1 --json databaseId "
-                          "--jq '.[0].databaseId' 2>/dev/null");
+                          " --workflow ci.yml --status success --limit 50 --json databaseId,event "
+                          "--jq '[.[] | select(.event != \"pull_request\")][0].databaseId // empty' "
+                          "2>/dev/null");
 }
 
 // fork/exec, wait, report. No shell, same as everywhere else here.

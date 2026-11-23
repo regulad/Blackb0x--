@@ -134,7 +134,8 @@ is already preserved elsewhere, individually, below or in `debcache/`:
   from is still an open question (`.claude/TODO.md` item 1) — worth having
   the real bytes on hand for, independent of the now-retired tarball.
   `orig_untether.bin` (its unpatched 2021-04-17 predecessor, differing in
-  15 branch-immediate bytes) is not duplicated here — recoverable from this
+  15 bytes: a kernel-banner string swap and a patched firmware check, see
+  below) is not duplicated here — recoverable from this
   same tarball via git history (`git show <pre-removal commit>:Blackb0x/Files/tihmstar-untether.tar`) if that comparison needs re-running.
 - `Debs.tar` — originally seeded `debcache/`'s `.deb` set; that
   directory is the real, current source of truth now, not the tarball.
@@ -383,15 +384,22 @@ listing that also holds unrelated payloads.
   <apt@awkwardtv.org>`). Confirmed to actually sign this repo, not just
   claimed: verified with a real `gpg --verify` of `dists/stable/Release`
   against `Release.gpg` using this exact key — "Good signature".
-- `apt/saurik.list` — `deb http://apt.saurik.com/ ios/8.0 main`, saurik's own
+- `apt/saurik.list` (now `package/layout/etc/apt/sources.list.d/saurik.list`)
+  — `deb http://apt.saurik.com/ ios main`, saurik's own
   default Cydia/Telesphoreo repo (this is where `dpkg`, `syslogd`, and most
   of the rest of the base package set in `debcache/` actually came
   from — confirmed, not assumed: `dists/ios/8.0/main/binary-iphoneos-arm/
   Packages` lists `dpkg_1.18.10-12_iphoneos-arm.deb`, byte-identical to what's
-  already vendored here). `ios/8.0` (not `ios/6.0`/`ios/7.0`) specifically:
-  it's the newest of saurik's per-major-iOS-version distributions and, per
-  that same Packages file, still lists all the older packages this project
-  needs — checked directly rather than assumed forward-compatible.
+  already vendored here). The dist is plain `ios`, because apt.saurik.com has
+  no per-version branches: `dists/ios`, `dists/ios/8.0` and a deliberately
+  bogus `dists/ios/99.9` all return a byte-identical `Release` (md5
+  `589082019f22…`) and `main/binary-iphoneos-arm/Packages.bz2` (md5
+  `f47d278bd508…`), and `dists/stable` 404s. That `Release` declares
+  `Codename: ios`, `Suite: stable`, `Components: main`. Naming the dist after
+  its Codename matters because newer apt checks the requested dist against
+  `Suite`/`Codename`; the on-device apt7 is lenient about it. (Checked in
+  f482c69. This entry used to pin `ios/8.0` as the newest per-version branch;
+  those branches don't exist, and the version component is ignored.)
 - `apt/saurik.gpg.key` — Jay Freeman (saurik)'s real signing key. Not re-sourced
   externally: extracted directly from `trusted.gpg` (recovered from
   `ATV-Cydia.tgz`, see above) via `gpg --export`, since Cydia ships this key
@@ -605,9 +613,11 @@ Downloaded all three directly (MD5-verified against the repo's own
   recognized kernel build, add the newest known one, keeping the table's
   total size fixed at 4 entries — consistent with hand-editing a compiled
   fixed-size array, not recompiling with a 5th slot. The remaining 1 byte
-  (offset `0x3301`) is a real code change, `ADDS r6, #0x28` → `ADDS r6,
-  #0x45` (40 → 69 decimal), elsewhere in the binary — not tied to the
-  banner table, and what it actually does is still unexplained. This is
+  (offset `0x3301`) patches the firmware check to pass unconditionally:
+  the instruction at `0x3300` becomes `CMP r0,r0` where the original has
+  `CMP r0,#0`, so the `beq` after it is always taken. An earlier decode
+  here, off by one halfword, read it as `ADDS r6, #0x28` → `#0x45`; see
+  `docs/HISTORY.md`, "Both halves of the untether fit 12H1006". This is
   the same "keep an `orig_` backup, ship a patched copy" pattern this
   project itself uses elsewhere (see `spliceFileContentInPlace()` in
   `BakeRamdisk.cpp`). The tar's own internal file timestamps line up with
@@ -678,7 +688,7 @@ are confirmed byte-identical to tihmstar's own still-live Cydia package, and
 "v0rtex" kernel-harness lineage (source partially public via `jelbrekTime`,
 even though this exact compiled variant isn't). The 15-byte patch itself is
 now fully characterized (see above: 14 bytes are a same-length kernel-banner
-string swap, 1 byte is an unexplained code-immediate tweak elsewhere), and
+string swap, 1 byte makes the firmware check pass unconditionally), and
 an intermediate-official-release hypothesis for the base build is ruled out
 (Wayback Machine shows only two `etasonuntether` releases ever existed,
 `1.3.0`/`1.3.1`, with byte-identical `untether.bin`s). What's still
@@ -686,7 +696,12 @@ genuinely open: the actual origin of the *unpatched* `orig_untether.bin`
 base build itself — bigger than, and only ~33-35% opcode-similar to, either
 currently-published `etasonuntether`/`untetherhomedepot` release, so not a
 recompile of either — and who applied the 15-byte patch (no name/signature/
-commit trail recovered anywhere). See `.claude/TODO.md`.
+commit trail recovered anywhere). Checked for a published source closer to
+this exact target, and ruled out: `tihmstar/v1ntex` and `v3ntex` (unrelated,
+64-bit iOS 11/12-era) and `tihmstar/jbinit` (no AppleTV, 8.4.1 or `S5L8947X`
+references). `jelbrekTime` targets watchOS on armv7k rather than this
+binary's armv7, and `libpatchfinder`'s visible history starts at a June 2023
+squash commit. See `.claude/TODO.md`.
 
 ### Full snapshot of `repo.tihmstar.net`, archived while it's still up
 

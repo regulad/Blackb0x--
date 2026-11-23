@@ -7768,3 +7768,105 @@ not Apple's.
 - **Breaking for old binaries**: a `blackb0x` from before this change asks for
   `firmware-<device>`, which is no longer published, and fails with the
   existing "could not obtain a suite" message. Rebuilding from source fixes it.
+
+## `.claude/TODO.md` retired: open work is in issues, and its findings are here
+
+`.claude/TODO.md` was this project's to-do list: nineteen numbered items, by the
+end mostly a record of finished work. Open work is tracked in GitHub issues now, and
+the file is gone; git history keeps its
+[last version](https://github.com/regulad/Blackb0x--/blob/c70c11b18602067bbefa65483ce177f56701ad78/.claude/TODO.md).
+Most of what it recorded already lives elsewhere. This entry says where, and keeps
+the few findings that lived nowhere else.
+
+| Item | Outcome | Where it is recorded |
+|---|---|---|
+| 1. `untether.bin`'s exact build | Characterized; who built it is unknown | `misc/README.md`, "etasonATV / tihmstar-untether provenance"; "Both halves of the untether fit 12H1006" above |
+| 2. Pushing SSH access | Done, as `scripts/push_authorized_keys.sh` | "Why SSH keys are pushed by a script" below; "SSH key auth: root is correct, and `ssh-dss` was breaking the push script" above |
+| 3. p0sixspwn's postinst | Open | #6 |
+| 4. macOS support for `blackb0x` | Done; Linux support removed | "Reopening macOS support…", "Real-hardware results…" and "Linux support removed" above |
+| 4a. macOS support for the ramdisk baker | Done | "Porting the ramdisk baker to macOS…" above; `BakeRamdisk.cpp`'s header comment |
+| 4b. `blackb0x-pwn` | Done, confirmed on an AppleTV3,2 | "Real-hardware results…" above; `src/Pwn/Checkm8Pwn.c`'s header |
+| 4c. gaster | Removed | "gaster is removed…" above |
+| 5. Patching ahead of time | Done: `blackb0x` patches nothing | "`bake-all-bootloaders`…" and "Apple's firmware stopped being published…" above |
+| 6. Baking every ramdisk configuration | Bootchain half done for all 101 tuples; the `10B329a` fallback's ramdisk is open | `misc/verified_patcher_compatible.txt`; #7 |
+| 7. CI for a prebuilt suite | Done; CI publishes patches, not firmware | AGENTS.md's "CI"; "CI's schedule" below |
+| 8. The firmware-version binding script | Done | `scripts/generate_firmware_versions.py`'s docstring |
+| 9. saurik's dist per target version | Not needed: the server has one dist | f482c69; `misc/README.md`'s `apt/saurik.list` entry |
+| 10. Ramdisk size shedding | Mostly moot since compression | `misc/never_stage_debs.txt`; "Ramdisk size: what's left, and the levers not taken" below |
+| 11. The `xyz.regulad.blackb0x` package | Done (2ff796c) | `package/README.md`; AGENTS.md's "Install-time design" |
+| 12. Kernelcache decrypt failures | Fixed (273267c) | "The kernelcache decrypt failure was the *read* side of the same 16-align bug" above |
+| 13. `--signed-only` | Removed | AGENTS.md, "There is no `--signed-only`" |
+| 14. Deleting Apple's ramdisk content | Measured, rejected | "Ramdisk size: what's left, and the levers not taken" below |
+| 15. Growing the original volume | Done (773c454) | `BakeRamdisk.cpp`'s header comment; AGENTS.md's "Ramdisk sizing" |
+| 16. decmpfs compression | Done | `BakeRamdisk.cpp`; AGENTS.md's `afsctool` bullet; "Ramdisk size: what's left, and the levers not taken" below |
+| 17. Real apt | Done; deleting the old resolver is open | `CMakeLists.txt`'s apt block; `scripts/build_deb_cache_apt.py`; #8 |
+| 18. `packages.txt` conflicts | Fixed | `BakeRamdisk.cpp`'s debcache comment; `scripts/build_deb_cache_apt.py` |
+| 19. CA trust store, Cydia stashing, main-menu appliances | Done | "RESOLVED: HTTPS apt works…", "`/Applications` never gets stashed…" and "RESOLVED: Kodi and nitoTV are back…" above |
+
+### Why SSH keys are pushed by a script
+
+`blackb0x` used to push `~/.ssh/authorized_keys` itself, as an AFC2 write in
+`DeviceManager::pushAuthorizedKeys()` that ran once the jailbreak reported running.
+Doing that right inside `blackb0x` meant solving five things in C++: retries and
+timeouts, creating `.ssh/`, permission bits, host-key reconciliation, and which
+failures are fatal. `scripts/push_authorized_keys.sh` talks to the device's real
+sshd (Cydia's openssh) through `iproxy` instead, which removes each of them:
+
+- Retrying is a TCP-reachability poll in the script.
+- One `ssh` command creates `.ssh/` and sets its modes. The AFC2 write never set
+  permissions at all.
+- `UserKnownHostsFile=/dev/null` with `StrictHostKeyChecking=accept-new` keeps the
+  throwaway `127.0.0.1:<port>` tunnel out of the user's `known_hosts`.
+- It is an optional step with its own exit code, so `blackb0x` cannot fail on it.
+- It needs only openssh running after boot, so it is the same on every device and
+  exploit path.
+
+### CI's schedule
+
+The bake job refreshes the published patches on the 23rd of every month
+(`cron: "0 5 23 * *"`). An earlier draft approximated a 45-day interval with a
+monthly cron plus a job that skipped when the newest artifact was under 45 days old;
+that was more machinery than the problem needed. A monthly run also stays clear of
+GitHub disabling a schedule after 60 days without activity.
+
+Before the workflow first ran, `actionlint` caught a real bug in it: a leading `!`
+on the dyld check disabled `errexit`, so a regression would have passed silently.
+
+### Ramdisk size: what's left, and the levers not taken
+
+Since the staged payload is compressed with `afsctool` before the volume is sized,
+the 64 MiB ceiling has stopped being the binding constraint: AppleTV3,2 `10B329a`
+came out at 30.0 MiB where it had been 70.9 MiB, and the current 12H1006 image is
+about 44.3 MB. `misc/never_stage_debs.txt` lists what is still left out for size,
+and why. Only Kodi remains (`org.xbmc.kodi-atv2`, a 35.12 MiB archive), and it
+missed the `10B329a` budget by about 1.1 MiB. Archive size is the unit that matters
+there, since those `.deb`s are staged into apt's cache and never unpacked at bake
+time.
+
+Two levers were measured and not taken:
+
+- **Deleting Apple's pristine ramdisk content.** While `entrypoint` was
+  freestanding, all it used of Apple's tree was `/dev`, `/mnt1` and
+  `/usr/sbin/nvram` (for `set_auto_boot()`). But `nvram`'s dylib closure is the
+  ramdisk: on an AppleTV3,1 12H606 RestoreRamdisk it is 43 files and 14.22 MiB of a
+  15 MiB volume (CoreFoundation, libobjc, libicucore, IOKit, dyld and all of
+  `/usr/lib/system`). Deleting the rest saves under a megabyte, against the risk of
+  removing something load-bearing that only shows up as a device that won't boot.
+- **Dropping `nvram` itself**, by having the host set `auto-boot` before `bootx`
+  (`sendStockRestoreTail()` already sends `setenv auto-boot false` and `saveenv`).
+  That would make the closure deletable, but it changes the boot chain in a way
+  nothing can verify without hardware, and a mistake there looks like an exploit
+  failure. It also pays less than measured: `entrypoint` is dynamically linked
+  against `/usr/lib/libSystem.B.dylib` now, so dyld and `/usr/lib/system` stay
+  regardless.
+
+One lever was never explored. Bake-time preinstall covers every package not
+excluded by `misc/prebake_package_blacklist.txt`, transitively, rather than only
+what `postinstall.sh` needs before apt works. Leaving the rest as cached `.deb`s
+would shrink the image, but it needs a per-package `Depends:`/`Pre-Depends:` audit
+first, and today's headroom doesn't call for it.
+
+An audit gotcha: `getxattr()` follows symlinks unless passed `XATTR_NOFOLLOW`, and
+the package trees contain absolute symlinks (`/bin/more` → `/usr/bin/less`). Reading
+`com.apple.decmpfs` types without it reads the build host's own LZVN-compressed
+binaries and reports phantom type-8 files.

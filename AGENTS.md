@@ -42,16 +42,15 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   small and clean (`git reset --soft` + re-commit + `git push --force` on that branch
   if it needs cleaning up, not a growing pile of fixup commits). See "Vendored
   dependencies" below for which submodules are already forks and why.
-- **Prefer adapting an existing, battle-tested library over hand-rolling the
-  equivalent.** This has been the deciding factor twice already: a from-scratch
-  lockdownd/AFC client was fully verified working, then deleted in favor of forking
-  real `libimobiledevice` once it became clear that was strictly less code to
-  maintain. Default to this; don't reach for a rewrite first. (The counter-example
-  is worth knowing: the hand-ported `checkm8` USB exploit sequence was once replaced
-  with a shell-out to `gaster`, on exactly this reasoning — and `gaster` was never
-  made to work against an AppleTV3,2 on either Linux 7.1.x or macOS 26, so the
-  hand-port came back as `blackb0x-pwn` and gaster is gone. "Someone else maintains
-  it" is not the same as "it works on this hardware.")
+- **`libimobiledevice` is forked, not rewritten; `checkm8` is hand-ported, not
+  shelled out.** A from-scratch lockdownd/AFC client was fully verified working,
+  then deleted in favor of forking real `libimobiledevice` once it became clear
+  that was strictly less code to maintain. The counter-example is worth knowing:
+  the hand-ported `checkm8` USB exploit sequence was once replaced with a
+  shell-out to `gaster`, on the same reasoning — and `gaster` was never made to
+  work against an AppleTV3,2 on either Linux 7.1.x or macOS 26, so the hand-port
+  came back as `blackb0x-pwn` and gaster is gone. "Someone else maintains it" is
+  not the same as "it works on this hardware."
 - **Terse, single-source CLI output.** Every user-facing message flows through
   `Cli.cpp`'s rendering of `DeviceManager`'s `DeviceEventSink` callbacks
   (`onStatus`/`onProgress`/`onDeviceAdded`/`onDeviceUpdated`/`onDeviceRemoved`) in one
@@ -144,8 +143,8 @@ original macOS Cocoa/Objective-C app (fully ported and deleted — see
   built as separate executables and fork/exec'd, never linked (see the table
   below).
 
-  **Whole-project licensing:** the project is **AGPL-3.0** (`LICENSE.md`, the
-  FSF's text). AGPL-3.0 is compatible with the GPL-3.0 code it links and execs
+  **Whole-project licensing:** the project is **AGPL-3.0**. AGPL-3.0 is
+  compatible with the GPL-3.0 code it links and execs
   (wolfSSL — its vendored `COPYING` is GPLv3 — plus xpwn and the two patchers),
   so `blackb0x` and `bake-firmware` are AGPL-3.0 combined works. Dropping the
   xpwn static link from `blackb0x` (the `Patcher`/`PatcherPatch` split) keeps the

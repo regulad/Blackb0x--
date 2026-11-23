@@ -2,8 +2,8 @@
 
 [![wakatime](https://wakatime.com/badge/github/regulad/Blackb0x--.svg)](https://wakatime.com/badge/github/regulad/Blackb0x--)
 
-Don't eWaste what can still be used! 
- 
+Don't eWaste what can still be used!
+
 Jailbreak tool for the 2nd/3rd-gen Apple TV, via the `checkm8`/`SHAtter` DFU-mode boot
 exploit. Side-loads Cydia (frontend nitoTV) + Kodi.
 
@@ -173,4 +173,3 @@ build artifacts.
 
 **p0sixninja**
 * SHAtter
-

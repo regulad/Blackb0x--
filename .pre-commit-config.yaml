@@ -1,0 +1,29 @@
+default_stages: [pre-commit]
+# The licence text stays exactly as published. debcache/ holds .deb archives
+# (Git LFS) that must never be rewritten. misc/apt/*.gpg.key are third-party
+# armored keys, kept byte-for-byte as exported.
+exclude: '^(LICENSE\.md|debcache/.*|misc/apt/[^/]+\.gpg\.key)$'
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+  # A TODO or FIXME names its GitHub issue, as TODO(#123). Markdown and this
+  # file use the words without being sentinels.
+  - repo: local
+    hooks:
+      - id: todo-needs-issue
+        name: TODO and FIXME name an issue, as TODO(#N)
+        language: pygrep
+        stages: [pre-commit]
+        entry: '\b(TODO|FIXME)\b(?!\(#\d+\))'
+        exclude_types: [markdown]
+        exclude: '^\.pre-commit-config\.yaml$'

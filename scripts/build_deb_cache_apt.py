@@ -13,8 +13,8 @@ BakeRamdisk.cpp's contract is unchanged:
     <output-dir>/apt-lists/             (empty, as before -- see below)
 
 The apt it uses is this project's own vendored build, third_party/apt built
-into build/apt-tools/ (see CMakeLists.txt's apt_ext block and .claude/TODO.md
-item 17). It is NOT the host's apt, and there is no host apt on macOS to fall
+into build/apt-tools/ (see CMakeLists.txt's apt_ext block). It is NOT the
+host's apt, and there is no host apt on macOS to fall
 back to -- Homebrew's formula cannot build on Darwin at all.
 
 WHY THIS CAN DO SOMETHING THE OLD ONE COULD NOT: --firmware-version. The
@@ -294,7 +294,7 @@ def main():
         sys.stderr.write(
             "build_deb_cache_apt.py: WARNING: dropped %d top-level package(s) real apt could not\n"
             "  satisfy against firmware %s. The old resolver installed these silently because it\n"
-            "  compared no versions and honoured no Conflicts:. See .claude/TODO.md item 18.\n"
+            "  compared no versions and honoured no Conflicts:.\n"
             % (len(dropped), args.firmware_version))
         for name, why in dropped:
             sys.stderr.write(f"    {name}: {why}\n")

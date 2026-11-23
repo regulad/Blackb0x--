@@ -129,7 +129,7 @@ void chownToSudoCaller(const std::string& path);
 //
 // NOT the host's apt, and there is no host apt to fall back to: Homebrew's
 // formula cannot build on Darwin (it pulls libcap/systemd/util-linux). See
-// third_party/apt and .claude/TODO.md item 17. Built on demand
+// third_party/apt and CMakeLists.txt's apt block. Built on demand
 // (`cmake --build build --target apt`), not by a default build, so this
 // pointing at something absent is a normal first-run state rather than a bug.
 std::string resolveAptToolsDir();
@@ -158,8 +158,8 @@ std::string resolveDebcachePath();
 // resolveMiscPath() below.
 //
 // These files used to live loose under misc/ and be staged one
-// stageFile() call at a time. They are package payload now -- see package/
-// and .claude/TODO.md item 11.
+// stageFile() call at a time. They are package payload now -- see
+// package/README.md.
 std::string resolvePackagePath(const std::string& relativePath);
 
 // The package/ directory itself (not its layout/ subtree) -- where build.sh

@@ -1573,13 +1573,11 @@ int runCli(const CliOptions& options) {
     }
     fflush(stdout);
 
-    // No hard root requirement: raw DFU/Recovery-mode USB access is a kernel
-    // device-node permission, not something this process can determine in
-    // advance for every possible udev/group setup. Running as root always
-    // works; running as a normal user works too, given the right udev rule
-    // (see README's own setup section) — either way, libirecovery's own
-    // device-open calls are what actually surface a real permission
-    // error, with a real errno behind it, if access genuinely isn't there.
+    // No root requirement: blackb0x reaches a DFU/Recovery-mode device through
+    // IOKit, which needs no special privilege (see AGENTS.md, "Root: blackb0x
+    // needs none"). If access genuinely isn't there, libirecovery's own
+    // device-open calls surface a real permission error, with a real errno
+    // behind it.
 
     // Nothing this tool can ever do succeeds without a baked ramdisk sitting
     // in dist/ for whichever specific device+firmware turns out to be

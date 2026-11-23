@@ -41,7 +41,7 @@
 # 30.0 + 35.12 = 65.1 MiB, roughly 1.1 MiB over the ceiling. The bake
 # hard-fails rather than shipping something unuploadable, so this cannot simply
 # be un-listed. The only route to it is freeing space elsewhere -- see
-# .claude/TODO.md item 14, where dropping /usr/sbin/nvram's 14.22 MiB dylib
-# closure out of the pristine tree would make it fit with room to spare. That
-# is a real behavioural change to the boot chain.
+# docs/HISTORY.md, "Ramdisk size: what's left, and the levers not taken".
+# Dropping /usr/sbin/nvram's dylib closure out of the pristine tree is the
+# candidate there, and it is a real behavioural change to the boot chain.
 org.xbmc.kodi-atv2_

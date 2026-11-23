@@ -2300,7 +2300,7 @@ state-conditional fix landed — reset only when the device's own GETSTATUS
 reports DFU state 8/`dfuMANIFEST-WAIT-RESET` — is a real, spec-grounded fix
 but wasn't confirmed to fully close out the intermittent failure by the time
 this section was written). Rather than keep chasing what may be inherent
-libusb-on-Linux timing behavior, `.claude/TODO.md`'s item 4 (macOS support,
+libusb-on-Linux timing behavior, [`.claude/TODO.md`][retired-todo]'s item 4 (macOS support,
 previously scoped-but-parked) was reopened as the more promising direction:
 run the real chain against gaster's and libimobiledevice's native,
 first-party macOS frameworks instead of a Linux libusb path that's already
@@ -2347,7 +2347,7 @@ Apple-only branches on):
    uses; it does not touch libirecovery's own USB transport, which the rest
    of `DeviceManager.cpp` (`sendiBSS`/`sendiBEC`/etc.) still goes through on
    every platform, and whose Darwin behavior remains genuinely unverified
-   (see `.claude/TODO.md` item 4's "needs real macOS hardware" list).
+   (see [`.claude/TODO.md`][retired-todo] item 4's "needs real macOS hardware" list).
 
 `ResourcePath.cpp`'s `resolveGasterPath()` (now `_NSGetExecutablePath()` +
 `realpath()` behind `#ifdef __APPLE__`) and `DeviceManager.cpp`'s
@@ -2356,7 +2356,7 @@ Apple, matching the file's existing no-`popen()`/no-`system()` convention,
 instead of reading `/proc/<pid>/status`) and `runGaster()`'s `stdbuf`
 requirement (now probes for `gstdbuf` — Homebrew coreutils' default
 prefixed name — as a fallback when plain `stdbuf` isn't on `PATH`) were the
-other three blockers already named in `.claude/TODO.md` item 4; all three
+other three blockers already named in [`.claude/TODO.md`][retired-todo] item 4; all three
 are mechanical platform bridging with no design decision of their own
 worth recording here beyond what that TODO entry already says.
 
@@ -2391,7 +2391,7 @@ this project's actual platform recommendation:
   from an Apple Silicon Mac to the Apple TV was unreliable for
   `blackb0x-pwn`; putting a plain (non-Thunderbolt) USB hub in between made
   it reliable. Not understood *why* — recorded as a practical tip
-  (README.md, `.claude/TODO.md`), not a fixed root cause.
+  (README.md, [`.claude/TODO.md`][retired-todo]), not a fixed root cause.
 - **Linux, meanwhile, remains unreliable — on every real machine tried.**
   This whole "reopen macOS support" effort (see the two entries above) was
   originally prompted by exactly this: real-hardware DFU-state races and
@@ -2521,7 +2521,7 @@ considering for whoever picks this up next:
   jailbroken boot via the patched `dist/*.dmg` ramdisk), since
   `bake-all-ramdisks` is Linux-only today and has never actually been run
   on the macOS host all of this real-hardware testing has been done from
-  — see item 4a in `.claude/TODO.md`, "macOS support for the ramdisk
+  — see item 4a in [`.claude/TODO.md`][retired-todo], "macOS support for the ramdisk
   baker", the next thing being investigated.
 
 ## Porting the ramdisk baker to macOS: `hdiutil` instead of loop-mount, and a portable dependency resolver instead of `apt`
@@ -3034,7 +3034,7 @@ hardware.
 
 ## `bake-all-bootloaders`: pre-patching the non-ramdisk suite, and the two crashes that found
 
-`.claude/TODO.md` item 5 ("Pre-patch firmware components ahead of time")
+[`.claude/TODO.md`][retired-todo] item 5 ("Pre-patch firmware components ahead of time")
 for everything that isn't the ramdisk. `bake-all-bootloaders`
 (`Blackb0x/Source/BakeAllBootloaders.cpp`) downloads and patches iBSS, iBEC,
 KernelCache and DeviceTree for every `(device, buildID)` under
@@ -3123,7 +3123,7 @@ unaffected — the kernelcache always comes from that pinned build, never from
 whatever the device happens to be running. But "the kernel patch works on
 roughly a quarter of the fetchable AppleTV3,2 builds" was previously an
 unexamined assumption, and it is exactly the coverage gap
-`.claude/TODO.md` item 6 exists for.
+[`.claude/TODO.md`][retired-todo] item 6 exists for.
 
 Two things in that table are worth a second look by whoever picks this up.
 The three newest builds (`12H903`/`12H911`/`12H914`) all patch cleanly while
@@ -4039,8 +4039,8 @@ helper — built to chase the consumed-count avenue, which closed.
    one that worked — it produced every `dist/` ramdisk and the 29/29 patch sweep. The
    surviving `hdiutil` path has never been run on real macOS; it was written with no Mac
    available. This was raised before the removal and the decision was reaffirmed, so it
-   is accepted cost, not oversight. `BakeRamdisk.cpp`'s own caveat and `.claude/TODO.md`
-   item 4a still flag it.
+   is accepted cost, not oversight. `BakeRamdisk.cpp`'s own caveat and
+   [`.claude/TODO.md`][retired-todo] item 4a still flag it.
 2. **None of this was build-verified.** The removal was performed on a Linux host, which
    the change itself makes unable to configure the project. Verification was structural
    only: preprocessor nesting balance re-checked to depth 0, no orphaned `static`
@@ -4080,9 +4080,10 @@ predated this. Zero CMake references, and nothing anywhere read `third_party/p0s
 `com.ih8sn0w-squiffy-winocm.p0sixspwn_1.4-1_iphoneos-arm.deb` in `Blackb0x/Debs/`. It was
 added in `c67038e`, the same commit that added that `.deb` and deleted
 `Blackb0x/Files/p0sixspwn.tgz`, so it looks like a reference checkout that never became a
-build input. Note `.claude/TODO.md` item 3 ("Reimplement p0sixspwn's postinst in
-`entrypoint.c`") is still open and that source is exactly what it would want — re-add the
-submodule if that work starts, rather than treating its absence as a decision about item 3.
+build input. Note #6 (item 3 of the retired [`.claude/TODO.md`][retired-todo],
+"Reimplement p0sixspwn's postinst in `entrypoint.c`") is still open and that source is
+exactly what it would want — re-add the submodule if that work starts, rather than
+treating its absence as a decision about it.
 
 **Verified still needed**, recorded so nobody prunes them on a guess: `libgeneral`
 (`libfragmentzip.c:16` includes `<libgeneral/macros.h>`), `libpng` and `bzip2`
@@ -6806,7 +6807,7 @@ after 12H923 (Apple TV Software 7.7) shipped.
 
 Its firmware check is **patched to pass unconditionally**: at `0x3300` it has
 `CMP r0,r0` where a stock build has `CMP r0,#0`, so the `beq` is always taken.
-That single byte is the one `.claude/TODO.md` recorded as "`ADDS r6, #0x28` →
+That single byte is the one [`.claude/TODO.md`][retired-todo] recorded as "`ADDS r6, #0x28` →
 `#0x45` … still unexplained" — the old decode was off by one halfword.
 
 Its 18 hardcoded kernel offsets verify byte-exactly against 12H1006's own
@@ -7773,10 +7774,11 @@ not Apple's.
 
 `.claude/TODO.md` was this project's to-do list: nineteen numbered items, by the
 end mostly a record of finished work. Open work is tracked in GitHub issues now, and
-the file is gone; git history keeps its
-[last version](https://github.com/regulad/Blackb0x--/blob/c70c11b18602067bbefa65483ce177f56701ad78/.claude/TODO.md).
-Most of what it recorded already lives elsewhere. This entry says where, and keeps
-the few findings that lived nowhere else.
+the file is gone; git history keeps its [last version][retired-todo], which the
+older entries above link to. Most of what it recorded already lives elsewhere. This
+entry says where, and keeps the few findings that lived nowhere else.
+
+[retired-todo]: https://github.com/regulad/Blackb0x--/blob/c70c11b18602067bbefa65483ce177f56701ad78/.claude/TODO.md
 
 | Item | Outcome | Where it is recorded |
 |---|---|---|

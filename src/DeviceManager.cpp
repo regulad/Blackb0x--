@@ -1029,8 +1029,8 @@ static const char* mode_to_str(int mode) {
 // libirecovery#50, tr4mpass#61: irecv_get_mode() reports DFU_MODE right
 // after a reconnect that's actually still fully functional as Recovery
 // mode underneath, serial string included) and idevicerestore's own
-// source carrying a literal "TODO: verify if it actually goes from
-// 0x1222 -> 0x1227" comment on this exact transition. Confirmed directly
+// source carrying a comment that it has yet to verify whether it actually
+// goes from 0x1222 -> 0x1227 on this exact transition. Confirmed directly
 // on real hardware here too: --stock-securerom's iBSS send silently took
 // the wrong wire protocol (irecv_send_buffer()'s DFU-vs-Recovery branch
 // is chosen by the SAME misdetected client->mode) because of this.

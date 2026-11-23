@@ -288,9 +288,9 @@ static uint64_t directoryContentSize(const std::string& dir) {
 // cope with hdiutil create possibly emitting UDIF structure. bakeRamdisk()
 // grows and injects into the original volume now instead of rebuilding it, so
 // the original's name, header and format are simply never lost and there is
-// nothing to restore. Referenced by nothing after that change; see
-// .claude/TODO.md item 15 and git history if the AppleTV2,1 4.x
-// recreate-from-scratch case (still unimplemented) ever needs them back.
+// nothing to restore. Referenced by nothing after that change; see 773c454,
+// which removed them, if the AppleTV2,1 4.x recreate-from-scratch case (still
+// unimplemented) ever needs them back.
 
 // Manual PATH search for whether a bare command name resolves to an
 // executable, so a missing external tool is reported up front instead of as an
@@ -2441,12 +2441,12 @@ static bool computeGlobalDebcacheOnce(const std::string& firmwareVersion, Global
     // asked the question, which is precisely why this cache is keyed by
     // firmware version (see this function's own comment above).
     //
-    // --allow-drops: packages.txt is one flat, firmware-independent list, but
-    // a few of its entries are not (the apt7-lib/apt7-ssl conflict, and the
-    // two era-specific persistence payloads). Real apt refuses the whole solve
-    // over them rather than picking; the script drops those top-level entries
-    // one at a time, reporting each to stderr. See .claude/TODO.md item 18 for
-    // fixing packages.txt properly.
+    // --allow-drops stays as a guard. packages.txt is one flat,
+    // firmware-independent list, and it no longer lists apt7-ssl or either
+    // era-specific persistence payload, so nothing trips it today. If an entry
+    // ever stops resolving, real apt would refuse the whole solve over it; the
+    // script drops such top-level entries one at a time and reports each to
+    // stderr instead.
     std::string aptToolsDir = resolveAptToolsDir();
     if (!fs::exists(aptToolsDir + "/apt-get")) {
         fprintf(stderr,
@@ -2930,11 +2930,10 @@ static bool stageIos7Tether(const fs::path& blackb0xRoot) {
 // above (which DOES reach that array now, via local_only_debs.txt, but
 // whose postinst still never runs either, since apt finds it already at
 // the exact held Status/Version stageManualDpkgInstall() wrote and treats
-// the real install as a no-op). Reimplementing that
-// /etc/launchd.conf write is tracked as an open TODO (see .claude/TODO.md)
-// rather than attempted blind here — nobody on this project currently has
-// the 6.1.3/6.1.4-era AppleTV2,1 hardware this branch targets to verify
-// against.
+// the real install as a no-op).
+// TODO(#6): stage that /etc/launchd.conf. Not attempted blind here: nobody
+// on this project currently has the 6.1.3/6.1.4-era AppleTV2,1 hardware this
+// branch targets to verify against.
 static bool stageP0sixspwn(const fs::path& blackb0xRoot) {
     std::string debPath = fs::absolute(resolveDebcachePath() + "/com.ih8sn0w-squiffy-winocm.p0sixspwn_1.4-1_iphoneos-arm.deb").string();
     ExtractedDeb extracted = extractDebAndBuildStanza(debPath, "blackb0x-p0sixspwn-", "6.1.4 untether payload");
@@ -2995,7 +2994,7 @@ static bool stageVersionBranch(const fs::path& blackb0xRoot, const std::string& 
 
 // Builds the real xyz.regulad.blackb0x .deb and installs it into the staged
 // /blackb0x tree, which is what most of this file used to do by hand with a
-// dozen individual stageFile() calls (.claude/TODO.md item 11).
+// dozen individual stageFile() calls.
 //
 // The package needs no state beyond its own package/ tree and the bundled
 // local repo: package/build.sh templates postinstall.sh's install list from
@@ -4338,8 +4337,7 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
     //   unset  -> 64 MiB, hard fail past it.
     //   -1     -> no limit; warn only, exactly the old behaviour. For
     //             deliberately baking an oversized ramdisk to measure it --
-    //             .claude/TODO.md item 10's size-shedding work needs real
-    //             per-tuple sizes, including for the tuples that are over.
+    //             real per-tuple sizes, including for the tuples that are over.
     //   N      -> N MiB, hard fail past it. For a device whose real
     //             ramdisk-size is known to differ.
     //
@@ -4367,8 +4365,8 @@ bool bakeRamdisk(const std::string& path, const std::string& key, const std::str
         fprintf(stderr,
                 "bakeRamdisk: FAILED: finished ramdisk is %llu bytes (%.1f MiB), past the %lld MiB limit.\n"
                 "  A ramdisk this size cannot be uploaded (a real AppleTV3,2 short-writes at exactly 64MiB), so\n"
-                "  this would fail on hardware instead of here. Shed content (kNeverStageDebs in this file, and\n"
-                "  .claude/TODO.md item 10), or set DEBUG_RAMDISK_LIMIT_MIB=-1 to bake it anyway for measurement.\n",
+                "  this would fail on hardware instead of here. Shed content (misc/never_stage_debs.txt), or set\n"
+                "  DEBUG_RAMDISK_LIMIT_MIB=-1 to bake it anyway for measurement.\n",
                 (unsigned long long)finalSize, (double)finalSize / (1024.0 * 1024.0), (long long)limitMiB);
         // Remove it rather than leaving a known-unusable dist/ entry behind:
         // bake-firmware skips targets whose output already exists, so a

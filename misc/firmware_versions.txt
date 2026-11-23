@@ -9,7 +9,6 @@
 #
 # GENERATED FILE — do not hand-edit. Regenerate with:
 #   scripts/generate_firmware_versions.py [--verify]
-# (.claude/TODO.md item 8: this used to be a hand-collected snapshot.)
 #
 # Format: one line per tuple, space-separated:
 #   <device> <buildID> <version>

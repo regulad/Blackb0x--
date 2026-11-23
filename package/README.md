@@ -1,7 +1,7 @@
 # `package/` — the real `xyz.regulad.blackb0x` .deb
 
 Everything blackb0x installs on the device, as one actual package instead of
-loose files dpkg has no record of (`.claude/TODO.md` item 11).
+loose files dpkg has no record of.
 
 Before this, `stageBlackb0xTree()` (`BakeRamdisk.cpp`) copied blackb0x's own
 content onto the ramdisk with plain `stageFile()` calls — the apt source

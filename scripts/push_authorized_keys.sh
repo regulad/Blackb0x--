@@ -4,8 +4,9 @@
 # writing your own ~/.ssh/authorized_keys onto it.
 #
 # blackb0x itself no longer does this (it used to, over a hand-rolled AFC2
-# write in DeviceManager::pushAuthorizedKeys() — see docs/HISTORY.md/the
-# TODO list for why that got pulled out into this script instead). Once the
+# write in DeviceManager::pushAuthorizedKeys() — see docs/HISTORY.md, "Why
+# SSH keys are pushed by a script", for why that got pulled out into this
+# script instead). Once the
 # jailbreak finishes booting, Cydia's own openssh package is already running
 # real sshd on the device, reachable over usbmuxd exactly like any other
 # service blackb0x talks to — so this just forwards a local TCP port to the

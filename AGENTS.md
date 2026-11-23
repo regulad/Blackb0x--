@@ -376,12 +376,11 @@ same fix would apply, but that is a cache rather than build output.
     `hdiutil create -srcfolder` here: that was a porting error, it cost ~19 MiB by
     decompressing Apple's files, and it silently baked the wrong ownership.
     The overlay it injects is the `xyz.regulad.blackb0x` package plus the debcache,
-    and the output is `dist/RestoreRamDisk-<device>_<buildID>.dmg`. **This path has still
-    never been run end to end on real macOS** — the mechanism above was verified
-    piece by piece against real decrypted ramdisks, but no complete bake has run;
-    see `BakeRamdisk.cpp`'s caveat and `.claude/TODO.md` items 4a and 15. Stays
-    in-process, unlike the bootchain half, because the debcache and the `entrypoint/`
-    build are resolved once and shared across every target.
+    and the output is `dist/RestoreRamDisk-<device>_<buildID>.dmg`. It runs on every
+    CI bake leg, and the AppleTV3,2 12H1006 ramdisk it produces installs on hardware
+    (see "The ramdisk boot bisect" below). Stays in-process, unlike the bootchain
+    half, because the debcache and the `entrypoint/` build are memoized across
+    targets (per firmware version and per device model respectively).
 
   `--device`/`--build` narrow a run to one model or one build. `--only bootchain`
   skips the entrypoint build and the debcache entirely, which is the fast loop for
@@ -406,12 +405,9 @@ same fix would apply, but that is a cache rather than build output.
 
   The overlay is fully static (no per-device secrets get baked in), so each patched
   output is valid for every device on that firmware; there's no reason to re-derive
-  it on every `blackb0x` run. `blackb0x` never invokes the bootchain half at all (it
-  still patches those four components live — `.claude/TODO.md` item 5), and for the
-  ramdisk `Patcher::patchRamdisk()` just checks whether the `dist/` entry it needs
-  already exists. If it doesn't, `Cli.cpp` spawns `bake-firmware --only ramdisk` for
-  that one tuple in the background. Re-running is cheap: any output that already
-  exists is skipped unless you pass `--force`.
+  it on every `blackb0x` run. `blackb0x` runs `bake-firmware` only as the root-only
+  last resort described under "Where the firmware comes from" below. Re-running is
+  cheap: any output that already exists is skipped unless you pass `--force`.
 **Where the firmware comes from.** `blackb0x` patches nothing; it sends a suite
 out of `dist/`. When one is missing, `ensureBakedFirmware()` (`Cli.cpp`) resolves
 it in a fixed order and stops at the first that works: already present, then
@@ -472,7 +468,7 @@ the build shells out to it any more.)
   resolve correctly and the right persistence payload gets picked per target.
   It replaced `scripts/build_deb_cache_experimental_no_container.py`, which is
   still present and still passes its tests but is no longer wired into
-  anything; see `.claude/TODO.md` items 17 and 18.
+  anything; its removal is #8.
 - `afsctool` on `$PATH` (`brew install afsctool`) — `bake-firmware`'s ramdisk half
   HFS+-compresses the staged `/blackb0x` payload with it, and hard-fails without it.
   Not optional: the first real bake of `AppleTV3,2` 10B329a finished at 70.9 MiB
@@ -556,16 +552,12 @@ the build shells out to it any more.)
     clean against an SDK stub proves nothing about what the device exports,
     and the gap between those two is exactly the silent-death class this
     project keeps finding.
-  - **OPEN DEFECT, in `src/` and not owned by `entrypoint/`:**
-    `BakeFirmware.cpp`'s `main()` still calls `buildEntrypointBinary()` ONCE
-    before its per-firmware loop and does not set `DEVICE`, so a multi-device
-    `bake-firmware` run splices one binary, built against one SDK, into every
-    device's ramdisk. That was correct while the binary linked no SDK. The
-    call has to move inside the per-firmware loop with `DEVICE=<model>` in
-    the child's environment; both that file and `BakeRamdisk.cpp` carry
-    comments marking the exact lines. CI is unaffected (one device per bake
-    leg, `DEVICE` exported into the job environment), and
-    `verifyEntrypointRuntimeClosure()` is the loud backstop until it lands.
+  - **One `entrypoint` per device model.** `BakeFirmware.cpp`'s `main()`
+    builds it with `DEVICE=<model>` in the child's environment and memoizes
+    it per model (`entrypointBinaryFor()`), so a multi-device `bake-firmware`
+    run gives each device's ramdisk a binary built against that device's SDK.
+    It used to build one binary before the per-firmware loop, which was
+    correct only while the binary linked no SDK.
   - This bullet used to say the Xcode Command Line Tools were enough, and
     before that it demanded a `cctools-port` build of
     `arm-apple-darwin11-clang` against an iPhoneOS 6.1 SDK from a 1.7GB
@@ -679,7 +671,7 @@ replicated onto the real device by `entrypoint.c`'s `merge_tree()` at boot.
    `package/build.sh`, which produces a real `xyz.regulad.blackb0x` `.deb` with
    Theos's `dm.pl`, then installs it into the staged tree the same way
    `stageEtasonatv()` does — extract, merge payload, append a real dpkg status stanza.
-   This replaced a dozen hand-rolled `stageFile()` calls (`.claude/TODO.md` item 11).
+   This replaced a dozen hand-rolled `stageFile()` calls.
    `postinstall.sh`'s `__BLACKB0X_PACKAGES__` placeholder is templated by `build.sh`
    from `package/packages.txt` itself — deliberately *not* from this bake's resolved
    closure, so the package needs no bake state and stays independently buildable. It
@@ -698,9 +690,10 @@ replicated onto the real device by `entrypoint.c`'s `merge_tree()` at boot.
    be actively misleading on-device). So `stageAptListsCache()` stages a real path
    with no package index behind it, and **an offline `apt-get install` has no
    candidate for anything** — see `postinstall.sh` below for the consequence.
-8. **Build the entrypoint binary once.** `BakeFirmware.cpp`'s `main()` calls
-   `buildEntrypointBinary()` before its per-firmware loop, same pattern as the
-   debcache cache, and passes the one built path into every `bakeRamdisk()` call.
+8. **Build the entrypoint binary once per device model.** `BakeFirmware.cpp`'s
+   `main()` builds it with `DEVICE=<model>` set and memoizes it per model, the
+   same pattern as the debcache cache, and passes that model's path into each of
+   its `bakeRamdisk()` calls.
 
 ### Persistence payloads
 
@@ -1127,12 +1120,13 @@ Also worth knowing, both verified here rather than assumed:
   `irecv_usb_control_transfer_ex` being undeclared. Delete that
   ExternalProject's stamps rather than reading the error literally.
 
-**The ramdisk baker's macOS path is still unverified end to end**, but less of it is
-unverified than before. Three of its four pieces now run here:
+**The ramdisk baker's macOS path now runs end to end:** every CI bake leg runs it, and
+the AppleTV3,2 12H1006 ramdisk it produces installs on hardware (see "The ramdisk boot
+bisect"). At the time of that first build, three of its four pieces ran:
 
 - **Bootchain**: a real sweep over the five then-currently-signed builds downloaded,
   decrypted and patched iBSS, iBEC and DeviceTree with zero failures. That was five of
-  95 known tuples; the full sweep is still `.claude/TODO.md` item 6.
+  95 known tuples; all 101 have since been swept (`misc/verified_patcher_compatible.txt`).
 - **Debcache**: the portable resolver walks all 107 real archives and resolves 60
   top-level packages to 68 files, after the `ar`/`tar` fixes above.
 - **`entrypoint/`**: builds and produces a correct artifact. (At the time of
@@ -1140,9 +1134,11 @@ unverified than before. Three of its four pieces now run here:
   off the stock toolchain; it is a pinned-toolchain armv7
   `LC_MAIN`/libSystem binary now — see the pinned-Xcode bullet above.) The
   cross-toolchain it used to need is no longer needed at all.
-- **`hdiutil` volume creation**: still never executed. This is the remaining gap, and
-  its two flagged unknowns stand — the exact `-fs "Case-sensitive HFS+"` argument,
-  and whether `hdiutil create -format UDRW -layout NONE` really emits flat raw bytes.
+- **`hdiutil` volume creation**: not yet executed then. The bake no longer creates a
+  volume at all: it grows Apple's original in place (see "Ramdisk sizing"), so both
+  of the unknowns flagged then went with it — the exact `-fs "Case-sensitive HFS+"`
+  argument, and whether `hdiutil create -format UDRW -layout NONE` emits flat raw
+  bytes.
 
 One incidental `hdiutil` finding from mounting real ramdisks by hand: a bare HFS+
 volume with no partition map needs `-imagekey diskimage-class=CRawDiskImage`, or
@@ -1175,24 +1171,15 @@ it constrains any future redesign of the install entry point:
   measured away (the whole closure is `/usr/lib/libSystem.B.dylib`, whose
   re-export targets are 22/22 and 32/32 present on the two ramdisks).
 
-**Three of five signed builds fail at kernelcache decrypt, and it is not a macOS
-regression.** `AppleTV2,1` 10B809 and 11D258 and `AppleTV3,2` 12H606 all die in
-xpwn's `createAbstractFileFromComp()`, while `AppleTV3,1` 10B809 and 12H606 succeed.
-The correlation is exact: every failing build's IMG3 `DATA` tag has a `dataSize` that
-is not a multiple of 16, and the only passing one is block-aligned. `Patcher.cpp`
-already fails these cleanly rather than crashing, so the sweep survives them. Two
-things are worth recording for whoever picks this up:
-
-- `img3.c`'s decrypt and encrypt lengths are asymmetric — `setKeyImg3()` uses
-  `((header->size - sizeof(AppleImg3Header)) / 16) * 16` while `closeImg3()` uses
-  `(header->dataSize / 16) * 16`. Changing the decrypt side to match the encrypt side
-  was tried and **does not fix it**; it changes the decompressed length without
-  reaching the claimed one. The padded-tag-size form appears to be right, since Apple
-  pads the encrypted payload up to the block boundary and the tag has exactly that
-  much room.
-- The LZSS stream decompresses to within ~50-70 bytes of its claimed length, so the
-  bulk decrypts correctly and only the tail is wrong. That rules out a simply-wrong
-  key.
+**Kernelcache decrypt used to fail on most builds, and it was not a macOS
+regression.** `AppleTV2,1` 10B809 and 11D258 and `AppleTV3,2` 12H606 all died in
+xpwn's `createAbstractFileFromComp()`. xpwn's IMG3 reader filled only `dataSize`
+bytes of the `DATA` element while `setKeyImg3()` decrypted the whole 16-aligned body,
+so the final cipher block decrypted to garbage and the LZSS stream came up a few dozen
+bytes short. Fixed on the read side in `regulad/xpwn@legacy` (submodule bump
+273267c); 66 of 101 known tuples flip to success with it. See `docs/HISTORY.md`, "The
+kernelcache decrypt failure was the *read* side of the same 16-align bug", and the
+`kernel-readfix` column of `misc/verified_patcher_compatible.txt`.
 
 The `DEBUG_`-prefixed knobs in `blackb0x-pwn` (`DEBUG_CANCEL_DELAY_US`,
 `DEBUG_OVERWRITE_TIMEOUT_MS`, `DEBUG_RECONNECT_ATTEMPTS`, `DEBUG_KEEP_CONNECTION`,

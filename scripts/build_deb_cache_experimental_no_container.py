@@ -4,8 +4,8 @@ build_deb_cache_experimental_no_container.py — EXPERIMENTAL, portable
 (no podman, no container, no network) stand-in for build_deb_cache.py's
 own picklist.txt/resolved_packages.txt generation, for platforms where
 containerization is genuinely unavailable (this exists specifically for
-macOS — see .claude/TODO.md item 4a and docs/HISTORY.md's own entry on
-why: podman/all container runtimes were confirmed unavailable there, and
+macOS — see docs/HISTORY.md's own entry on why: podman/all container
+runtimes were confirmed unavailable there, and
 neither MacPorts nor Fink provide a usable native real-apt-get on Apple
 Silicon).
 

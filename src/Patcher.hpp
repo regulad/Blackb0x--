@@ -47,9 +47,10 @@
 //  trustworthy for this — don't reach for them here. See patchRamdisk()'s own
 //  comment in Patcher.cpp for the full investigation.
 //
-//  Note the loop-mount path was the VERIFIED one: it produced every dist/
-//  ramdisk and the 29/29 patch sweep. The hdiutil path above has never run
-//  against real hardware. See .claude/TODO.md item 4a.
+//  The loop-mount path was the verified one at the time: it produced every
+//  dist/ ramdisk and the 29/29 patch sweep. The hdiutil path has since
+//  replaced it: every CI bake goes through it, and its AppleTV3,2 12H1006
+//  ramdisk installs on hardware (AGENTS.md, "The ramdisk boot bisect").
 //
 
 #pragma once

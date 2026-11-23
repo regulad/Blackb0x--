@@ -22,13 +22,10 @@
 //  skip-unless---force rule — was duplicated verbatim between the two files
 //  and is now written once.
 //
-//  Neither half is what blackb0x itself runs against a live device:
-//  Patcher::patchRamdisk() only checks whether the dist/ entry it needs
-//  already exists, and Cli.cpp spawns this tool (`--only ramdisk`, one
-//  tuple) in the background if it doesn't. The bootchain half is
-//  `.claude/TODO.md` item 5 — blackb0x still patches those four components
-//  live, inside the window the device is already sitting in pwned DFU, even
-//  though everything this tool produces is knowable ahead of time.
+//  Neither half is what blackb0x itself runs against a live device.
+//  blackb0x patches nothing: it sends a dist/ suite exactly as baked,
+//  rebuilt from CI's patch bundle when one is missing, and runs this tool
+//  only as a root-only last resort (Cli.cpp's ensureBakedFirmware()).
 //
 //  It is also the only way to exercise Patcher::patchiBSS()/patchiBEC()/
 //  patchKernel() — and therefore the iBoot32Patcher binary they fork/exec —
@@ -292,9 +289,8 @@ static TargetResult bakeBootchainInProcess(const std::string& device, const std:
     // kernelcache,devicetree} -- a directory per tuple, plus a separate
     // dist/<device>_<buildID>-Ramdisk.dmg sitting outside it. Two layouts for
     // one firmware suite, with the ramdisk the odd one out. One flat directory
-    // keyed by component and tuple is easier to glob, easier to publish
-    // (.claude/TODO.md item 7), and puts every artifact for a tuple next to
-    // its siblings.
+    // keyed by component and tuple is easier to glob, easier to publish, and
+    // puts every artifact for a tuple next to its siblings.
     const std::string outDir = outRoot;
     const std::string tupleSuffix = std::string("-") + device + "_" + buildID;
 

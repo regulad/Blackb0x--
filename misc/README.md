@@ -131,7 +131,8 @@ is already preserved elsewhere, individually, below or in `debcache/`:
   `untether.bin` builds (`etasonuntether-1.3.1`'s or
   `untetherhomedepot`'s — see "etasonATV / tihmstar-untether provenance"
   below), and where this specific 43,680-byte compiled build actually came
-  from is still an open question (`.claude/TODO.md` item 1) — worth having
+  from is still an open question (see "etasonATV / tihmstar-untether
+  provenance" below) — worth having
   the real bytes on hand for, independent of the now-retired tarball.
   `orig_untether.bin` (its unpatched 2021-04-17 predecessor, differing in
   15 bytes: a kernel-banner string swap and a patched firmware check, see
@@ -701,7 +702,7 @@ this exact target, and ruled out: `tihmstar/v1ntex` and `v3ntex` (unrelated,
 64-bit iOS 11/12-era) and `tihmstar/jbinit` (no AppleTV, 8.4.1 or `S5L8947X`
 references). `jelbrekTime` targets watchOS on armv7k rather than this
 binary's armv7, and `libpatchfinder`'s visible history starts at a June 2023
-squash commit. See `.claude/TODO.md`.
+squash commit.
 
 ### Full snapshot of `repo.tihmstar.net`, archived while it's still up
 

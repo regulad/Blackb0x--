@@ -1309,10 +1309,11 @@ add_test(NAME RamdiskOverlayTests
 #
 # The single ahead-of-time baker: downloads and patches the whole firmware
 # suite for every (device, firmware) combination under keys/ —
-# iBSS/iBEC/KernelCache/DeviceTree into dist/bootchain/, and the jailbreak
-# ramdisk into dist/. Not invoked by blackb0x for the bootchain half (that is
-# .claude/TODO.md item 5, still done live); Cli.cpp does spawn it with
-# `--only ramdisk` when a live run finds the dist/ entry it needs missing.
+# iBSS/iBEC/KernelCache/DeviceTree and the jailbreak ramdisk, as flat
+# dist/<Component>-<device>_<buildID> entries. blackb0x runs it only as a last
+# resort: when a suite is missing and CI's patch bundle can't rebuild it,
+# Cli.cpp's ensureBakedFirmware() runs it as root (see AGENTS.md, "Where the
+# firmware comes from").
 #
 # This was two targets, bake-all-ramdisks and bake-all-bootloaders. The split
 # existed because the Linux ramdisk bake loop-mounted a real HFS+ image and
@@ -1552,8 +1553,7 @@ add_dependencies(make-patches
 # docstring). Nothing links against apt; bake-firmware execs it, the same way
 # it already execs iBoot32Patcher and CBPatcher.
 #
-# WHY A SUBMODULE AND A FORK: see .claude/TODO.md item 17 for the full trail.
-# The short version is that saurik's apt7 (the 0.7.25.3 the device itself runs)
+# WHY A SUBMODULE AND A FORK: saurik's apt7 (the 0.7.25.3 the device itself runs)
 # is unobtainable -- git.saurik.com is down, telesphoreo.org is gone, and the
 # GitHub user "apt7" is an unrelated person's coursework -- and Homebrew's apt
 # formula cannot build on Darwin because it pulls libcap/systemd/util-linux.

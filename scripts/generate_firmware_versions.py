@@ -8,7 +8,7 @@ queries, range-fetched the BuildManifest.plists, and cross-checked AppleDB by
 hand, then wrote the answers down. The answers were right, but nothing could
 reproduce them -- adding a tuple to keys/ meant redoing that
 research by hand or leaving the file stale. This script is that research,
-checked in and rerunnable (.claude/TODO.md item 8).
+checked in and rerunnable.
 
 Why the binding exists at all: bake-time dependency resolution has to evaluate
 packages whose Depends: is gated on a firmware version range (`Depends:
@@ -216,7 +216,6 @@ def render(rows, verify, notes):
     add("#")
     add("# GENERATED FILE — do not hand-edit. Regenerate with:")
     add("#   scripts/generate_firmware_versions.py [--verify]")
-    add("# (.claude/TODO.md item 8: this used to be a hand-collected snapshot.)")
     add("#")
     add("# Format: one line per tuple, space-separated:")
     add("#   <device> <buildID> <version>")

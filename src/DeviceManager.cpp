@@ -1288,6 +1288,8 @@ int DeviceManager::sendiBEC(const std::string& iBECpath, uint64_t ecid) {
     // DFU fix above) -- like checkm8's own post-payload reconnect, a device
     // that just started executing freshly-uploaded code can take longer to
     // re-enumerate than get_tv()'s own plain ~6-second retry budget.
+    // Allow USB enumeration to settle after iBSS.
+    sleep(3);
     irecv_client_t client = get_tv_patient(ecid);
     if (!client) {
         fprintf(stderr, "sendiBEC: device did not reconnect for %s\n", iBECpath.c_str());
